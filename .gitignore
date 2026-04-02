@@ -1,0 +1,34 @@
+### OS generated files ###
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+### IDEs and Editors ###
+.idea/
+.vscode/
+*.swp
+*.swo
+
+### Logs and Temp files ###
+*.log
+*.tmp
+*.bak
+*~
+
+### Backup files ###
+*.zip
+*.tar
+*.tar.gz
+
+### Secrets ###
+secrets/
+
+### AI agent workspaces ###
+.agents/
+
+### Project specific ignores ###
+ext/
