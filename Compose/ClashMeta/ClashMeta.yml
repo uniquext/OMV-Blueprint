@@ -1,0 +1,47 @@
+# Clash Meta UI 面板 + mihomo 内核堆栈
+# 端口说明：
+#   - 7890: 混合代理端口 (HTTP/SOCKS5)
+#   - 9090: mihomo 内核 API 端口
+#   - 8080: UI 面板 Web 访问端口 (OMV 访问地址：IP:8080)
+
+services:
+  # ==========================================
+  # 1. mihomo 内核服务 (显式代理枢纽)
+  # ==========================================
+  mihomo:
+    image: metacubex/mihomo:latest
+    container_name: mihomo
+    hostname: mihomo
+    restart: unless-stopped
+    ports:
+      - "7890:7890"  # HTTP/SOCKS 混合代理端口
+      - "9090:9090"  # 面板 API 端口 (给 UI 和浏览器调用)
+    environment:
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+    volumes:
+      # 核心配置目录 (Service Local 产出层)
+      # 包含手动编写的 config.yaml 及引擎动态生成的缓存模块
+      - ./config:/root/.config/mihomo
+
+  # ==========================================
+  # 2. metacubexd UI 前端服务
+  # ==========================================
+  clash-ui:
+    image: ghcr.io/metacubex/metacubexd:latest
+    container_name: clash-ui
+    hostname: clash-ui
+    restart: unless-stopped
+    ports:
+      - "${CLASH_UI_PORT}:${CLASH_UI_PORT}"
+    environment:
+      PUID: ${PUID}
+      PGID: ${PGID}
+      PORT: ${CLASH_UI_PORT}
+      TZ: ${TZ}
+
+networks:
+  default:
+    name: clash-bridge
+    driver: bridge

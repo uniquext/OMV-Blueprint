@@ -1,0 +1,55 @@
+# ==============================================================================
+# Clash Meta 基础配置示例 (脱敏)
+# ==============================================================================
+# 由于 mihomo 容器强依赖本文件来进行初次启动。
+# 为防止灾备初次部署时找不到配置而无限重启，提供此基础骨架。
+# 请通过 Web UI 覆写或手动在此处配置。
+
+mixed-port: 7890
+allow-lan: true
+bind-address: '*'
+mode: rule
+log-level: info
+ipv6: false
+
+external-controller: 0.0.0.0:9090
+secret: '<请修改为你的面板管理密码>'
+
+dns:
+  enable: true
+  # 取消 TUN 模式后，完全无需在宿主机的 1053 裸奔监听外部 DNS 发包
+  # listen: 0.0.0.0:1053
+  ipv6: false
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  nameserver:
+    - https://dns.alidns.com/dns-query
+    - https://doh.pub/dns-query
+
+# 代理提供商 (HTTP 订阅模式)
+proxy-providers:
+  Subscribe:
+    type: http
+    url: "<请在此处填写您的机场 HTTP 订阅链接>"
+    interval: 86400  # 每天自动更新一次订阅 (秒)
+    path: ./proxy_providers/subscribe.yaml
+    health-check:
+      enable: true
+      interval: 600 # 每10分钟测速一次
+      url: http://www.gstatic.com/generate_204
+
+proxy-groups:
+  - name: Proxy
+    type: select
+    use:
+      - Subscribe # 动态引用从机场拉取的节点
+    proxies:
+      - DIRECT    # 备用直连选项
+
+rules:
+  - GEOSITE,cn,DIRECT
+  - GEOIP,cn,DIRECT
+  - MATCH,Proxy
