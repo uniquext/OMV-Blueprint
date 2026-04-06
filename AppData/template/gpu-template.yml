@@ -1,0 +1,24 @@
+# ==============================================================================
+# OMV 全局 GPU 复用模板 (gpu-template.yml)
+# ==============================================================================
+# 使用说明：
+# 在具体的服务 (如 Jellyfin.yml) 中通过 extends 引用此模板。
+# 这样只需在一处管理 NVIDIA 的复杂配置，避免各服务间重复粘贴。
+# ==============================================================================
+
+services:
+  nvidia-runtime:
+    # --- 资源预留配置 ---
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    # --- 变量透传配置 ---
+    # 此处解决了您提到的质疑：将 global.env 中的变量真正注入到容器中
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES}

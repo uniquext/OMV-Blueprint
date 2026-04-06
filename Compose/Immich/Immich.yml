@@ -1,0 +1,97 @@
+# Immich - 高性能自托管照片与视频管理
+# 官方安装指南：https://docs.immich.app/install/docker-compose/
+# 端口：2283
+
+services:
+  immich-server:
+    container_name: ${SERVER_HOSTNAME}
+    hostname: ${SERVER_HOSTNAME}
+    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
+    volumes:
+      - ${LOCALTIME_PATH}:${LOCALTIME_PATH}:ro
+      - ${UPLOAD_LOCATION}:/usr/src/app/upload
+    environment:
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+      # 显式指定重命名后的服务主机名与凭据
+      DB_HOSTNAME: ${DB_HOSTNAME}
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${IMMICH_DB_PASSWORD}
+      DB_DATABASE_NAME: ${DB_DATABASE_NAME}
+      REDIS_HOSTNAME: ${REDIS_HOSTNAME}
+      # 代理信任配置
+      IMMICH_TRUSTED_PROXIES: ${IMMICH_TRUSTED_PROXIES}
+    ports:
+      - 2283:2283
+    depends_on:
+      - ${REDIS_HOSTNAME}
+      - ${DB_HOSTNAME}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2283/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  immich-machine-learning:
+    extends:
+      file: ${NVIDIA_GPU_TEMPLATE}
+      service: nvidia-runtime
+    container_name: ${ML_HOSTNAME}
+    hostname: ${ML_HOSTNAME}
+    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-release}
+    volumes:
+      - ./model-cache:/cache
+    environment:
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+      REDIS_HOSTNAME: ${REDIS_HOSTNAME}
+      HF_ENDPOINT: https://hf-mirror.com
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  immich-redis:
+    container_name: ${REDIS_HOSTNAME}
+    hostname: ${REDIS_HOSTNAME}
+    image: docker.io/redis:6.2-alpine
+    environment:
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+    restart: unless-stopped
+    healthcheck:
+      test: redis-cli ping || exit 1
+
+  immich-postgres:
+    container_name: ${DB_HOSTNAME}
+    hostname: ${DB_HOSTNAME}
+    # 使用 tensorchord 镜像以支持向量插件
+    image: docker.io/tensorchord/pgvecto-rs:pg14-v0.2.0
+    environment:
+      POSTGRES_PASSWORD: ${IMMICH_DB_PASSWORD}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_DB: ${DB_DATABASE_NAME}
+      # 保持开启数据防静默损坏
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+    volumes:
+      # 数据库持久化存储 (引用变量 DB_DATA_LOCATION)
+      - ${DB_DATA_LOCATION}:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  default:
+    name: immich_network
