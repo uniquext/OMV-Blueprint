@@ -40,7 +40,8 @@ services:
       service: nvidia-runtime
     container_name: ${ML_HOSTNAME}
     hostname: ${ML_HOSTNAME}
-    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-release}
+    shm_size: '4gb'
+    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-release}-cuda
     volumes:
       - ./model-cache:/cache
     environment:
