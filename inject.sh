@@ -12,7 +12,7 @@
 #   - 系统全局：同步注入 /etc/environment，确保服务和 Cron 任务均能读取。
 #
 # 使用方式：
-#   sudo bash inject.sh secrets/private.env
+#   sudo bash inject.sh private.env
 # ==============================================================================
 
 set -euo pipefail
@@ -24,7 +24,7 @@ CHECK="${GREEN}[✓]${RESET}"; ERROR="${RED}[✗]${RESET}"; INFO="${BLUE}[i]${RE
 # ─── 参数校验 ─────────────────────────────────────────────────────────────────
 if [ $# -lt 1 ]; then
     echo -e "${ERROR} 错误: 请提供配置文件路径。"
-    echo -e "${INFO} 用法: sudo bash inject.sh secrets/private.env"
+    echo -e "${INFO} 用法: sudo bash inject.sh private.env"
     exit 1
 fi
 
