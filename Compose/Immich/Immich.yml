@@ -10,6 +10,7 @@ services:
     volumes:
       - ${LOCALTIME_PATH}:${LOCALTIME_PATH}:ro
       - ${UPLOAD_LOCATION}:/usr/src/app/upload
+      - ${PHOTO_EXTERNAL_LIBRARY}:/usr/src/app/external:ro
     environment:
       PUID: ${PUID}
       PGID: ${PGID}

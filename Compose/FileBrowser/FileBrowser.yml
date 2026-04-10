@@ -1,0 +1,27 @@
+# FileBrowser - 轻量级 Web 界面文件管理器
+# 端口: 8081 -> 80 (Bridge 模式映射)
+
+services:
+  filebrowser:
+    image: filebrowser/filebrowser:v2-s6 # s6 镜像版本天然支持 PUID/PGID 设置
+    container_name: filebrowser
+    hostname: filebrowser
+    restart: unless-stopped
+    ports:
+      - "8081:80"
+    environment:
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+      FB_PORT: 80
+      FB_DATABASE: /database/filebrowser.db # 数据库生成路径
+      FB_ROOT: /srv
+    volumes:
+      # 本地时间同步
+      - ${LOCALTIME_PATH}:/etc/localtime:ro
+      # 数据库文件目录 (Service Local)
+      - ./database:/database
+      # 配置文件目录 (Service Local)
+      - ./config:/config
+      # 媒体资源挂载 (Resource)
+      - ${CLOUD_PATH}:/srv
