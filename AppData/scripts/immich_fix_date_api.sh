@@ -1,15 +1,24 @@
 #!/bin/bash
+
 # ==============================================================================
-# 方案一：通过 Immich API 修正已入库资产的日期 (immich_fix_date_api.sh)
-# 作用：对 Immich 中 EXIF 日期为空的资产，从文件名中解析日期，通过 API 更新 localDateTime。
-# 新增：支持指定目标日期，只处理该日期下的资产（无论EXIF日期是否为空）
-# 用法：sh immich_fix_date_api.sh [-s IP:端口] [-k API_KEY] [-a 相册名(可选)] [-d 日期(可选)] [--dry-run]
-# 参数说明：
-#   -s: Immich服务器地址 (IP:端口)
-#   -k: API密钥
-#   -a: 相册名称（可选，不指定则扫描全库）
-#   -d: 目标日期，格式：YYYY-MM-DD（可选，只处理该日期的资产）
-#   --dry-run: 试运行模式，不实际更新
+# Immich 日期修复工具 - 方案一：API 远程更新 (immich_fix_date_api.sh)
+# ==============================================================================
+# 当前脚本作用：对 Immich 中 EXIF 日期为空的资产，从文件名中解析日期，通过 API 更新 localDateTime。
+# 核心逻辑：扫描 Immich 资产 -> 跳过已有 EXIF 日期的资产 -> 从文件名解析日期 -> 列表确认 -> API 批量更新。
+# 匹配准则：支持 YYYYMMDD、YYYY-MM-DD、YYYY_MM_DD 及毫秒级 Unix 时间戳等文件名格式。
+# 扩展功能：支持指定目标日期（-d），只处理该日期下的资产（无论 EXIF 日期是否为空）。
+#
+# 用法：bash immich_fix_date_api.sh [-s IP:端口] [-k API_KEY] [-a 相册名] [-d 日期] [--dry-run]
+# 参数：
+#   -s [IP:端口]       Immich 服务器地址（缺省时交互式输入）
+#   -k [API_KEY]       Immich API 密钥（缺省时交互式输入）
+#   -a [相册名]        仅处理指定相册内的资产（可选，不指定则扫描全库）
+#   -d [日期]          目标日期，格式 YYYY-MM-DD（可选，只处理该日期的资产）
+#   --dry-run          仅预览操作，不实际更新（强烈建议首次使用时加上）
+# 示例：
+#   bash immich_fix_date_api.sh --dry-run -s 192.168.1.100:2283 -k your_api_key
+#   bash immich_fix_date_api.sh -s 192.168.1.100:2283 -k your_api_key -a 澄宝宝
+#   bash immich_fix_date_api.sh -s 192.168.1.100:2283 -k your_api_key -d 2024-03-16
 # 依赖：curl, jq
 # ==============================================================================
 
@@ -29,11 +38,12 @@ while [[ $# -gt 0 ]]; do
         -d) TARGET_DATE="$2"; shift 2 ;;
         *)
             echo "❌ 未知参数: $1"
-            echo "用法: sh immich_fix_date_api.sh [-s IP:端口] [-k API_KEY] [-a 相册名] [-d 日期] [--dry-run]"
+            echo "用法: bash immich_fix_date_api.sh [-s IP:端口] [-k API_KEY] [-a 相册名] [-d 日期] [--dry-run]"
             exit 1 ;;
     esac
 done
 
+# --- 交互式补全 ---
 if [ -z "$IMMICH_HOST" ]; then read -p "[请输入 Immich 地址 (IP:端口)]: " IMMICH_HOST; fi
 if [ -z "$API_KEY" ];    then read -s -p "[请输入 Immich API Key]: " API_KEY; echo ""; fi
 
@@ -76,10 +86,10 @@ parse_date_from_filename() {
 }
 
 echo ""
-echo "🔍 正在扫描 Immich 资产，请稍候..."
 echo "============================================================"
+echo "🔍 正在扫描 Immich 资产，请稍候..."
 
-# 验证目标日期格式（如果提供）
+# --- 验证目标日期格式（如果提供）---
 if [ -n "$TARGET_DATE" ]; then
     if ! [[ "$TARGET_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
         echo "❌ 日期格式错误，请使用 YYYY-MM-DD 格式"
@@ -149,7 +159,7 @@ else
     done
 fi
 
-# 解析并分类资产
+# --- 解析并分类资产 ---
 while IFS= read -r asset; do
     [ -z "$asset" ] && continue
     ASSET_ID=$(echo "$asset" | jq -r '.id')
@@ -171,7 +181,7 @@ while IFS= read -r asset; do
             continue
         fi
     fi
-    
+
     PARSED=$(parse_date_from_filename "$FNAME")
     if [ -z "$PARSED" ]; then
         ((NO_DATE++))
@@ -209,7 +219,8 @@ done
 echo ""
 
 if $DRY_RUN; then
-    echo "⚠️  [DRY-RUN 模式] 已列出，不执行实际更新。"
+    echo "⚠️  [DRY-RUN 模式] 仅预览，不执行实际更新。"
+    echo "    确认无误后，去掉 --dry-run 参数重新运行以实际更新。"
     exit 0
 fi
 
@@ -221,7 +232,7 @@ fi
 
 # --- 阶段三：执行更新 ---
 echo ""
-echo "� 开始更新..."
+echo "🚀 开始更新..."
 UPDATED=0
 for i in "${!ASSET_IDS[@]}"; do
     curl -sf -X PUT "$BASE_URL/assets/${ASSET_IDS[$i]}" \

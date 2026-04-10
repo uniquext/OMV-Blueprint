@@ -17,7 +17,7 @@
 #   [待清理目标目录]     将在这个目录中查找并删除同名文件
 #   [基准目录N]          保留这些目录中的文件作为比对标准
 # 示例：
-#   sh dup_clean_drop_first.sh --dry-run /mnt/Wait_To_Delete /mnt/Keep_A /mnt/Keep_B
+#   bash dup_clean_drop_first.sh --dry-run /mnt/Wait_To_Delete /mnt/Keep_A /mnt/Keep_B
 # ==============================================================================
 
 # --- 解析 --dry-run 参数 ---
@@ -30,7 +30,7 @@ fi
 # --- 检查路径参数数量 ---
 if [ "$#" -lt 2 ]; then
     echo "❌ 缺少参数！至少需要提供 2 个路径。"
-    echo "用法: sh dup_clean_drop_first.sh [--dry-run] [待清理目标目录] [基准目录1] [基准目录2] ..."
+    echo "用法: bash dup_clean_drop_first.sh [--dry-run] [待清理目标目录] [基准目录1] [基准目录2] ..."
     exit 1
 fi
 

@@ -17,7 +17,7 @@
 #   [基准目录]  保留该目录中的所有文件，同名文件仅此处保留
 #   [目录N]    其中与基准目录同名的文件将被删除
 # 示例：
-#   sh dup_clean_keep_first.sh --dry-run /mnt/Cache/DCIM /mnt/Media/DCIM
+#   bash dup_clean_keep_first.sh --dry-run /mnt/Cache/DCIM /mnt/Media/DCIM
 # ==============================================================================
 
 # --- 解析 --dry-run 参数 ---
@@ -30,7 +30,7 @@ fi
 # --- 检查路径参数数量 ---
 if [ "$#" -lt 2 ]; then
     echo "❌ 缺少参数！至少需要提供 2 个路径。"
-    echo "用法: sh dup_clean_keep_first.sh [--dry-run] [基准目录] [目录2] [目录3] ..."
+    echo "用法: bash dup_clean_keep_first.sh [--dry-run] [基准目录] [目录2] [目录3] ..."
     exit 1
 fi
 

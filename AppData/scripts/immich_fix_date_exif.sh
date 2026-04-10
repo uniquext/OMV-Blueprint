@@ -1,9 +1,21 @@
 #!/bin/bash
+
 # ==============================================================================
-# 方案二：通过 exiftool 写入本地文件 EXIF 日期 (immich_fix_date_exif.sh)
-# 作用：对本地目录中没有 DateTimeOriginal 的文件，从文件名解析日期，写入 EXIF。
-#       使用 -P 参数保留文件系统时间，默认保留 _original 备份文件。
-# 用法：sh immich_fix_date_exif.sh [-d 目录路径] [--dry-run] [--no-backup]
+# Immich 日期修复工具 - 方案二：EXIF 本地写入 (immich_fix_date_exif.sh)
+# ==============================================================================
+# 当前脚本作用：对本地目录中没有 DateTimeOriginal 的文件，从文件名解析日期，通过 exiftool 写入 EXIF。
+# 核心逻辑：扫描目录 -> 跳过已有 EXIF 日期的文件 -> 从文件名解析日期 -> 列表确认 -> 批量写入。
+# 匹配准则：支持 YYYYMMDD、YYYY-MM-DD、YYYY_MM_DD 及毫秒级 Unix 时间戳等文件名格式。
+# 写入策略：使用 -P 参数保留文件系统时间，默认保留 _original 备份文件。
+#
+# 用法：bash immich_fix_date_exif.sh [-d 目录路径] [--dry-run] [--no-backup]
+# 参数：
+#   -d [目录路径]      待处理的照片目录路径（缺省时交互式输入）
+#   --dry-run          仅预览操作，不实际写入（强烈建议首次使用时加上）
+#   --no-backup        不保留 exiftool 的 _original 备份文件
+# 示例：
+#   bash immich_fix_date_exif.sh --dry-run -d /mnt/Cache/DCIM
+#   bash immich_fix_date_exif.sh -d /mnt/Cache/DCIM --no-backup
 # 依赖：exiftool
 # ==============================================================================
 
@@ -19,7 +31,7 @@ while [[ $# -gt 0 ]]; do
         -d) TARGET_DIR="$2"; shift 2 ;;
         *)
             echo "❌ 未知参数: $1"
-            echo "用法: sh immich_fix_date_exif.sh [-d 目录路径] [--dry-run] [--no-backup]"
+            echo "用法: bash immich_fix_date_exif.sh [-d 目录路径] [--dry-run] [--no-backup]"
             exit 1 ;;
     esac
 done
@@ -29,7 +41,11 @@ if [ -z "$TARGET_DIR" ]; then
     read -p "[请输入待处理的照片目录路径]: " TARGET_DIR
 fi
 
-if [ ! -d "$TARGET_DIR" ]; then echo "❌ 找不到目录: $TARGET_DIR"; exit 1; fi
+# --- 校验目录是否存在 ---
+if [ ! -d "$TARGET_DIR" ]; then
+    echo "❌ 找不到目录: $TARGET_DIR"
+    exit 1
+fi
 
 # --- 依赖检查 ---
 if ! command -v exiftool &>/dev/null; then
@@ -70,8 +86,8 @@ parse_date_from_filename() {
 }
 
 echo ""
-echo "🔍 正在扫描目录: $TARGET_DIR"
 echo "============================================================"
+echo "🔍 正在扫描目录: $TARGET_DIR"
 
 # --- 阶段一：扫描并收集待修改项 ---
 declare -a TARGET_FILES=()
@@ -123,7 +139,8 @@ done
 echo ""
 
 if $DRY_RUN; then
-    echo "⚠️  [DRY-RUN 模式] 已列出，不执行实际写入。"
+    echo "⚠️  [DRY-RUN 模式] 仅预览，不执行实际写入。"
+    echo "    确认无误后，去掉 --dry-run 参数重新运行以实际写入。"
     exit 0
 fi
 
