@@ -18,10 +18,15 @@ OMV/
 │   │   ├── ClashMeta.yml
 │   │   ├── config/              # mihomo 配置文件
 │   │   └── emergency_bypass.sh  # 代理紧急避险脚本
-│   ├── global.env               # 全局环境变量（UID/GID/时区/路径/GPU）
-│   └── Immich/                  # 相册管理堆栈
-│       ├── Immich.env
-│       └── Immich.yml
+│   ├── FileBrowser/             # 文件管理器堆栈
+│   │   └── FileBrowser.yml
+│   ├── Immich/                  # 相册管理堆栈
+│   │   ├── Immich.env
+│   │   └── Immich.yml
+│   ├── Jellyfin/                # 媒体服务器堆栈
+│   │   ├── Jellyfin.env
+│   │   └── Jellyfin.yml
+│   └── global.env               # 全局环境变量（UID/GID/时区/路径/GPU）
 ├── docs/                        # 部署文档（按阶段编号）
 │   ├── 01-系统安装.md
 │   ├── 02-基础环境优化.md
@@ -29,7 +34,9 @@ OMV/
 │   ├── 04-系统扩展与容器层构建.md
 │   ├── 05-容器与应用服务/       # 各服务的详细配置文档
 │   │   ├── ClashMeta/说明.md
+│   │   ├── FileBrowser/说明.md
 │   │   ├── Immich/说明.md
+│   │   ├── Jellyfin/说明.md
 │   │   └── 说明.md              # 服务总索引
 │   └── 06-常见问题与故障排除.md
 ├── inject.sh                    # 系统级环境变量注入工具
@@ -69,6 +76,8 @@ OMV/
 | 05 | **[容器与应用库总索引](docs/05-容器与应用服务/说明.md)** | 🚧 施工中 |
 | 05-1 | [Clash Meta 显式代理网关](docs/05-容器与应用服务/ClashMeta/说明.md) | ✅ |
 | 05-2 | [Immich 高性能相册管理](docs/05-容器与应用服务/Immich/说明.md) | ✅ |
+| 05-3 | [FileBrowser 轻量级文件管理器](docs/05-容器与应用服务/FileBrowser/说明.md) | ✅ |
+| 05-4 | [Jellyfin 媒体服务器](docs/05-容器与应用服务/Jellyfin/说明.md) | ✅ |
 
 ---
 
