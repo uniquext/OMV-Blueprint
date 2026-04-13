@@ -21,8 +21,7 @@ services:
       PGID: ${PGID}
       TZ: ${TZ}
     volumes:
-      # 核心配置目录 (Service Local 产出层)
-      # 包含手动编写的 config.yaml 及引擎动态生成的缓存模块
+      - ${LOCALTIME_PATH}:/etc/localtime:ro
       - ./config:/root/.config/mihomo
 
   # ==========================================
@@ -40,8 +39,9 @@ services:
       PGID: ${PGID}
       PORT: ${CLASH_UI_PORT}
       TZ: ${TZ}
+    volumes:
+      - ${LOCALTIME_PATH}:/etc/localtime:ro
 
 networks:
   default:
-    name: clash-bridge
-    driver: bridge
+    name: clashmeta_network

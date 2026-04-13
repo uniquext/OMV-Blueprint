@@ -29,6 +29,7 @@ secrets/
 
 ### AI agent workspaces ###
 .agents/
+.trae/
 
 ### Project specific ignores ###
 ext/

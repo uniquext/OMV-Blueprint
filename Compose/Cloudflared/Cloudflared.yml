@@ -1,0 +1,18 @@
+# Cloudflared - Cloudflare Tunnel 穿透客户端
+# 端口: 无固定监听端口 (Host 模式，建立加密隧道)
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    hostname: cloudflared
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+    volumes:
+      - ${LOCALTIME_PATH}:/etc/localtime:ro
+      - ./config:/home/nonroot/.cloudflared
+    command: tunnel run --token ${CF_TUNNEL_TOKEN}

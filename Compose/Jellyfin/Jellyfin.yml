@@ -30,6 +30,7 @@ services:
       # 设置此变量为宿主机的真实内网 IP，让 Jellyfin 向外广播正确的访问地址
       # JELLYFIN_PublishedServerUrl: "http://${HOST_IP}:${JELLYFIN_PORT}"
     volumes:
+      - ${LOCALTIME_PATH}:/etc/localtime:ro
       # - ${DRI}:/dev/dri # 若确有 Intel 核心显卡并需双核显支持可取消此挂载的注释
       - ${FONT}:/usr/share/fonts
       - ${COMPOSE_DATA_PATH}/scripts:/scripts

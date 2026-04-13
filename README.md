@@ -78,6 +78,7 @@ OMV/
 | 05-2 | [Immich 高性能相册管理](docs/05-容器与应用服务/Immich/说明.md) | ✅ |
 | 05-3 | [FileBrowser 轻量级文件管理器](docs/05-容器与应用服务/FileBrowser/说明.md) | ✅ |
 | 05-4 | [Jellyfin 媒体服务器](docs/05-容器与应用服务/Jellyfin/说明.md) | ✅ |
+| 05-5 | [Cloudflared Cloudflare Tunnel 穿透客户端](docs/05-容器与应用服务/Cloudflared/说明.md) | ✅ |
 
 ---
 
