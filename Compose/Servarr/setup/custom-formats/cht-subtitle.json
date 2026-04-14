@@ -1,0 +1,29 @@
+{
+  "name": "Language: Chinese Traditional (CHT)",
+  "specifications": [
+    {
+      "name": "CHT",
+      "implementation": "ReleaseTitleSpecification",
+      "negate": false,
+      "required": false,
+      "fields": [
+        {
+          "name": "value",
+          "value": "\\b(CHT|繁体|繁中|BIG5|繁日|TC)\\b"
+        }
+      ]
+    },
+    {
+      "name": "Traditional Chinese",
+      "implementation": "ReleaseTitleSpecification",
+      "negate": false,
+      "required": false,
+      "fields": [
+        {
+          "name": "value",
+          "value": "\\b(Traditional.?Chinese|Chi_Trad)\\b"
+        }
+      ]
+    }
+  ]
+}

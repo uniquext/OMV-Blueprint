@@ -1,0 +1,215 @@
+# ==============================================================================
+# Servarr 媒体自动化管理工具链 (Automated Media Management Stack)
+# ==============================================================================
+# 描述：
+#   基于 Sonarr, Radarr 等核心组件构建的自动化媒体生命周期管理方案。
+#   实现从：媒体搜索 -> 索引抓取 -> 自动下载 -> 属性刮削 -> 字幕匹配 -> 质量同步 的全流程闭环。
+#
+# 端口占用汇总：
+#   - 基础支撑层:
+#     - 8191 (FlareSolverr): 爬虫验证码突破代理
+#     - 8082 (qBittorrent Web UI): 下载客户端管理界面
+#     - 6881 (qBittorrent BT/UDP): BT 下载数据传输端口
+#   - 核心管理层:
+#     - 9696 (Prowlarr): 全局索引器同步与管理
+#     - 8989 (Sonarr): 剧集(TV Shows)自动化管理
+#     - 7878 (Radarr): 电影(Movies)自动化管理
+#     - 6969 (Whisparr): 成人媒体自动化管理
+#   - 后处理与辅助层:
+#     - 6767 (Bazarr): 字幕自动化搜寻与精准匹配
+#     - 5055 (Jellyseerr): 跨平台媒体订阅与请求发现
+#   - 工具/同步层:
+#     - Recyclarr: 无 Web UI，基于 CLI 同步 TRaSH 最佳质量实践配置
+#
+# 数据挂载逻辑：
+#   - ./config: 服务运行时生成的动态配置与数据库 (Service Local 层)
+#   - ${RESOURCE}/Media: 海量媒体库物理存放路径 (Resource 层)
+#   - ${RESOURCE}/Downloads: 临时与持久化下载目录 (Resource 层)
+# ==============================================================================
+
+# 代理环境变量锚点：需要代理的服务通过 <<: *proxy-env 合并，qBittorrent 不引用
+x-proxy-env: &proxy-env
+  HTTP_PROXY: ${PROXY_HTTP}
+  HTTPS_PROXY: ${PROXY_HTTPS}
+  NO_PROXY: ${NO_PROXY}
+
+services:
+  # 1. 爬虫代理 (辅助支撑)
+  flaresolverr:
+    image: flaresolverr/flaresolverr:latest
+    container_name: ${FLARESOLVERR_HOSTNAME}
+    hostname: ${FLARESOLVERR_HOSTNAME}
+    shm_size: '2gb'
+    environment:
+      <<: *proxy-env
+      LOG_LEVEL: ${LOG_LEVEL}
+      TZ: ${TZ}
+    ports:
+      - "${FLARESOLVERR_PORT}:8191"
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    restart: unless-stopped
+
+  # 2. 索引器管理 (媒体源管理)
+  prowlarr:
+    image: linuxserver/prowlarr:latest
+    container_name: ${PROWLARR_HOSTNAME}
+    hostname: ${PROWLARR_HOSTNAME}
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    environment:
+      <<: *proxy-env
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+      FLARESOLVERR_ADDR: ${FLARESOLVERR_HOSTNAME}:8191
+    volumes:
+      - ./config/prowlarr:/config
+    ports:
+      - "${PROWLARR_PORT}:9696"
+    restart: unless-stopped
+
+  # 3. 下载客户端 (核心支撑) — 不走代理，BT 流量必须直连
+  qbittorrent:
+    image: linuxserver/qbittorrent:latest
+    container_name: ${QBITTORRENT_HOSTNAME}
+    hostname: ${QBITTORRENT_HOSTNAME}
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    environment:
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+      WEBUI_PORT: ${QBITTORRENT_PORT}
+    volumes:
+      - ./config/qbittorrent:/config
+      - ${RESOURCE}/Downloads:/downloads
+    ports:
+      - "${QBITTORRENT_PORT}:${QBITTORRENT_PORT}"
+      - "${QBITTORRENT_BT_PORT}:${QBITTORRENT_BT_PORT}"
+      - "${QBITTORRENT_BT_PORT}:${QBITTORRENT_BT_PORT}/udp"
+    restart: unless-stopped
+
+  # 4. 剧集管理 (应用层)
+  sonarr:
+    image: linuxserver/sonarr:latest
+    container_name: ${SONARR_HOSTNAME}
+    hostname: ${SONARR_HOSTNAME}
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    environment:
+      <<: *proxy-env
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+      PROWLARR_ADDR: ${PROWLARR_HOSTNAME}:9696
+      QBIT_ADDR: ${QBITTORRENT_HOSTNAME}:${QBITTORRENT_PORT}
+    volumes:
+      - ./config/sonarr:/config
+      - ${RESOURCE}/Media:/media
+      - ${RESOURCE}/Downloads:/downloads
+    ports:
+      - "${SONARR_PORT}:8989"
+    restart: unless-stopped
+
+  # 5. 电影管理 (应用层)
+  radarr:
+    image: linuxserver/radarr:latest
+    container_name: ${RADARR_HOSTNAME}
+    hostname: ${RADARR_HOSTNAME}
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    environment:
+      <<: *proxy-env
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+      PROWLARR_ADDR: ${PROWLARR_HOSTNAME}:9696
+      QBIT_ADDR: ${QBITTORRENT_HOSTNAME}:${QBITTORRENT_PORT}
+    volumes:
+      - ./config/radarr:/config
+      - ${RESOURCE}/Media:/media
+      - ${RESOURCE}/Downloads:/downloads
+    ports:
+      - "${RADARR_PORT}:7878"
+    restart: unless-stopped
+
+  # 6. 成人媒体管理 (应用层)
+  whisparr:
+    image: ghcr.io/hotio/whisparr:v3
+    container_name: ${WHISPARR_HOSTNAME}
+    hostname: ${WHISPARR_HOSTNAME}
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    environment:
+      <<: *proxy-env
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+      PROWLARR_ADDR: ${PROWLARR_HOSTNAME}:9696
+      QBIT_ADDR: ${QBITTORRENT_HOSTNAME}:${QBITTORRENT_PORT}
+    volumes:
+      - ./config/whisparr:/config
+      - ${RESOURCE}/Media:/media
+      - ${RESOURCE}/Downloads:/downloads
+    ports:
+      - "${WHISPARR_PORT}:6969"
+    restart: unless-stopped
+
+  # 7. 字幕管理 (后处理)
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: ${BAZARR_HOSTNAME}
+    hostname: ${BAZARR_HOSTNAME}
+    environment:
+      <<: *proxy-env
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+      SONARR_ADDR: ${SONARR_HOSTNAME}:8989
+      RADARR_ADDR: ${RADARR_HOSTNAME}:7878
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    volumes:
+      - ./config/bazarr:/config
+      - ${RESOURCE}/Media:/media
+    ports:
+      - "${BAZARR_PORT}:6767"
+    restart: unless-stopped
+
+  # 8. 媒体请求平台 (交互层)
+  jellyseerr:
+    image: fallenbagel/jellyseerr:latest
+    container_name: ${JELLYSEERR_HOSTNAME}
+    hostname: ${JELLYSEERR_HOSTNAME}
+    environment:
+      <<: *proxy-env
+      LOG_LEVEL: ${LOG_LEVEL}
+      TZ: ${TZ}
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    volumes:
+      - ./config/jellyseerr:/app/config
+    ports:
+      - "${JELLYSEERR_PORT}:5055"
+    restart: unless-stopped
+
+  # 9. 质量配置自动同步 (工具层)
+  recyclarr:
+    image: ghcr.io/recyclarr/recyclarr:8
+    container_name: ${RECYCLARR_HOSTNAME}
+    hostname: ${RECYCLARR_HOSTNAME}
+    user: ${PUID}:${PGID}
+    environment:
+      <<: *proxy-env
+      TZ: ${TZ}
+      CRON_SCHEDULE: "0 3 * * *"
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    volumes:
+      - ./config/recyclarr:/config
+    restart: unless-stopped
+
+networks:
+  default:
+    name: servarr-network

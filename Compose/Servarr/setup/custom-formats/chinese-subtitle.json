@@ -1,0 +1,29 @@
+{
+  "name": "Language: Chinese Subtitle",
+  "specifications": [
+    {
+      "name": "Chinese Sub",
+      "implementation": "ReleaseTitleSpecification",
+      "negate": false,
+      "required": false,
+      "fields": [
+        {
+          "name": "value",
+          "value": "\\b(中字|中文字幕|中文|双语|中英)\\b"
+        }
+      ]
+    },
+    {
+      "name": "Chinese Keywords",
+      "implementation": "ReleaseTitleSpecification",
+      "negate": false,
+      "required": false,
+      "fields": [
+        {
+          "name": "value",
+          "value": "\\b(CN|CHN|Chi|Chinese)\\b(?=.*\\b(sub|Sub|SUB)\\b)"
+        }
+      ]
+    }
+  ]
+}

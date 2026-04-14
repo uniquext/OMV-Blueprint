@@ -26,6 +26,11 @@ OMV/
 │   ├── Jellyfin/                # 媒体服务器堆栈
 │   │   ├── Jellyfin.env
 │   │   └── Jellyfin.yml
+│   ├── Servarr/                 # 媒体自动化堆栈
+│   │   ├── Servarr.env
+│   │   ├── Servarr.yml
+│   │   ├── startup.sh           # 一键初始化脚本
+│   │   └── setup/               # 初始化脚本与自定义格式
 │   └── global.env               # 全局环境变量（UID/GID/时区/路径/GPU）
 ├── docs/                        # 部署文档（按阶段编号）
 │   ├── 01-系统安装.md
@@ -37,6 +42,7 @@ OMV/
 │   │   ├── FileBrowser/说明.md
 │   │   ├── Immich/说明.md
 │   │   ├── Jellyfin/说明.md
+│   │   ├── Servarr/说明.md
 │   │   └── 说明.md              # 服务总索引
 │   └── 06-常见问题与故障排除.md
 ├── inject.sh                    # 系统级环境变量注入工具
@@ -79,6 +85,7 @@ OMV/
 | 05-3 | [FileBrowser 轻量级文件管理器](docs/05-容器与应用服务/FileBrowser/说明.md) | ✅ |
 | 05-4 | [Jellyfin 媒体服务器](docs/05-容器与应用服务/Jellyfin/说明.md) | ✅ |
 | 05-5 | [Cloudflared Cloudflare Tunnel 穿透客户端](docs/05-容器与应用服务/Cloudflared/说明.md) | ✅ |
+| 05-6 | [Servarr 媒体自动化大一统](docs/05-容器与应用服务/Servarr/说明.md) | ✅ |
 
 ---
 

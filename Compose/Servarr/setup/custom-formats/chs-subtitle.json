@@ -1,0 +1,29 @@
+{
+  "name": "Language: Chinese Simplified (CHS)",
+  "specifications": [
+    {
+      "name": "CHS",
+      "implementation": "ReleaseTitleSpecification",
+      "negate": false,
+      "required": false,
+      "fields": [
+        {
+          "name": "value",
+          "value": "\\b(CHS|简体|简中|GB|简日|SC)\\b"
+        }
+      ]
+    },
+    {
+      "name": "Simplified Chinese",
+      "implementation": "ReleaseTitleSpecification",
+      "negate": false,
+      "required": false,
+      "fields": [
+        {
+          "name": "value",
+          "value": "\\b(Simplified.?Chinese|Chi_Simp)\\b"
+        }
+      ]
+    }
+  ]
+}
