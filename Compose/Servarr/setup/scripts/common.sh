@@ -27,6 +27,15 @@ load_env() {
     fi
 }
 
+# 注销宿主机层代理变量 (仅影响当前 Shell 进程，不影响容器内环境)
+# 原因：宿主机 root 可能配置了全局代理，导致脚本中发往 localhost 的
+# curl/urllib 请求被代理拦截，返回 502 Bad Gateway
+unset_host_proxy() {
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+    export no_proxy="localhost,127.0.0.1"
+    export NO_PROXY="localhost,127.0.0.1"
+}
+
 # 等待 API 响应
 wait_for_service() {
     local name=$1
@@ -34,7 +43,7 @@ wait_for_service() {
     local timeout=${3:-30}
     echo -ne "$INFO 等待 $name ($port) 响应... "
     for i in $(seq 1 "$timeout"); do
-        if curl -s -m 2 "http://localhost:$port" > /dev/null; then
+        if curl -s --noproxy "*" -m 2 "http://localhost:$port" > /dev/null; then
             echo -e "$CHECK 正常"
             return 0
         fi

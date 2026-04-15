@@ -11,6 +11,9 @@ SCRIPTS_DIR="$SCRIPT_DIR/setup/scripts"
 source "$SCRIPTS_DIR/common.sh"
 load_env "$SCRIPT_DIR/Servarr.env"
 
+# 注销宿主机代理，防止 localhost API 调用被代理拦截返回 502
+unset_host_proxy
+
 log_info "🚀 开始执行 Servarr 模块化启动流程..."
 
 # 1. 初始化与认证 (并捕获导出的 API Keys)

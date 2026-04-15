@@ -50,20 +50,24 @@ import_cf() {
     log_info "导入中文字幕 CF 到 $svc..."
 
     run_python_api "$svc" "$port" "$key" "$SCRIPT_DIR/setup/custom-formats" <<'PYEOF'
-import urllib.request, json, sys, os
+import urllib.request, urllib.error, json, sys, os
 svc, port, key, cf_dir = sys.argv[1:5]
 base = f"http://localhost:{port}/api/v3"
 hd = {"X-Api-Key": key, "Content-Type": "application/json"}
 
 def api_call(ep, d=None, m="GET"):
     req = urllib.request.Request(f"{base}/{ep}", data=json.dumps(d).encode() if d else None, headers=hd, method=m)
-    with urllib.request.urlopen(req) as r: return json.loads(r.read())
+    try:
+        with urllib.request.urlopen(req) as r: return json.loads(r.read().decode('utf-8', errors='replace'))
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode('utf-8', errors='replace')
+        raise Exception(f"HTTP {e.code}: {err_body}")
 
 try:
     existing = {x["name"].lower(): x["id"] for x in api_call("customformat")}
     for f in os.listdir(cf_dir):
         if not f.endswith(".json"): continue
-        with open(os.path.join(cf_dir, f), 'r') as j: data = json.load(j)
+        with open(os.path.join(cf_dir, f), 'r', encoding='utf-8') as j: data = json.load(j)
         name = data["name"]
         if name.lower() in existing:
             data["id"] = existing[name.lower()]

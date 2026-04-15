@@ -10,26 +10,37 @@ load_env "$SCRIPT_DIR/Servarr.env"
 
 log_info "开始阶段 4: Bazarr 字幕自动化配置..."
 
-wait_for_service "Bazarr" "$BAZARR_PORT" 20
+if ! wait_for_service "Bazarr" "$BAZARR_PORT" 20; then
+    log_error "Bazarr 服务未就绪，跳过阶段 4 全部配置"
+    exit 1
+fi
+
+# 核心依赖补齐 (确保容器内具备 sqlite3 指令)
+docker exec "$BAZARR_HOSTNAME" apk add --no-cache sqlite > /dev/null 2>&1
 
 # 1. 创建语言配置文件 (Language Profiles)
 # Bazarr API 不支持创建语言配置文件，必须直接操作数据库
-# 必须在 YAML 配置之前创建，因为默认配置需要引用 profileId
-log_info "正在创建语言配置文件..."
-DB_PATH="$SCRIPT_DIR/config/bazarr/db/bazarr.db"
+log_info "正在管理 Bazarr 语言配置文件..."
+CONTAINER_DB="/config/db/bazarr.db"
 
-PROFILE_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM table_languages_profiles;" 2>/dev/null)
+# 前置守卫：容器内数据库文件是否存在
+if ! docker exec "$BAZARR_HOSTNAME" test -f "$CONTAINER_DB"; then
+    log_error "Bazarr 数据库文件不存在: $CONTAINER_DB (服务可能尚未完成首次初始化)"
+    exit 1
+fi
+
+PROFILE_COUNT=$(docker exec "$BAZARR_HOSTNAME" sqlite3 "$CONTAINER_DB" "SELECT COUNT(*) FROM table_languages_profiles;" 2>&1)
+if [ $? -ne 0 ]; then
+    log_error "sqlite3 查询语言配置文件失败: $PROFILE_COUNT"
+    exit 1
+fi
 
 if [ "$PROFILE_COUNT" -eq 0 ]; then
     # 创建简繁中文语言配置文件
     # zh = 简体中文, zt = 繁体中文
     # items 中的 id 字段是必需的，用于 cutoff 和健康检查
-    sqlite3 "$DB_PATH" <<'SQLEOF'
-INSERT INTO table_languages_profiles (profileId, cutoff, originalFormat, items, name, mustContain, mustNotContain, tag)
-VALUES (1, NULL, 0,
-    '[{"id": 1, "language": "zh", "audio_exclude": "False", "audio_only_include": "False", "hi": "False", "forced": "False"}, {"id": 2, "language": "zt", "audio_exclude": "False", "audio_only_include": "False", "hi": "False", "forced": "False"}]',
-    'chinese', '[]', '[]', NULL);
-SQLEOF
+    docker exec "$BAZARR_HOSTNAME" sqlite3 "$CONTAINER_DB" \
+        "INSERT INTO table_languages_profiles (profileId, cutoff, originalFormat, items, name, mustContain, mustNotContain, tag) VALUES (1, NULL, 0, '[{\"id\": 1, \"language\": \"zh\", \"audio_exclude\": \"False\", \"audio_only_include\": \"False\", \"hi\": \"False\", \"forced\": \"False\"}, {\"id\": 2, \"language\": \"zt\", \"audio_exclude\": \"False\", \"audio_only_include\": \"False\", \"hi\": \"False\", \"forced\": \"False\"}]', 'chinese', '[]', '[]', NULL);"
     log_success "语言配置文件创建成功 (简体中文 + 繁体中文)"
 else
     log_info "语言配置文件已存在，跳过创建"
@@ -38,9 +49,14 @@ fi
 # 1.5 启用语言 (Enable Languages)
 # 必须在 table_settings_languages 中启用语言，前端才能正确显示
 log_info "正在启用简繁中文字幕语言..."
-ENABLED_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM table_settings_languages WHERE code2 IN ('zh', 'zt') AND enabled=1;" 2>/dev/null)
+ENABLED_COUNT=$(docker exec "$BAZARR_HOSTNAME" sqlite3 "$CONTAINER_DB" "SELECT COUNT(*) FROM table_settings_languages WHERE code2 IN ('zh', 'zt') AND enabled=1;" 2>&1)
+if [ $? -ne 0 ]; then
+    log_error "sqlite3 查询语言启用状态失败: $ENABLED_COUNT"
+    exit 1
+fi
+
 if [ "$ENABLED_COUNT" -lt 2 ]; then
-    sqlite3 "$DB_PATH" "UPDATE table_settings_languages SET enabled=1 WHERE code2 IN ('zh', 'zt');"
+    docker exec "$BAZARR_HOSTNAME" sqlite3 "$CONTAINER_DB" "UPDATE table_settings_languages SET enabled=1 WHERE code2 IN ('zh', 'zt');"
     log_success "已启用简体中文和繁体中文"
 else
     log_info "简繁中文已启用，跳过"

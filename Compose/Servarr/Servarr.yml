@@ -31,7 +31,7 @@
 x-proxy-env: &proxy-env
   HTTP_PROXY: ${PROXY_HTTP}
   HTTPS_PROXY: ${PROXY_HTTPS}
-  NO_PROXY: ${NO_PROXY}
+  NO_PROXY: ${SERVARR_NO_PROXY}
 
 services:
   # 1. 爬虫代理 (辅助支撑)

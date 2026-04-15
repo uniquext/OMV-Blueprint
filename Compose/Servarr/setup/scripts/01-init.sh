@@ -15,17 +15,17 @@ init_qbittorrent() {
     wait_for_service "qBittorrent" "$QBITTORRENT_PORT" 20 || return 1
 
     log_info "检查 qBittorrent 登录状态..."
-    if curl -s -i -X POST -d "username=$TARGET_USER&password=$QB_PASS" "http://localhost:$QBITTORRENT_PORT/api/v2/auth/login" | grep -iq "set-cookie: SID="; then
+    if curl -s --noproxy "*" -i -X POST -d "username=$TARGET_USER&password=$QB_PASS" "http://localhost:$QBITTORRENT_PORT/api/v2/auth/login" | grep -iq "set-cookie: SID="; then
         log_success "qBittorrent 凭据已生效"
     else
         log_info "尝试从 Docker 日志获取临时密码并行初始化..."
         local temp_pass=$(docker logs "$QBITTORRENT_HOSTNAME" 2>&1 | grep "temporary password" | tail -n 1 | awk '{print $NF}')
         if [ -n "$temp_pass" ]; then
             log_info "使用临时密码: $temp_pass"
-            local resp=$(curl -s -i -X POST -d "username=$TARGET_USER&password=$temp_pass" "http://localhost:$QBITTORRENT_PORT/api/v2/auth/login")
+            local resp=$(curl -s --noproxy "*" -i -X POST -d "username=$TARGET_USER&password=$temp_pass" "http://localhost:$QBITTORRENT_PORT/api/v2/auth/login")
             if echo "$resp" | grep -iq "set-cookie: SID="; then
                 local sid=$(echo "$resp" | grep -oE 'SID=[^;]+' | cut -d'=' -f2)
-                curl -s -b "SID=$sid" "http://localhost:$QBITTORRENT_PORT/api/v2/app/setPreferences" \
+                curl -s --noproxy "*" -b "SID=$sid" "http://localhost:$QBITTORRENT_PORT/api/v2/app/setPreferences" \
                     -d "json={\"web_ui_username\":\"$TARGET_USER\",\"web_ui_password\":\"$QB_PASS\"}" > /dev/null
                 log_success "qBittorrent 密码已重置为 $QB_PASS"
             fi

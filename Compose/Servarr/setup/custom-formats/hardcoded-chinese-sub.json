@@ -1,17 +1,17 @@
 {
-  "name": "Hardcoded Chinese Subtitle",
-  "specifications": [
-    {
-      "name": "Hardcoded Chinese",
-      "implementation": "ReleaseTitleSpecification",
-      "negate": false,
-      "required": false,
-      "fields": [
+    "name": "Hardcoded Chinese Subtitle",
+    "specifications": [
         {
-          "name": "value",
-          "value": "\\b(HC|hardcode|hardsub|内嵌|嵌字)\\b(?=.*\\b(中|CHS|CHT|Chinese)\\b)"
+            "name": "Hardcoded Chinese",
+            "implementation": "ReleaseTitleSpecification",
+            "negate": false,
+            "required": false,
+            "fields": [
+                {
+                    "name": "value",
+                    "value": "\\b(HC|hardcode|hardsub|内嵌|嵌字)\\b(?=.*\\b(中|CHS|CHT|Chinese)\\b)"
+                }
+            ]
         }
-      ]
-    }
-  ]
+    ]
 }

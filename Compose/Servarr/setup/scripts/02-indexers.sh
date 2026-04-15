@@ -30,7 +30,7 @@ run_python_api "$PROWLARR_KEY" "$PROWLARR_PORT" \
                "$SONARR_HOSTNAME" "$SONARR_PORT" \
                "$RADARR_HOSTNAME" "$RADARR_PORT" \
                "$WHISPARR_HOSTNAME" "$WHISPARR_PORT" <<'PYEOF'
-import urllib.request, urllib.error, json, sys, os
+import urllib.request, json, sys, os
 key, port, skey, rkey, wkey, qpw, user, qhost, qport = sys.argv[1:10]
 fs_host, fs_port, prowlarr_host, prowlarr_port, sonarr_host, sonarr_port, radarr_host, radarr_port, whisparr_host, whisparr_port = sys.argv[10:20]
 base = f"http://localhost:{port}/api/v1"; hd = {"X-Api-Key": key, "Content-Type": "application/json"}
@@ -60,7 +60,7 @@ def save(ep, impl, name, fields, tags=None, extra=None):
         api_call(ep, d=schema, m="POST")
         print(f"  \033[32m[✓]\033[0m {name} 配置成功")
     except Exception as e:
-        print(f"  \033[33m[!]\033[0m {name} 失败 (可能已存在): {e}")
+        print(f"  \033[31m[✗]\033[0m {name} 失败: {e}")
 
 # 预创建标签
 get_or_create_tag("default")
@@ -86,10 +86,10 @@ INDEXERS = [
     {"name": "DMHY", "impl": "Cardigann", "def": "dmhy", "tag": "flaresolverr"},
     {"name": "Mikan", "impl": "Cardigann", "def": "mikan", "tag": "default"},
     {"name": "1337x", "impl": "Cardigann", "def": "1337x", "tag": "flaresolverr"},
-    {"name": "ACG.RIP", "impl": "Cardigann", "def": "acgrip", "tag": "default"},
+    {"name": "ACG.RIP", "impl": "Cardigann", "def": "acgrip", "tag": "flaresolverr"},
     {"name": "Bangumi Moe", "impl": "Cardigann", "def": "bangumi-moe", "tag": "default"},
     {"name": "YTS", "impl": "Cardigann", "def": "yts", "tag": "default"},
-    {"name": "EZTV", "impl": "Cardigann", "def": "eztv", "tag": "default"},
+    {"name": "EZTV", "impl": "Cardigann", "def": "eztv", "tag": "flaresolverr"},
     {"name": "showRSS", "impl": "Cardigann", "def": "showrss", "tag": "default"},
     {"name": "The Pirate Bay", "impl": "Cardigann", "def": "thepiratebay", "tag": "flaresolverr"},
     {"name": "RuTor", "impl": "Cardigann", "def": "rutor", "tag": "default"},
