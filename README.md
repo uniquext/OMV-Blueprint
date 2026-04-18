@@ -9,6 +9,9 @@
 ```text
 OMV/
 ├── AppData/                     # 公共资源与脚本
+│   ├── inject_env/              # 私有环境变量注入配置
+│   │   ├── inject.sh            # 环境变量注入脚本
+│   │   └── private.env.example  # 私有配置模板（复制后填写）
 │   ├── scripts/                 # 运维脚本集
 │   └── template/
 │       └── gpu-template.yml     # NVIDIA GPU 全局复用模板
@@ -45,8 +48,6 @@ OMV/
 │   │   ├── Servarr/说明.md
 │   │   └── 说明.md              # 服务总索引
 │   └── 06-常见问题与故障排除.md
-├── inject.sh                    # 系统级环境变量注入工具
-└── private.env.example          # 私有配置模板（复制后填写）
 ```
 
 ---
@@ -91,11 +92,12 @@ OMV/
 
 ## 辅助工具
 
-### 私有配置与系统注入 (`private.env.example` + `inject.sh`)
+### 私有配置与系统注入 (`AppData/inject_env/private.env.example` + `AppData/inject_env/inject.sh`)
 
-首次部署时，复制模板并填入实际值，再通过注入脚本将变量写入系统环境：
+首次部署时，进入 `AppData/inject_env/` 目录复制模板并填入实际值，再通过注入脚本将变量写入系统环境：
 
 ```bash
+cd AppData/inject_env
 cp private.env.example private.env
 # 编辑 private.env，填入 IMMICH_DB_PASSWORD 等敏感值
 sudo bash inject.sh private.env
