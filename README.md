@@ -9,6 +9,7 @@
 ```text
 OMV/
 ├── AppData/                     # 公共资源与脚本
+│   ├── fonts/                   # 字体资源
 │   ├── inject_env/              # 私有环境变量注入配置
 │   │   ├── inject.sh            # 环境变量注入脚本
 │   │   └── private.env.example  # 私有配置模板（复制后填写）
