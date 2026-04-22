@@ -1,0 +1,17 @@
+# iperf3 - 网络带宽测试工具
+# 端口: 5201 (Host 模式直通)
+
+services:
+  iperf3:
+    image: networkstatic/iperf3:latest
+    container_name: iperf3
+    hostname: iperf3
+    restart: unless-stopped
+    network_mode: host
+    command: ["-s"]
+    environment:
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+    volumes:
+      - ${LOCALTIME_PATH}:/etc/localtime:ro
