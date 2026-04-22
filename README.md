@@ -26,9 +26,6 @@ OMV/
 │   ├── Servarr/                 # 媒体自动化堆栈
 │   │   ├── startup.sh           # 一键初始化脚本
 │   │   └── setup/               # 初始化脚本与自定义格式
-│   │       ├── custom-formats/  # 自定义格式定义
-│   │       ├── scripts/         # 初始化脚本集
-│   │       └── recyclarr.yml.template  # Recyclarr 配置模板
 │   └── global.env               # 全局环境变量（UID/GID/时区/路径/GPU）
 ├── docs/                        # 部署文档（按阶段编号）
 │   ├── 01-系统安装.md
