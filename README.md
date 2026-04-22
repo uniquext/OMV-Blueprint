@@ -17,23 +17,18 @@ OMV/
 │       └── gpu-template.yml     # NVIDIA GPU 全局复用模板
 ├── Compose/                     # Docker Compose 堆栈定义
 │   ├── ClashMeta/               # 代理网关堆栈
-│   │   ├── ClashMeta.env
-│   │   ├── ClashMeta.yml
 │   │   ├── config/              # mihomo 配置文件
 │   │   └── emergency_bypass.sh  # 代理紧急避险脚本
+│   ├── Cloudflared/             # Cloudflare Tunnel 穿透客户端堆栈
 │   ├── FileBrowser/             # 文件管理器堆栈
-│   │   └── FileBrowser.yml
 │   ├── Immich/                  # 相册管理堆栈
-│   │   ├── Immich.env
-│   │   └── Immich.yml
 │   ├── Jellyfin/                # 媒体服务器堆栈
-│   │   ├── Jellyfin.env
-│   │   └── Jellyfin.yml
 │   ├── Servarr/                 # 媒体自动化堆栈
-│   │   ├── Servarr.env
-│   │   ├── Servarr.yml
 │   │   ├── startup.sh           # 一键初始化脚本
 │   │   └── setup/               # 初始化脚本与自定义格式
+│   │       ├── custom-formats/  # 自定义格式定义
+│   │       ├── scripts/         # 初始化脚本集
+│   │       └── recyclarr.yml.template  # Recyclarr 配置模板
 │   └── global.env               # 全局环境变量（UID/GID/时区/路径/GPU）
 ├── docs/                        # 部署文档（按阶段编号）
 │   ├── 01-系统安装.md

@@ -17,19 +17,31 @@ unset_host_proxy
 log_info "🚀 开始执行 Servarr 模块化启动流程..."
 
 # 1. 初始化与认证 (并捕获导出的 API Keys)
+echo -e "\n============== 初始化与认证 ================"
 INIT_OUTPUT=$($SCRIPTS_DIR/01-init.sh)
 echo "$INIT_OUTPUT"
 eval "$(echo "$INIT_OUTPUT" | grep "^export")"
 
 # 2. 索引器与整合
-export PROWLARR_KEY SONARR_KEY RADARR_KEY WHISPARR_KEY
+echo -e "\n============== 索引器与整合 ================"
 $SCRIPTS_DIR/02-indexers.sh
 
-# 3. 质量同步与 CF 导入
-$SCRIPTS_DIR/03-recyclarr-cf.sh
+# 3. 基础配置注入 (语言/元数据/命名规范/根目录/下载客户端)
+echo -e "\n============== 基础配置注入 ================"
+$SCRIPTS_DIR/03-base-config.sh
 
-# 4. 字幕系统配置
-$SCRIPTS_DIR/04-bazarr.sh
+# 4. 质量同步与 CF 导入
+echo -e "\n============== 质量同步与 CF 导入 ================"
+$SCRIPTS_DIR/04-recyclarr-cf.sh
 
+# 5. 字幕系统配置
+echo -e "\n============== 字幕系统配置 ================"
+$SCRIPTS_DIR/05-bazarr.sh
+
+# 6. Jellyseerr 多平台融合
+echo -e "\n============== Jellyseerr 多平台融合 ================"
+$SCRIPTS_DIR/06-jellyseerr.sh
+
+echo ""
 log_success "✨ 所有模块初始化完成！"
 log_info "建议访问 Prowlarr 检查同步状态，访问 Jellyseerr 完成初次向导。"

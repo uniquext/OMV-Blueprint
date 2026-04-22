@@ -48,9 +48,14 @@ url = f"http://localhost:{port}/api/{api_ver}/config/host"
 hd = {"X-Api-Key": key, "Content-Type": "application/json"}
 try:
     with urllib.request.urlopen(urllib.request.Request(url, headers=hd)) as r: config = json.loads(r.read())
-    config.update({"authenticationMethod": "forms", "authenticationRequired": "enabled", "username": user, "password": pw, "passwordConfirmation": pw})
-    urllib.request.urlopen(urllib.request.Request(url, data=json.dumps(config).encode(), headers=hd, method="PUT"))
-    print(f"  \033[32m[✓]\033[0m {svc} 认证配置完毕")
+    if (config.get("authenticationMethod") == "forms" and
+        config.get("authenticationRequired") == "enabled" and
+        config.get("username") == user):
+        print(f"  \033[32m[✓]\033[0m {svc} 认证已配置，跳过")
+    else:
+        config.update({"authenticationMethod": "forms", "authenticationRequired": "enabled", "username": user, "password": pw, "passwordConfirmation": pw})
+        urllib.request.urlopen(urllib.request.Request(url, data=json.dumps(config).encode(), headers=hd, method="PUT"))
+        print(f"  \033[32m[✓]\033[0m {svc} 认证配置完毕")
 except Exception as e:
     print(f"  \033[31m[✗]\033[0m {svc} 失败: {e}")
 PYEOF
