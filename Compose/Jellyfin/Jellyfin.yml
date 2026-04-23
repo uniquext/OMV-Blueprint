@@ -13,25 +13,15 @@ services:
     restart: unless-stopped
     ports:
       - "${JELLYFIN_PORT}:8096"
-    # extra_hosts:
-    #   - "www.themoviedb.org:13.33.183.88"
-    #   - "www.themoviedb.org:13.33.183.73"
-    #   - "api.themoviedb.org:3.169.173.63"
-    #   - "api.themoviedb.org:3.169.173.60"
     environment:
       PUID: ${PUID}
       PGID: ${PGID}
       TZ: ${TZ}
-      # 代理配置请根据实际需要解开注释并调整地址
-      # HTTP_PROXY: ${PROXY_HTTP}
-      # HTTPS_PROXY: ${PROXY_HTTPS}
-      # NO_PROXY: ${NO_PROXY}
-      # DLNA 发现建议配合此变量使用（在 bridge 模式下发现存在问题时解开注释）
-      # 设置此变量为宿主机的真实内网 IP，让 Jellyfin 向外广播正确的访问地址
-      # JELLYFIN_PublishedServerUrl: "http://${HOST_IP}:${JELLYFIN_PORT}"
+      HTTP_PROXY: ${PROXY_HTTP}
+      HTTPS_PROXY: ${PROXY_HTTPS}
+      NO_PROXY: ${NO_PROXY}
     volumes:
       - ${LOCALTIME_PATH}:/etc/localtime:ro
-      # - ${DRI}:/dev/dri # 若确有 Intel 核心显卡并需双核显支持可取消此挂载的注释
       - ${FONT}:/usr/share/fonts
       - ${COMPOSE_DATA_PATH}/scripts:/scripts
       - ${RESOURCE}/Media:/media
