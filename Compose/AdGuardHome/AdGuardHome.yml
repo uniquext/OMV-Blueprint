@@ -1,0 +1,32 @@
+# ==============================================================================
+# AdGuard Home 私有局域网 DNS 与广告拦截中心
+# ==============================================================================
+# 描述：
+#   提供局域网级的定制 DNS 解析体系与广告拦截。
+#
+# 端口与网络占用 (Host 直通模式)：
+#   - 本服务基于 network_mode: host 运行，获取真实客户端 IP。不使用显式端口映射。
+#   - 预期的隐式监听端口：
+#     - 53(TCP/UDP) : DNS 核心解析服务
+#     - 3000(TCP)   : 初始化与管理面板端口
+#     以下为修改后的端口
+#     - 8000(TCP)   : 管理面板端口
+#
+# 安全警告：
+#   - 严禁在初始化时选用默认的 80 端口作为 WebUI，这会直接挤占 OMV 的控制面板导致崩溃。
+#   - 请务必阅读说明文档，规避 53 端口与 systemd-resolved 服务的硬冲突。
+# ==============================================================================
+
+services:
+  adguardhome:
+    image: adguard/adguardhome:latest
+    container_name: adguardhome
+    hostname: adguardhome
+    environment:
+      # AdGuardHome 官方镜像底层结构为 root 主导，不接受 PUID / PGID 透传
+      TZ: ${TZ}
+    volumes:
+      - ./config:/opt/adguardhome/conf
+      - ./work:/opt/adguardhome/work
+    network_mode: host
+    restart: unless-stopped

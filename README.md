@@ -81,6 +81,7 @@ OMV/
 | 05-5 | [Cloudflared Cloudflare Tunnel 穿透客户端](docs/05-容器与应用服务/Cloudflared/说明.md) | ✅ |
 | 05-6 | [Servarr 媒体自动化大一统](docs/05-容器与应用服务/Servarr/说明.md) | ✅ |
 | 05-7 | [iperf3 网络带宽测试工具](docs/05-容器与应用服务/Iperf3/说明.md) | ✅ |
+| 05-8 | [AdGuardHome 私有局域网 DNS 服务](docs/05-容器与应用服务/AdGuardHome/说明.md) | ✅ |
 
 ---
 
