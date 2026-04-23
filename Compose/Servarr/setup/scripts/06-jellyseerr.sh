@@ -391,7 +391,101 @@ else
     log_warn "未找到 Sonarr API Key"
 fi
 
-# 6. 配置 Jellyseerr 主设置
+# 6. 配置 Radarr/Sonarr → Jellyfin 通知连接
+# 目的: Radarr/Sonarr 导入电影/剧集后自动通知 Jellyfin 刷新媒体库
+# 解决: Jellyseerr 请求长期停留在"处理中"状态的问题
+log_info "配置 Radarr/Sonarr → Jellyfin 通知连接..."
+
+# 从 Jellyseerr 设置中获取 Jellyfin API Key（Jellyseerr 初始化时自动生成）
+JELLYFIN_SETTINGS=$(curl -s --noproxy "*" -b "$COOKIE_FILE" "$JELLYSEERR_URL/api/v1/settings/jellyfin")
+JELLYFIN_API_KEY=$(echo "$JELLYFIN_SETTINGS" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    print(data.get('apiKey', ''))
+except:
+    print('')
+" 2>/dev/null)
+
+if [ -z "$JELLYFIN_API_KEY" ]; then
+    log_warn "无法从 Jellyseerr 获取 Jellyfin API Key，跳过通知连接配置"
+    log_warn "请在 Radarr/Sonarr Settings → Connect 中手动添加 Jellyfin 连接"
+else
+    # 提取 Jellyfin 主机地址（去除 http:// 前缀，供容器间通讯使用）
+    JELLYFIN_HOST=$(echo "$JELLYFIN_BASE_URL" | sed 's|^https\?://||' | sed 's|/$||')
+
+    configure_jellyfin_notify() {
+        local svc=$1
+        local port=$2
+        local key=$3
+
+        python3 - "$svc" "$port" "$key" "$JELLYFIN_HOST" "$JELLYFIN_PORT" "$JELLYFIN_API_KEY" <<'PYEOF'
+import urllib.request, json, sys, re
+
+svc, port, key, jf_host, jf_port, jf_api_key = sys.argv[1:7]
+base = f"http://localhost:{port}/api/v3"
+hd = {"X-Api-Key": key, "Content-Type": "application/json"}
+
+def api_call(ep, d=None, m="GET"):
+    req = urllib.request.Request(f"{base}/{ep}", data=json.dumps(d).encode() if d else None, headers=hd, method=m)
+    with urllib.request.urlopen(req) as r: return json.loads(r.read())
+
+try:
+    # 检查是否已存在 Jellyfin/MediaBrowser 通知连接
+    existing = api_call("notification")
+    if any(n.get("implementation") == "MediaBrowser" for n in existing):
+        print(f"  \033[32m[✓]\033[0m {svc} → Jellyfin 通知连接已存在，跳过")
+        sys.exit(0)
+
+    # 获取 MediaBrowser (Jellyfin) 通知 schema
+    # 注: Radarr v6 / Sonarr v4 中 Jellyfin 的 implementation 名称为 "MediaBrowser"
+    schemas = api_call("notification/schema")
+    schema = next((s for s in schemas if s["implementation"] == "MediaBrowser"), None)
+    if not schema:
+        print(f"  \033[31m[✗]\033[0m {svc} 未找到 MediaBrowser/Jellyfin 通知 schema")
+        sys.exit(1)
+
+    # 安全处理主机名（去除可能残留的协议前缀）
+    host = re.sub(r'^https?://', '', jf_host).rstrip('/')
+
+    # 配置通知触发事件
+    schema.update({
+        "name": "Jellyfin",
+        "enable": True,
+        "onGrab": False,               # 抓取时不通知（尚未下载完成）
+        "onDownload": True,            # 导入完成时通知（核心触发点）
+        "onUpgrade": True,             # 质量升级时通知
+        "onRename": True,              # 重命名时通知
+        "onMovieFileDelete": True,     # [Radarr] 电影文件删除时通知
+        "onImportComplete": True,      # [Sonarr] 导入完成时通知
+        "onEpisodeFileDelete": True,   # [Sonarr] 剧集文件删除时通知
+    })
+
+    # 填写 Jellyfin 连接参数
+    for f in schema.get("fields", []):
+        if f["name"] == "host": f["value"] = host
+        elif f["name"] == "port": f["value"] = int(jf_port)
+        elif f["name"] == "apiKey": f["value"] = jf_api_key
+        elif f["name"] == "updateLibrary": f["value"] = True
+        elif f["name"] == "notify": f["value"] = False
+
+    api_call("notification", d=schema, m="POST")
+    print(f"  \033[32m[✓]\033[0m {svc} → Jellyfin 通知连接配置成功 (导入时自动刷新库)")
+except Exception as e:
+    print(f"  \033[31m[✗]\033[0m {svc} Jellyfin 通知配置失败: {e}")
+PYEOF
+    }
+
+    if [ -n "$RADARR_KEY" ]; then
+        configure_jellyfin_notify "radarr" "$RADARR_PORT" "$RADARR_KEY"
+    fi
+
+    if [ -n "$SONARR_KEY" ]; then
+        configure_jellyfin_notify "sonarr" "$SONARR_PORT" "$SONARR_KEY"
+    fi
+fi
+
+# 7. 配置 Jellyseerr 主设置
 log_info "配置 Jellyseerr 主设置..."
 MAIN_SETTINGS_RESPONSE=$(curl -s --noproxy "*" -b "$COOKIE_FILE" \
     -X POST \
@@ -414,7 +508,7 @@ else
     log_warn "Jellyseerr 主设置配置返回 HTTP $HTTP_CODE"
 fi
 
-# 7. 完成初始化
+# 8. 完成初始化
 log_info "完成 Jellyseerr 初始化..."
 INIT_RESPONSE=$(curl -s --noproxy "*" -b "$COOKIE_FILE" \
     -X POST \
