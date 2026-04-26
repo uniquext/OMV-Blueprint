@@ -45,7 +45,7 @@
 | 5 | LLM API 配置 | 环境变量：API URL、模型名、API Key |
 | 6 | 分批翻译 | 每次 15-20 句一批 |
 | 7 | 上下文窗口 | 仅前文上下文（前5句）+ 20句翻译。Chat: 指令标注；MT: 平铺发送，代码裁剪 |
-| 8 | API 限速 | 1000 RPM / 80000 TPM，阈值 75k TPM，自动 sleep |
+| 8 | API 限速 | 1000 RPM / 50000 TPM，阈值 45k TPM，自动 sleep |
 | 9 | 日志系统 | RotatingFileHandler，10MB/文件，5 备份 |
 | 10 | Prompt 热更新 | system_prompt.txt + glossary.json 通过 volume 挂载 |
 | 11 | 全盘扫描 | 扫描 Compose 挂载的媒体根目录 |
@@ -382,7 +382,7 @@ API 返回结果解析流程:
 │                                                         │
 │  每次请求前:                                            │
 │    1. 检查 RPM: requests_this_minute >= 900? sleep      │
-│    2. 检查 TPM: tokens_this_minute >= 75000? sleep      │
+│    2. 检查 TPM: tokens_this_minute >= 45000? sleep      │
 │                                                         │
 │  每次请求后:                                            │
 │    1. 读取 response.usage.total_tokens                  │
@@ -393,7 +393,7 @@ API 返回结果解析流程:
 │                                                         │
 │  阈值:                                                  │
 │    RPM: 900 (留 100 余量)                               │
-│    TPM: 75000 (留 5000 余量)                            │
+│    TPM: 45000 (留 5000 余量)                            │
 │                                                         │
 │  目标: 绝对不抛出 HTTP 429 错误                         │
 └─────────────────────────────────────────────────────────┘
@@ -484,8 +484,8 @@ SCAN_INTERVAL=86400                    # 默认每天扫描一次 (86400秒)
 SCAN_DIR=/media                        # 全盘扫描的根目录
 
 # 限速配置
-TPM_LIMIT=75000                        # 每分钟 token 上限 (留余量)
-RPM_LIMIT=900                          # 每分钟请求上限 (留余量)
+TPM_LIMIT=50000                        # 每分钟 token 上限 (留余量)
+RPM_LIMIT=1000                          # 每分钟请求上限 (留余量)
 
 # 批处理配置
 BATCH_SIZE=20                          # 每批翻译行数

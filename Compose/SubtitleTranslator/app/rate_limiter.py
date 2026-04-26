@@ -5,9 +5,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-RPM_LIMIT = int(os.environ.get("RPM_LIMIT", "60"))
-TPM_LIMIT = int(os.environ.get("TPM_LIMIT", "40000"))
-BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "50"))
+RPM_LIMIT = int(os.environ.get("RPM_LIMIT", "1000"))
+TPM_LIMIT = int(os.environ.get("TPM_LIMIT", "50000"))
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "20"))
 
 class RateLimiter:
     def __init__(self):
