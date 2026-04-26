@@ -1,0 +1,41 @@
+# SubtitleTranslator 服务
+# 端口: 9800
+
+services:
+  subtitle_translator:
+    container_name: subtitle_translator
+    hostname: subtitle_translator
+    image: subtitle_translator:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-9800}:9800"
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Asia/Shanghai}
+      APP_PORT: ${APP_PORT}
+      LLM_API_URL: ${LLM_API_URL}
+      LLM_MODEL: ${LLM_MODEL}
+      LLM_MODEL_TYPE: ${LLM_MODEL_TYPE}
+      LLM_API_KEY: ${LLM_API_KEY}
+      SCAN_INTERVAL: ${SCAN_INTERVAL}
+      SCAN_DIR: ${SCAN_DIR}
+      TPM_LIMIT: ${TPM_LIMIT}
+      RPM_LIMIT: ${RPM_LIMIT}
+      BATCH_SIZE: ${BATCH_SIZE}
+      CONTEXT_SIZE: ${CONTEXT_SIZE}
+      LLM_TIMEOUT: ${LLM_TIMEOUT}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ${COMPOSE_DATA_PATH:-./prompts_mnt}/subtitle/prompts:/app/prompts
+      - ${RESOURCE:-./media_mnt}:/media
+    networks:
+      default:
+
+networks:
+  default:
+    name: subtitle_translator_net
