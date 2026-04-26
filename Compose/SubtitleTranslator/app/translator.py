@@ -7,6 +7,12 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from prompt_loader import load_system_prompt, load_glossary
 import queue_db
+from rate_limiter import rate_limiter
+import logging
+from eta_tracker import eta_tracker
+
+logger = logging.getLogger(__name__)
+
 
 LLM_API_URL = os.environ.get("LLM_API_URL")
 LLM_API_KEY = os.environ.get("LLM_API_KEY")
@@ -14,12 +20,12 @@ LLM_MODEL = os.environ.get("LLM_MODEL")
 LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "50"))
 CONTEXT_SIZE = int(os.environ.get("CONTEXT_SIZE", "5"))
-# 模型类型: chat (通用对话模型) / mt (专用翻译模型)
+# Model type: chat (General dialogue model) / mt (Specialized translation model)
 LLM_MODEL_TYPE = os.environ.get("LLM_MODEL_TYPE", "chat")
 
 @dataclass
 class Batch:
-    """一个翻译批次，包含当前批次的行和前文上下文"""
+    """A translation batch, containing the current lines and pre-context."""
     batch_idx: int
     lines: List[str]
     context_before: List[str]
@@ -28,22 +34,22 @@ class Batch:
 
 @dataclass
 class TranslatedLine:
-    """解析后的单行翻译结果"""
+    """Parsed single-line translation result."""
     id: int
     text: str
 
 def preprocess(file_path: str) -> Tuple[List[str], List[Optional[int]]]:
     """
-    读取文件每行，构建空行映射表，返回编号后的格式化列表和 line_map。
+    Reads each line of the file, builds a blank line mapping table, and returns the formatted list with IDs and line_map.
 
-    格式化列表: `ID: n | text`（无标签关键词，统一所有模型）
-    line_map: 索引=原始行号，值=分配的 ID（非空行）或 None（空行）
+    Formatted list: `ID: n | text` (No tag keywords, unified for all models)
+    line_map: index = original line number, value = assigned ID (non-blank line) or None (blank line)
     """
     with open(file_path, "r", encoding="utf-8") as f:
         lines = f.readlines()
 
     formatted_lines = []
-    # line_map[原始行号] = ID 或 None（空行）
+    # line_map[original_line_number] = ID or None (blank line)
     line_map = []
     current_id = 1
     for line in lines:
@@ -58,7 +64,7 @@ def preprocess(file_path: str) -> Tuple[List[str], List[Optional[int]]]:
     return formatted_lines, line_map
 
 def create_batches(lines: List[str], batch_size: int = BATCH_SIZE, context_size: int = CONTEXT_SIZE) -> List[Batch]:
-    """将编号行分批并为每批附加前文上下文窗口（仅前文，无后文上下文）"""
+    """Batches numbered lines and appends a pre-context window for each batch (pre-context only, no post-context)."""
     batches = []
     total_lines = len(lines)
     batch_idx = 1
@@ -67,7 +73,7 @@ def create_batches(lines: List[str], batch_size: int = BATCH_SIZE, context_size:
         start_id = i + 1
         end_id = min(i + batch_size, total_lines)
 
-        # 仅前文上下文
+        # Pre-context only
         context_before = lines[max(0, i - context_size):i]
 
         batches.append(Batch(
@@ -82,22 +88,22 @@ def create_batches(lines: List[str], batch_size: int = BATCH_SIZE, context_size:
 
 def call_llm(system_prompt: str, user_prompt: str, glossary: Dict, model_type: str = "chat") -> str:
     """
-    使用 httpx 调用 LLM API，返回原始响应文本。
+    Uses httpx to call the LLM API and returns the raw response text.
 
-    根据 model_type 控制 user_prompt 的构造：
-    - chat: 注入术语表到 user_prompt
-    - mt: 直接发送纯文本，不注入术语表
+    User_prompt construction depends on model_type:
+    - chat: Injects glossary into user_prompt
+    - mt: Sends plain text directly, no glossary injection
     """
     headers = {
         "Authorization": f"Bearer {LLM_API_KEY}",
         "Content-Type": "application/json"
     }
 
-    # MT 模型不注入术语表，Chat 模型正常注入
+    # MT model does not inject glossary, Chat model injects normally
     if model_type == "mt":
         final_user_content = user_prompt
     else:
-        final_user_content = f"术语表：{json.dumps(glossary, ensure_ascii=False)}\n\n{user_prompt}"
+        final_user_content = f"Glossary: {json.dumps(glossary, ensure_ascii=False)}\n\n{user_prompt}"
 
     payload = {
         "model": LLM_MODEL,
@@ -109,27 +115,31 @@ def call_llm(system_prompt: str, user_prompt: str, glossary: Dict, model_type: s
     }
 
     with httpx.Client(timeout=float(LLM_TIMEOUT)) as client:
+        rate_limiter.pre_request_check()
         response = client.post(LLM_API_URL, headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()
 
         usage = data.get("usage", {})
-        print(f"[LLM] token_usage: {usage}")
+        total_tokens = usage.get("total_tokens", 0)
+        logger.info(f"LLM token_usage", extra={"token_usage": usage})
+        rate_limiter.post_request_update(total_tokens)
 
         return data["choices"][0]["message"]["content"]
 
+
 def parse_response(response_text: str, expected_ids: List[int]) -> List[TranslatedLine]:
     """
-    宽容解析器：兼容多种 LLM 输出格式。
+    Lenient parser: compatible with various LLM output formats.
 
-    使用放宽正则 `^ID:\\s*(\\d+)\\s*\\|\\s*(.+)$`，管道符后直接捕获全部内容，
-    不再要求任何标签关键词（原文/译文/Translation 等）。
+    Uses lenient regex `^ID:\\s*(\\d+)\\s*\\|\\s*(.+)$` to capture all content after the pipe symbol,
+    no longer requiring tag keywords (original/translated/Translation, etc.).
 
-    解析策略：先按 ID 范围过滤（丢弃上下文行被翻译的噪声或 MT 模型
-    翻译了前上下文的结果），再做行数和连续性校验。
+    Parsing strategy: filter by ID range first (discard noise from translated context lines or MT model
+    results that include pre-context translation), then validate line count and continuity.
     """
     results = []
-    # 宽容正则：管道符后直接捕获全部内容
+    # Lenient regex: captures all content after the pipe symbol
     pattern = re.compile(r"^ID:\s*(\d+)\s*\|\s*(.+)$")
 
     expected_id_set = set(expected_ids)
@@ -143,27 +153,27 @@ def parse_response(response_text: str, expected_ids: List[int]) -> List[Translat
         if match:
             line_id = int(match.group(1))
             translated_text = match.group(2).strip()
-            # 仅保留当前批次 ID 范围内的行，丢弃上下文噪声
+            # Only keep lines within the current batch ID range, discard context noise
             if line_id in expected_id_set:
                 results.append(TranslatedLine(id=line_id, text=translated_text))
 
     if len(results) != len(expected_ids):
-        raise ValueError(f"行数校验失败。期望 {len(expected_ids)} 行，实际 {len(results)} 行。")
+        raise ValueError(f"Line count validation failed. Expected {len(expected_ids)} lines, got {len(results)} lines.")
 
     for i, tl in enumerate(results):
         if tl.id != expected_ids[i]:
-            raise ValueError(f"ID 连续性校验失败。期望 ID {expected_ids[i]}，实际 {tl.id}。")
+            raise ValueError(f"ID continuity validation failed. Expected ID {expected_ids[i]}, got {tl.id}.")
 
     return results
 
 def _build_output_with_line_map(tmp_path: str, out_path: str, line_map: List[Optional[int]]):
     """
-    根据 line_map 将 .tmp 文件中的翻译结果回填空行，生成最终的 .zh.txt 文件。
+    Backfills translation results into blank lines based on line_map to generate the final .zh.txt file.
 
-    .tmp 格式: `ID: n | translated_text`
-    .zh.txt 格式: 纯译文，空行按原始位置回填
+    .tmp format: `ID: n | translated_text`
+    .zh.txt format: Plain translated text, blank lines backfilled to original positions
     """
-    # 读取 .tmp 并构建 ID -> 译文 的映射
+    # Read .tmp and build ID -> text mapping
     id_to_text = {}
     pattern = re.compile(r"^ID:\s*(\d+)\s*\|\s*(.+)$")
     with open(tmp_path, "r", encoding="utf-8") as f:
@@ -172,7 +182,7 @@ def _build_output_with_line_map(tmp_path: str, out_path: str, line_map: List[Opt
             if match:
                 id_to_text[int(match.group(1))] = match.group(2).strip()
 
-    # 按 line_map 回填空行
+    # Backfill blank lines according to line_map
     with open(out_path, "w", encoding="utf-8") as f:
         for mapped_id in line_map:
             if mapped_id is None:
@@ -180,15 +190,15 @@ def _build_output_with_line_map(tmp_path: str, out_path: str, line_map: List[Opt
             else:
                 f.write(id_to_text.get(mapped_id, "") + "\n")
 
-def translate_file(task_id: str, file_path: str):
+def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
     """
-    翻译主流程：preprocess → create_batches → 逐批 call_llm → parse_response →
-    原子化追加写入 .tmp → 更新数据库进度 → 全部完成后按 line_map 回填空行 → .zh.txt
+    Main translation workflow: preprocess -> create_batches -> batch call_llm -> parse_response ->
+    atomic append to .tmp -> update DB progress -> backfill blank lines after completion -> .zh.txt
     """
     try:
         lines, line_map = preprocess(file_path)
         if not lines:
-            # 空文件（或全是空行）：根据 line_map 生成仅含空行的 .zh.txt
+            # Empty file (or all blank lines): generate .zh.txt with only blank lines based on line_map
             out_path = file_path.replace(".txt", ".zh.txt")
             if file_path.endswith(".en.txt"):
                 out_path = file_path.replace(".en.txt", ".zh.txt")
@@ -207,18 +217,15 @@ def translate_file(task_id: str, file_path: str):
 
         tmp_path = file_path + ".tmp"
 
-        # Phase 5 基础实现：从头开始，断点续传在 Phase 8 实现
-        start_batch_idx = 1
-
         with open(tmp_path, "w" if start_batch_idx == 1 else "a", encoding="utf-8") as tmp_file:
             for batch in batches[start_batch_idx - 1:]:
-                # 根据模型类型构建 user_prompt
+                # Build user_prompt based on model type
                 if LLM_MODEL_TYPE == "mt":
-                    # MT 模型：前上下文与翻译内容纯文本平铺，无指令词
+                    # MT model: pre-context and translation content tiled in plain text, no instruction words
                     all_lines = batch.context_before + batch.lines
                     user_prompt = "\n".join(all_lines)
                 else:
-                    # Chat 模型：保留语义化指令标注
+                    # Chat model: keep semantic instruction markers
                     user_prompt = ""
                     if batch.context_before:
                         user_prompt += "前文上下文（仅供参考，不要翻译）：\n" + "\n".join(batch.context_before) + "\n\n"
@@ -227,25 +234,35 @@ def translate_file(task_id: str, file_path: str):
                 expected_ids = list(range(batch.start_id, batch.end_id + 1))
                 translation_results = []
 
-                max_retries = 3
+                max_retries = 4
                 for attempt in range(max_retries):
                     try:
                         start_time = time.time()
                         response_text = call_llm(system_prompt, user_prompt, glossary, model_type=LLM_MODEL_TYPE)
                         elapsed = time.time() - start_time
-                        print(f"[LLM] roundtrip time: {elapsed:.2f}s")
-                        print(f"[LLM] response text:\n{response_text}")
+                        
+                        # Add duration to sliding window
+                        eta_tracker.add_duration(elapsed)
+                        
+                        logger.info("API call completed", extra={
+                            "task_id": task_id,
+                            "batch_id": batch.batch_idx,
+                            "elapsed": round(elapsed, 2)
+                        })
+                        
+                        logger.debug(f"LLM response text:\n{response_text}")
 
                         translation_results = parse_response(response_text, expected_ids)
                         break
                     except Exception as e:
                         if attempt == max_retries - 1:
                             raise e
-                        sleep_time = 2 ** attempt
-                        print(f"[LLM] Error: {e}, retrying in {sleep_time}s...")
+                        sleep_time = 5 * (2 ** attempt)
+                        logger.warning(f"LLM Error: {e}, retrying in {sleep_time}s...")
                         time.sleep(sleep_time)
 
-                # 原子化追加写入：以批次为单位写入 .tmp（格式 ID: n | text）
+
+                # Atomic append: write to .tmp in batch units (format ID: n | text)
                 for result in translation_results:
                     tmp_file.write(f"ID: {result.id} | {result.text}\n")
                 tmp_file.flush()
@@ -254,24 +271,25 @@ def translate_file(task_id: str, file_path: str):
                 progress_pct = int(batch.batch_idx / total_batches * 100)
                 queue_db.update_progress(task_id, batch.batch_idx, total_batches, f"{progress_pct}%")
 
-                print(f"[Translator] Batch {batch.batch_idx}/{total_batches} done ({progress_pct}%)")
+                logger.info(f"Task {task_id}: Batch {batch.batch_idx}/{total_batches} done ({progress_pct}%)")
 
                 if batch.batch_idx < total_batches:
-                    time.sleep(1)  # 批次间简单节流
+                    time.sleep(1)  # Simple throttling between batches
 
-        # 翻译完成：根据 line_map 回填空行，生成最终 .zh.txt
+        # Translation complete: backfill blank lines based on line_map to generate final .zh.txt
         out_path = file_path.replace(".txt", ".zh.txt")
         if file_path.endswith(".en.txt"):
             out_path = file_path.replace(".en.txt", ".zh.txt")
 
         _build_output_with_line_map(tmp_path, out_path, line_map)
 
-        # 清理 .tmp 中间文件
+        # Clean up .tmp intermediate file
         os.remove(tmp_path)
 
         queue_db.complete_task(task_id)
-        print(f"[Translator] Task {task_id} completed: {out_path}")
+        logger.info(f"Task {task_id} completed: {out_path}")
 
     except Exception as e:
         queue_db.fail_task(task_id, str(e))
+        logger.error(f"Task {task_id} failed with error: {e}", exc_info=True)
         raise e

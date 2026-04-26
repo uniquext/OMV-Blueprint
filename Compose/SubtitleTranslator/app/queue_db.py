@@ -1,7 +1,10 @@
 import sqlite3
 import uuid
 import datetime
+import logging
 from typing import Optional, Dict
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = "/app/data/queue.db"
 
@@ -21,6 +24,7 @@ def init_db():
             )
         """)
         conn.commit()
+    logger.info(f"Database initialized at {DB_PATH}")
 
 class TaskAlreadyExistsError(Exception):
     pass
@@ -45,6 +49,7 @@ def add_task(file_path: str) -> str:
             (task_id, file_path, now, now)
         )
         conn.commit()
+    logger.info(f"Added task {task_id} for {file_path}")
     return task_id
 
 def fetch_next_task() -> Optional[Dict]:
@@ -66,6 +71,13 @@ def fetch_next_task() -> Optional[Dict]:
         conn.commit()
         task['status'] = 'processing'
         return task
+
+def get_processing_tasks():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute("SELECT * FROM task WHERE status = 'processing' ORDER BY created_at ASC")
+        return [dict(r) for r in cursor.fetchall()]
+
 
 def update_progress(task_id: str, current_batch: int, total_batches: int, progress_text: str = ""):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
