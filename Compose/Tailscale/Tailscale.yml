@@ -1,0 +1,26 @@
+# Tailscale - 极速安全的虚拟内网 (WireGuard)
+# 端口: 无固定监听端口 (Host 模式，P2P 直连)
+
+services:
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: tailscale
+    hostname: tailscale
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+      TS_AUTHKEY: ${AUTH_KEY}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+    volumes:
+      - ${LOCALTIME_PATH}:/etc/localtime:ro
+      - ./state:/var/lib/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - net_admin
+      - net_raw
+
