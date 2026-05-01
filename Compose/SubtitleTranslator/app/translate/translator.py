@@ -5,23 +5,22 @@ import time
 import json
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
-from prompt_loader import load_system_prompt, load_glossary
-import queue_db
-from rate_limiter import rate_limiter
+from .prompt_loader import load_system_prompt, load_glossary
+import db
+from .rate_limiter import rate_limiter
 import logging
-from eta_tracker import eta_tracker
+from .eta_tracker import eta_tracker
+from config_loader import load_config
 
 logger = logging.getLogger(__name__)
 
+_config = None
 
-LLM_API_URL = os.environ.get("LLM_API_URL")
-LLM_API_KEY = os.environ.get("LLM_API_KEY")
-LLM_MODEL = os.environ.get("LLM_MODEL")
-LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))
-BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "20"))
-CONTEXT_SIZE = int(os.environ.get("CONTEXT_SIZE", "5"))
-# Model type: chat (General dialogue model) / mt (Specialized translation model)
-LLM_MODEL_TYPE = os.environ.get("LLM_MODEL_TYPE", "chat")
+def _get_config():
+    global _config
+    if _config is None:
+        _config = load_config()
+    return _config
 
 @dataclass
 class Batch:
@@ -63,8 +62,12 @@ def preprocess(file_path: str) -> Tuple[List[str], List[Optional[int]]]:
 
     return formatted_lines, line_map
 
-def create_batches(lines: List[str], batch_size: int = BATCH_SIZE, context_size: int = CONTEXT_SIZE) -> List[Batch]:
+def create_batches(lines: List[str], batch_size: int = None, context_size: int = None) -> List[Batch]:
     """Batches numbered lines and appends a pre-context window for each batch (pre-context only, no post-context)."""
+    if batch_size is None:
+        batch_size = _get_config()["llm"]["batch_size"]
+    if context_size is None:
+        context_size = _get_config()["llm"]["context_size"]
     batches = []
     total_lines = len(lines)
     batch_idx = 1
@@ -95,7 +98,7 @@ def call_llm(system_prompt: str, user_prompt: str, glossary: Dict, model_type: s
     - mt: Sends plain text directly, no glossary injection
     """
     headers = {
-        "Authorization": f"Bearer {LLM_API_KEY}",
+        "Authorization": f"Bearer {_get_config()['llm']['api_key']}",
         "Content-Type": "application/json"
     }
 
@@ -106,7 +109,7 @@ def call_llm(system_prompt: str, user_prompt: str, glossary: Dict, model_type: s
         final_user_content = f"Glossary: {json.dumps(glossary, ensure_ascii=False)}\n\n{user_prompt}"
 
     payload = {
-        "model": LLM_MODEL,
+        "model": _get_config()["llm"]["model"],
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": final_user_content}
@@ -114,9 +117,9 @@ def call_llm(system_prompt: str, user_prompt: str, glossary: Dict, model_type: s
         "temperature": 0.3
     }
 
-    with httpx.Client(timeout=float(LLM_TIMEOUT)) as client:
+    with httpx.Client(timeout=float(_get_config()["llm"]["timeout"])) as client:
         rate_limiter.pre_request_check()
-        response = client.post(LLM_API_URL, headers=headers, json=payload)
+        response = client.post(_get_config()["llm"]["api_url"], headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()
 
@@ -202,11 +205,13 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
             out_path = file_path.replace(".txt", ".zh.txt")
             if file_path.endswith(".en.txt"):
                 out_path = file_path.replace(".en.txt", ".zh.txt")
+            elif file_path.endswith(".ja.txt"):
+                out_path = file_path.replace(".ja.txt", ".zh.txt")
             with open(out_path, "w", encoding="utf-8") as f:
                 for _ in line_map:
                     f.write("\n")
-            queue_db.update_progress(task_id, 0, 0, "100%")
-            queue_db.complete_task(task_id)
+            db.update_progress(task_id, 0, 0, "100%")
+            db.complete_task(task_id)
             return
 
         batches = create_batches(lines)
@@ -219,8 +224,9 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
 
         with open(tmp_path, "w" if start_batch_idx == 1 else "a", encoding="utf-8") as tmp_file:
             for batch in batches[start_batch_idx - 1:]:
+                model_type = _get_config()["llm"]["model_type"]
                 # Build user_prompt based on model type
-                if LLM_MODEL_TYPE == "mt":
+                if model_type == "mt":
                     # MT model: pre-context and translation content tiled in plain text, no instruction words
                     all_lines = batch.context_before + batch.lines
                     user_prompt = "\n".join(all_lines)
@@ -234,11 +240,11 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
                 expected_ids = list(range(batch.start_id, batch.end_id + 1))
                 translation_results = []
 
-                max_retries = 4
-                for attempt in range(max_retries):
+                max_retries = _get_config()["llm"]["max_retries"]
+                for attempt in range(max_retries + 1):
                     try:
                         start_time = time.time()
-                        response_text = call_llm(system_prompt, user_prompt, glossary, model_type=LLM_MODEL_TYPE)
+                        response_text = call_llm(system_prompt, user_prompt, glossary, model_type=model_type)
                         elapsed = time.time() - start_time
                         
                         # Add duration to sliding window
@@ -255,7 +261,7 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
                         translation_results = parse_response(response_text, expected_ids)
                         break
                     except Exception as e:
-                        if attempt == max_retries - 1:
+                        if attempt >= max_retries:
                             raise e
                         sleep_time = 5 * (2 ** attempt)
                         logger.warning(f"LLM Error: {e}, retrying in {sleep_time}s...")
@@ -269,7 +275,7 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
                 os.fsync(tmp_file.fileno())
 
                 progress_pct = int(batch.batch_idx / total_batches * 100)
-                queue_db.update_progress(task_id, batch.batch_idx, total_batches, f"{progress_pct}%")
+                db.update_progress(task_id, batch.batch_idx, total_batches, f"{progress_pct}%")
 
                 logger.info(f"Task {task_id}: Batch {batch.batch_idx}/{total_batches} done ({progress_pct}%)")
 
@@ -280,16 +286,18 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
         out_path = file_path.replace(".txt", ".zh.txt")
         if file_path.endswith(".en.txt"):
             out_path = file_path.replace(".en.txt", ".zh.txt")
+        elif file_path.endswith(".ja.txt"):
+            out_path = file_path.replace(".ja.txt", ".zh.txt")
 
         _build_output_with_line_map(tmp_path, out_path, line_map)
 
         # Clean up .tmp intermediate file
         os.remove(tmp_path)
 
-        queue_db.complete_task(task_id)
+        db.complete_task(task_id)
         logger.info(f"Task {task_id} completed: {out_path}")
 
     except Exception as e:
-        queue_db.fail_task(task_id, str(e))
+        db.fail_task(task_id, str(e))
         logger.error(f"Task {task_id} failed with error: {e}", exc_info=True)
         raise e

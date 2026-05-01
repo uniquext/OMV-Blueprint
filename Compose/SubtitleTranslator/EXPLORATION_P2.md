@@ -241,7 +241,7 @@ flowchart LR
 |:---:|---|---|:---:|
 | 0级 | 外置 `X.zh.srt` 存在 或 内置含 `zh` 轨 | 跳过 | 0s |
 | 1级 | 外置 `X.zt.srt` 存在 或 内置含 `zt` 轨 | OpenCC 繁转简 → `X.zh.srt` (漏斗内完成) | <1s |
-| 2级 | 外置 `X.en.srt` 存在 | pysrt 提取 → 写临时 .txt → 创建 TranslateTask | — |
+| 2级 | 外置 `X.en.srt` 或 `X.ja.srt` 存在 | pysrt 提取 → 写临时 .txt → 创建 TranslateTask | — |
 | 3级 | 内置含 en/ja 轨 | ffmpeg 提取 → 写临时 .txt → 创建 TranslateTask | <1s |
 | 无-图形 | 内置仅含图形字幕轨 (vobsub/PGS) | INFO 日志说明原因 · 跳过 | 0s |
 | 无-空白 | 以上都不满足 | WARN 日志 · 跳过 | 0s |
@@ -258,8 +258,8 @@ flowchart TB
     C -->|"未命中"| D{"1级: 外置 .zt.srt<br/>或内置 zt 轨?"}
     D -->|"外置命中"| T2S_EXT["OpenCC 繁转简 → .zh.srt · Worker 释放"]
     D -->|"内置命中"| T2S_EMB["ffmpeg 提取 .zt.emb.srt → OpenCC → .zh.srt · 清理 .emb.srt · Worker 释放"]
-    D -->|"未命中"| E{"2级: 外置 .en.srt?"}
-    E -->|"命中"| EXT2["pysrt 提取 → .en.txt → 创建 TranslateTask · Worker 释放"]
+    D -->|"未命中"| E{"2级: 外置 .en.srt<br/>或 .ja.srt?"}
+    E -->|"命中"| EXT2["pysrt 提取 → .{lang}.txt → 创建 TranslateTask · Worker 释放"]
     E -->|"未命中"| F{"3级: 内置 en/ja 轨?"}
     F -->|"命中"| EXT3["ffmpeg 提取 .en.emb.srt → pysrt → .en.emb.txt → 创建 TranslateTask · Worker 释放"]
     F -->|"仅图形字幕轨"| GFX["INFO: 检测到图形字幕(vobsub/PGS)，无法提取文本，跳过 · Worker 释放"]
@@ -296,10 +296,12 @@ def normalize_language(lang_code: str) -> str:
 ### 5.4 外置字幕与媒体文件匹配
 
 ```
+搜索范围: 媒体文件所在目录 + 其下的 Subs/ 子目录 (MKV 内封字幕常见结构)
 规则: 剥离语言后缀 + basename 精确匹配
   EP01.zh.srt   → "EP01" → 匹配 EP01.mkv ✓
   EP01.chi.srt  → "EP01" → 匹配 EP01.mkv ✓
   EP01 - 1080p.en.srt → "EP01 - 1080p" → 匹配 EP01 - 1080p.mkv ✓
+  Subs/EP01.en.srt → "EP01" → 匹配 EP01.mkv ✓
 
 原则: Bazarr 保证命名前缀一致，不一致的跳过
 ```
@@ -406,9 +408,9 @@ with open("EP01.en.txt", "w", encoding="utf-8") as f:
 **3级提取 (ffmpeg + pysrt)**：
 
 ```python
-# stream_index 由漏斗判断返回（ffprobe 检测到的字幕轨索引）
+# stream_index 由漏斗判断返回（ffprobe 检测到的字幕流绝对索引）
 subprocess.run(
-    ["ffmpeg", "-i", "EP01.mkv", "-map", f"0:s:{stream_index}", "EP01.en.emb.srt"],
+    ["ffmpeg", "-y", "-i", "EP01.mkv", "-map", f"0:{stream_index}", "-c:s", "srt", "EP01.en.emb.srt"],
     check=True
 )
 subs = pysrt.open("EP01.en.emb.srt")
@@ -447,7 +449,7 @@ subs.save("EP01.zh.srt", encoding="utf-8")
 **1级外置繁转简 (OpenCC)**：
 
 ```python
-converter = opencc.OpenCC("t2s.json")
+converter = opencc.OpenCC("t2s")
 subs = pysrt.open("EP01.zt.srt")
 for sub in subs:
     sub.text = converter.convert(sub.text)
@@ -457,12 +459,12 @@ subs.save("EP01.zh.srt", encoding="utf-8")
 **1级内置繁转简 (ffmpeg + OpenCC)**：
 
 ```python
-# stream_index 由漏斗判断返回（ffprobe 检测到的字幕轨索引）
+# stream_index 由漏斗判断返回（ffprobe 检测到的字幕流绝对索引）
 subprocess.run(
-    ["ffmpeg", "-i", "EP01.mkv", "-map", f"0:s:{stream_index}", "EP01.zt.emb.srt"],
+    ["ffmpeg", "-y", "-i", "EP01.mkv", "-map", f"0:{stream_index}", "-c:s", "srt", "EP01.zt.emb.srt"],
     check=True
 )
-converter = opencc.OpenCC("t2s.json")
+converter = opencc.OpenCC("t2s")
 subs = pysrt.open("EP01.zt.emb.srt")
 for sub in subs:
     sub.text = converter.convert(sub.text)
@@ -598,7 +600,8 @@ sequenceDiagram
 创建 TranslateTask 和关联 SubtitleJob 在同一个 DB 事务中提交，Consumer 在 commit 之前看不到 TranslateTask，commit 后关联已生效。
 
 ```python
-def create_translate_task_for_job(job_id: str, file_path: str) -> str:
+def create_translate_task_for_job(job_id: str, file_path: str) -> Optional[str]:
+    # 防重复: 若该 file_path 已有活跃 TranslateTask (queued/processing)，返回 None
     task_id = str(uuid.uuid4())
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("INSERT INTO translate_task ...", (task_id, file_path, ...))
@@ -606,6 +609,8 @@ def create_translate_task_for_job(job_id: str, file_path: str) -> str:
         conn.commit()
     return task_id
 ```
+
+**防重复**：若 `file_path` 已有状态为 `queued` 或 `processing` 的 TranslateTask，返回 `None` 跳过创建，避免同一文件被重复翻译（决策 #57 三层防重复之一）。
 
 ### 7.6 Consumer 处理逻辑
 
@@ -656,7 +661,10 @@ def consumer_loop():
      不存在 → 用 DEFAULTS 生成 config.json
      存在   → 读取
   2. 遍历环境变量映射表，有设置则覆盖对应字段
-  3. 将覆盖后的最终配置写回 config.json (保证文件始终反映实际运行配置)
+  3. 仅在以下情况写回 config.json:
+     - 文件之前不存在 (首次生成)
+     - 环境变量发生了覆盖 (确保环境变量设置持久化到文件)
+     若文件已存在且无环境变量覆盖，不写回 (保留用户手动编辑的内容)
   4. 校验必填项 (LLM_API_URL, LLM_API_KEY)
   5. 根据 model_type 检测 /app/prompts/ 目录
      不存在 → 生成默认 system_prompt.txt + glossary.json
@@ -664,41 +672,43 @@ def consumer_loop():
   6. 返回最终配置对象
 ```
 
-**写回原则**：环境变量覆盖后必须写回 config.json，确保文件内容始终与实际运行配置一致。其他模块严格从 config 对象取值，不设默认值，取不到直接报错。
+**写回原则**：仅在首次生成或环境变量覆盖时写回 config.json。若文件已存在且无环境变量覆盖，保留用户手动编辑的内容不做覆盖。环境变量覆盖后写回确保其持久化，后续移除环境变量不会还原。其他模块严格从 config 对象取值，不设默认值，取不到直接报错。
 
 **限速配置语义**：`rpm_limit`/`tpm_limit` 存储的是 **API 提供商的限额值**（如 1000 RPM / 50000 TPM），代码内部使用时自动计算留余量阈值（如 `rpm_limit - 100 = 900` / `tpm_limit - 5000 = 45000` 作为实际拦截点），不在配置中暴露内部阈值（见决策 #9）。
 
 ### 8.3 config.json 结构
 
-```json
+```jsonc
 {
-  "app_port": 9800,
+  "app_port": 9800,                // 服务监听端口
   "llm": {
-    "api_url": "",
-    "api_key": "",
-    "model": "deepseek-chat",
-    "model_type": "chat",
-    "timeout": 120,
-    "batch_size": 20,
-    "context_size": 5,
-    "rpm_limit": 1000,
-    "tpm_limit": 50000,
-    "max_retries": 3
+    "api_url": "",                  // [必填] LLM API 地址
+    "api_key": "",                  // [必填] LLM API 密钥
+    "model": "",                    // LLM 模型名称 (如 "deepseek-chat", "Qwen/Qwen3-8B")
+    "model_type": "chat",           // 模型类型: "chat" (对话模型, 注入术语表) / "mt" (翻译模型, 纯文本)
+    "timeout": 120,                 // 单次 API 调用超时 (秒)
+    "batch_size": 20,               // 每批翻译行数
+    "context_size": 5,              // 前文上下文窗口行数
+    "rpm_limit": 1000,              // API 提供商 RPM 限额 (代码内部自动留余量)
+    "tpm_limit": 50000,             // API 提供商 TPM 限额 (代码内部自动留余量)
+    "max_retries": 3                // API 调用失败最大重试次数 (指数退避 5s→10s→20s)
   },
   "pipeline": {
-    "debounce_seconds": 60,
-    "debounce_poll_interval": null,
-    "funnel_workers": 5,
-    "scan_interval": 0,
-    "scan_dir": "/media"
+    "debounce_seconds": 60,         // 等待层 Debounce 延迟 (秒), 同一媒体文件新事件重置计时器
+    "debounce_poll_interval": null, // Debounce 调度线程轮询间隔 (秒), null 待定
+    "funnel_workers": 5,            // 执行层 Worker Pool 并发数 (ffprobe 不占 GIL, 5 并行合理)
+    "scan_interval": 0,             // 定时全盘扫描间隔 (秒), 0=禁用
+    "scan_dir": "/media"            // 全盘扫描根目录
   },
   "media": {
-    "extensions": [".mkv", ".mp4", ".avi", ".wmv", ".flv", ".ts", ".m2ts"],
-    "lang_map_override": {}
+    "extensions": [                 // 媒体文件扩展名白名单
+      ".mkv", ".mp4", ".avi", ".wmv", ".flv", ".ts", ".m2ts"
+    ],
+    "lang_map_override": {}         // 自定义语言映射覆盖 (追加到默认 LANG_MAP), 如 {"sc":"zh","tc":"zt"}
   },
   "watchdog": {
-    "enabled": true,
-    "path": "/media"
+    "enabled": true,                // 是否启用 Watchdog 目录监听
+    "path": "/media"                // Watchdog 监听路径
   }
 }
 ```
@@ -717,7 +727,7 @@ def consumer_loop():
 | 环境变量 | 覆盖路径 | config.json 默认值 | 类型转换 |
 |----------|----------|-------------------|----------|
 | `APP_PORT` | `app_port` | `9800` | int |
-| `LLM_MODEL` | `llm.model` | `"deepseek-chat"` | str |
+| `LLM_MODEL` | `llm.model` | `""` (空字符串) | str |
 | `LLM_MODEL_TYPE` | `llm.model_type` | `"chat"` | str |
 | `LLM_TIMEOUT` | `llm.timeout` | `120` | int |
 | `BATCH_SIZE` | `llm.batch_size` | `20` | int |
@@ -761,7 +771,7 @@ environment:
 ```
 # requirements.txt 新增
 pysrt==1.1.2          # SRT 字幕解析
-OpenCC==1.1.7         # 繁简转换
+opencc-python-reimplemented==0.1.7  # 繁简转换
 watchdog==4.0.0       # 目录监听
 ```
 
@@ -785,7 +795,7 @@ curl -X POST http://subtitle-translator:9800/notify \
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `media_path` | 是 | 视频文件路径（必须是文件，不允许目录） |
+| `media_path` | 是 | 视频文件路径（必须是文件，不允许目录，扩展名须在 `media.extensions` 白名单中） |
 | `language` | 否 | 字幕语言码，可能含 `:hi`/`:forced` 后缀 |
 | `subtitle_path` | 否 | 字幕文件路径，辅助信息 |
 
@@ -823,6 +833,8 @@ curl -X POST http://subtitle-translator:9800/scan \
   "message": "已扫描到 15 个待处理媒体文件，已加入执行层队列"
 }
 ```
+
+`count` 为实际入队的媒体文件数（入队前检查 Debounce Map 去重，已在 Debounce Map 中的跳过；已有活跃 SubtitleJob 的文件在 Worker 执行时被 `db.create_job()` 去重跳过），非扫描到的文件总数。
 
 响应（扫描进行中）：
 
@@ -868,6 +880,7 @@ app/
 │
 ├── subtitle/                   # 字幕处理
 │   ├── __init__.py
+│   ├── lang_utils.py           #   语言标签标准化 (LANG_MAP + normalize_language)
 │   ├── srt_handler.py          #   SRT 解析/回写 (pysrt)
 │   ├── opencc_handler.py       #   繁简转换 (OpenCC)
 │   └── ffmpeg_handler.py       #   ffmpeg/ffprobe 封装
@@ -896,7 +909,7 @@ app/
 | 新增 `config/` | 配置目录，Docker volume 挂载，首次启动自动生成 config.json |
 | 新增 `prompts/` | Prompt 目录，Docker volume 挂载，首次启动根据 model_type 自动生成 |
 | 新增 `pipeline/` | 三层管道核心：等待层、执行层、翻译层消费 |
-| 新增 `subtitle/` | 字幕处理：SRT、OpenCC、ffmpeg |
+| 新增 `subtitle/` | 字幕处理：语言标准化、SRT、OpenCC、ffmpeg |
 | 新增 `scanner/` | 输入源：媒体扫描、Watchdog、定时器 |
 | 新增 `translate/` | Phase 1 翻译引擎，独立成包 |
 
@@ -917,7 +930,7 @@ app/
 | # | 决策项 | 结论 |
 |---|--------|------|
 | 4 | 配置方案 | **config.json + 环境变量覆盖**：config.json 承载所有配置项，环境变量优先级更高，必填仅 LLM_API_URL 和 LLM_API_KEY。Phase 1 配置项全部迁移至 config.json |
-| 5 | config.json 生成 | **启动时自动生成**：不存在则用 DEFAULTS 生成，存在则读取，环境变量覆盖后写回 config.json |
+| 5 | config.json 生成 | **启动时自动生成**：不存在则用 DEFAULTS 生成，存在则读取，仅在首次生成或环境变量覆盖时写回 config.json |
 | 6 | 默认值单一来源 | **只在 config_loader.py 的 DEFAULTS 中定义**，其他模块不设默认值，从 config 取值取不到直接报错 |
 | 7 | Prompts 处理 | **独立目录自动生成**：路径硬编码 `/app/prompts/`，根据 model_type 生成 system_prompt.txt + glossary.json，用户通过 volume 映射覆盖内容 |
 | 8 | 媒体扩展名 | **默认 7 种**，config.json `media.extensions` 配置，环境变量 `MEDIA_EXTENSIONS` 可覆盖 |
@@ -1018,11 +1031,15 @@ app/
 |---|--------|------|
 | 53 | 黑名单策略 | **不做黑名单**，日志记录，漏斗幂等可重入 |
 | 54 | SubtitleJob 断点续传 | **不做**，启动后暴力全盘扫描，漏斗幂等可重入 |
-| 55 | 启动恢复策略 | **recover TranslateTask → 清理残留 SubtitleJob → 清理残留中间文件 → 全盘扫描**，translating 状态保留等 Consumer 自动回写 |
+| 55 | 启动恢复策略 | **recover TranslateTask → 清理残留 SubtitleJob(含 cleanup_files) → 清理残留中间文件(排除 translating 关联文件) → 全盘扫描**，translating 状态保留等 Consumer 自动回写 |
 | 56 | 全盘扫描节流 | **threading.Lock 互斥**，扫描进行中返回 409 Conflict |
 | 57 | 防重复机制 | **三层防重复**: 漏斗幂等(0级跳过) → SubtitleJob(media_path去重) → TranslateTask(file_path去重) |
 | 58 | APScheduler 选型 | 使用 **APScheduler** 做定时扫描调度 |
 | 59 | watchdog 库选型 | 使用 Python **watchdog** 库做目录监听 |
+| 61 | 外置 ja 字幕级别 | 外置 `X.ja.srt` 归为 **Level 2**，与外置 en 同等处理（pysrt 提取 → 翻译） |
+| 62 | /notify 扩展名校验 | **media_path 扩展名须在 `media.extensions` 白名单中**，非媒体文件返回 400 |
+| 63 | 语言标准化模块 | `LANG_MAP` + `normalize_language()` 独立为 **`subtitle/lang_utils.py`**，供 funnel/api/debounce_queue 共同引用，避免层级依赖 |
+| 64 | 外置字幕搜索范围 | 媒体文件所在目录 + **其下的 `Subs/` 子目录**（MKV 内封字幕常见结构） |
 
 ---
 
@@ -1046,7 +1063,7 @@ app/
 | 容器重启丢失等待层 | 启动全盘扫描兜底 + Watchdog 重新检测 + Bazarr Hook 重触发 |
 | Bazarr Hook 重复触发 | 等待层 upsert 去重 + 翻译层防重复 |
 | Bazarr language 后缀 | normalize_language() 剥离后缀 |
-| 临时文件残留 | 翻译完成后清理；启动时扫描残留并清理 |
+| 临时文件残留 | 翻译完成后清理；启动时扫描残留并清理（排除 translating 关联文件） |
 | 并发全盘扫描 | threading.Lock 互斥，扫描进行中返回 409 |
 | 容器重启 SubtitleJob 中断 | translating 保留等 Consumer 回写；其余标记 failed，全盘扫描重新触发 |
 
@@ -1061,14 +1078,14 @@ app/
 1. 检测 `/app/config/config.json` 是否存在 → 不存在则用 `DEFAULTS` 生成
 2. 读取 config.json
 3. 遍历 `ENV_OVERRIDES` 映射表，有环境变量设置则覆盖
-4. 写回 config.json（保证文件始终反映实际运行配置）
+4. 仅在首次生成或环境变量覆盖时写回 config.json（保留用户手动编辑的内容）
 5. 校验必填项（`LLM_API_URL`、`LLM_API_KEY`）
 6. 根据 `model_type` 检测 `/app/prompts/` → 不存在则生成默认 system_prompt.txt + glossary.json
 
 **关键约束**：
 - 默认值只在 `DEFAULTS` 中定义，其他模块不设默认值
 - 其他模块从 config 对象取值，取不到直接 `KeyError`，说明配置文件或代码有问题
-- 环境变量覆盖后必须写回 config.json，确保文件内容始终与实际运行配置一致
+- 仅在首次生成或环境变量覆盖时写回 config.json，保留用户手动编辑的内容
 - `DEFAULTS`、`ENV_OVERRIDES`、`PROMPT_DEFAULTS` 的完整定义见第八节
 
 ### 15.2 translate_file() 输出路径规则
@@ -1115,7 +1132,7 @@ tmp_path = file_path + ".tmp"
 **步骤**：
 
 1. **恢复 TranslateTask**：processing 状态的任务恢复续传
-2. **清理残留 SubtitleJob**：按状态处理
+2. **清理残留 SubtitleJob**：按状态处理，同时清理其 `cleanup_files` 中记录的中间文件
 
 | SubtitleJob 状态 | 重启后处理 | 原因 |
 |---|---|---|
@@ -1125,7 +1142,7 @@ tmp_path = file_path + ".tmp"
 | translating | **保留** | TranslateTask 自带续传，Consumer 完成后自动回写 |
 | rebuilding | 标记 failed | 翻译输出可能不完整，全盘扫描重新触发 |
 
-3. **清理残留中间文件**：扫描 `/media` 下残留的 `.emb.srt`、`*.en.txt`、`*.zh.txt`（无对应 processing 状态任务的）并删除，防止脏文件影响后续判断
+3. **清理残留中间文件**：扫描 `/media` 下残留的 `.emb.srt`、`.emb.txt`、`*.en.txt`、`*.ja.txt`、`*.zh.txt`，排除 `translating` 状态 SubtitleJob 关联的中间文件后删除，防止脏文件影响后续判断
 4. **全盘扫描**：重新触发全盘扫描
 
 ### 15.7 全盘扫描节流
