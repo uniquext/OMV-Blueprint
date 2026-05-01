@@ -11,28 +11,37 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "${APP_PORT:-9800}:9800"
+      - "${ENV_HOST_PORT:-9800}:${ENV_APP_PORT:-9800}"
     environment:
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
       TZ: ${TZ:-Asia/Shanghai}
-      APP_PORT: ${APP_PORT}
-      LLM_API_URL: ${LLM_API_URL}
-      LLM_MODEL: ${LLM_MODEL}
-      LLM_MODEL_TYPE: ${LLM_MODEL_TYPE}
-      LLM_API_KEY: ${LLM_API_KEY}
-      SCAN_INTERVAL: ${SCAN_INTERVAL}
-      SCAN_DIR: ${SCAN_DIR}
-      TPM_LIMIT: ${TPM_LIMIT}
-      RPM_LIMIT: ${RPM_LIMIT}
-      BATCH_SIZE: ${BATCH_SIZE}
-      CONTEXT_SIZE: ${CONTEXT_SIZE}
-      LLM_TIMEOUT: ${LLM_TIMEOUT}
+      APP_PORT: ${ENV_APP_PORT}
+      LLM_API_URL: ${ENV_LLM_API_URL}
+      LLM_API_KEY: ${ENV_LLM_API_KEY}
+      LLM_MODEL: ${ENV_LLM_MODEL}
+      LLM_MODEL_TYPE: ${ENV_LLM_MODEL_TYPE}
+      LLM_TIMEOUT: ${ENV_LLM_TIMEOUT}
+      BATCH_SIZE: ${ENV_BATCH_SIZE}
+      CONTEXT_SIZE: ${ENV_CONTEXT_SIZE}
+      RPM_LIMIT: ${ENV_RPM_LIMIT}
+      TPM_LIMIT: ${ENV_TPM_LIMIT}
+      MAX_RETRIES: ${ENV_MAX_RETRIES}
+      DEBOUNCE_SECONDS: ${ENV_DEBOUNCE_SECONDS}
+      DEBOUNCE_POLL_INTERVAL: ${ENV_DEBOUNCE_POLL_INTERVAL}
+      FUNNEL_WORKERS: ${ENV_FUNNEL_WORKERS}
+      SCAN_INTERVAL: ${ENV_SCAN_INTERVAL}
+      SCAN_DIR: ${ENV_SCAN_DIR}
+      MEDIA_EXTENSIONS: ${ENV_MEDIA_EXTENSIONS}
+      LANG_MAP_OVERRIDE: ${ENV_LANG_MAP_OVERRIDE}
+      WATCHDOG_ENABLED: ${ENV_WATCHDOG_ENABLED}
+      WATCHDOG_PATH: ${ENV_WATCHDOG_PATH}
     volumes:
+      - ./config:/app/config
       - ./data:/app/data
       - ./logs:/app/logs
-      - ${COMPOSE_DATA_PATH:-./prompts_mnt}/subtitle/prompts:/app/prompts
-      - ${RESOURCE:-./media_mnt}:/media
+      - ./prompts:/app/prompts
+      - ./media_mnt:/media
     networks:
       default:
 
