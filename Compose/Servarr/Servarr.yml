@@ -19,6 +19,7 @@
 #     - 6767 (Bazarr): 字幕自动化搜寻与精准匹配
 #     - 5055 (Jellyseerr): 跨平台媒体订阅与请求发现
 #   - 工具/同步层:
+#     - 6970 (qBitrr): 磁力链接与失速自动换种管理
 #     - Recyclarr: 无 Web UI，基于 CLI 同步 TRaSH 最佳质量实践配置
 #
 # 数据挂载逻辑：
@@ -209,6 +210,25 @@ services:
     volumes:
       - ./config/recyclarr:/config
     restart: unless-stopped
+
+  # 10. 磁力链接管理 (工具层)
+  qbitrr:
+    image: feramance/qbitrr:latest
+    container_name: ${QBITRR_HOSTNAME}
+    hostname: ${QBITRR_HOSTNAME}
+    environment:
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    volumes:
+      - ./config/qbitrr:/config
+      - ${RESOURCE}/Downloads:/downloads
+    ports:
+      - "${QBITRR_PORT}:6970"
+    restart: unless-stopped
+
 
 networks:
   default:

@@ -1,0 +1,62 @@
+[WebUI]
+# 将内部监听端口改为与宿主机映射一致，避免潜在冲突
+Port = 6970
+Host = "0.0.0.0"
+
+[qBit]
+# 使用 Servarr 内网容器名通讯
+Host =${QBITTORRENT_HOSTNAME}
+Port = ${QBITTORRENT_PORT}
+UserName = ${TARGET_USER}
+Password = ${TARGET_PASS}
+# 仅管理这些分类的任务，保护手动添加的种子
+ManagedCategories = []
+
+[Settings]
+# 全局扫描间隔（秒）
+LoopSleepTimer = 300
+# 指向容器内的下载挂载路径
+CompletedDownloadFolder = "/downloads"
+
+# ============================================================
+# Sonarr 监控配置
+# ============================================================
+[Sonarr-TV]
+Managed = true
+URI = "http://${SONARR_HOSTNAME}:${SONARR_PORT}"
+APIKey = "<YOUR_SONARR_API_KEY>"
+Category = "tv-sonarr"
+ReSearch = true          # 开启基础重搜功能
+
+[Sonarr-TV.Torrent]
+# 【缓冲设置】给磁力链接 10 分钟时间去寻找 Peer 获取元数据
+IgnoreTorrentsYoungerThan = 600
+
+# 不要自动删除速度慢的种子文件
+DoNotRemoveSlow = true
+
+# 【失速时间】在 10 分钟缓冲后，如果持续 30 分钟无速度，则判定为失速并删除
+StalledDelay = 30
+
+# 【换种策略】设为 false，让 Arr 通过自然重试逻辑去换种（避免 API 爆发）
+ReSearchStalled = false
+
+# 【冷门资源保护】如果下载进度已经超过 10%，则不再自动删除（保护定时上线的上传者）
+MaximumDeletablePercentage = 0.1
+
+# ============================================================
+# Radarr 监控配置
+# ============================================================
+[Radarr-Movies]
+Managed = true
+URI = "http://${RADARR_HOSTNAME}:${RADARR_PORT}"
+APIKey = "<YOUR_RADARR_API_KEY>"
+Category = "radarr"
+ReSearch = true
+
+[Radarr-Movies.Torrent]
+DoNotRemoveSlow = true
+StalledDelay = 30
+ReSearchStalled = false
+IgnoreTorrentsYoungerThan = 600
+MaximumDeletablePercentage = 0.1
