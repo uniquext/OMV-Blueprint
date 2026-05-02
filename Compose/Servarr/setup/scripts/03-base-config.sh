@@ -312,31 +312,65 @@ except Exception as e:
 PYEOF
 }
 
+configure_delay_profile() {
+    local svc=$1
+    local port=$2
+    local key=$3
+
+    log_info "配置 $svc 延迟与首选 Torrent 协议..."
+
+    run_python_api "$svc" "$port" "$key" <<'PYEOF'
+import urllib.request, json, sys
+svc, port, key = sys.argv[1:4]
+base = f"http://localhost:{port}/api/v3"
+hd = {"X-Api-Key": key, "Content-Type": "application/json"}
+
+def api_call(ep, d=None, m="GET"):
+    req = urllib.request.Request(f"{base}/{ep}", data=json.dumps(d).encode() if d else None, headers=hd, method=m)
+    with urllib.request.urlopen(req) as r: return json.loads(r.read())
+
+try:
+    profiles = api_call("delayprofile")
+    if profiles:
+        for p in profiles:
+            p["preferredProtocol"] = "torrent"
+            p["torrentDelay"] = 15
+            p["enableTorrent"] = True
+            api_call(f"delayprofile/{p['id']}", d=p, m="PUT")
+    print(f"  \033[32m[✓]\033[0m {svc} 延迟配置已成功设为 Torrent 15分钟")
+except Exception as e:
+    print(f"  \033[31m[✗]\033[0m {svc} 延迟配置失败: {e}")
+PYEOF
+}
+
 if [ -n "$RADARR_KEY" ]; then
     log_info "配置 Radarr..."
     configure_ui_language "radarr" "$RADARR_PORT" "$RADARR_KEY" "true"
-    configure_metadata "radarr" "$RADARR_PORT" "$RADARR_KEY" "movieMetadataLanguage"
+    # configure_metadata "radarr" "$RADARR_PORT" "$RADARR_KEY" "movieMetadataLanguage"
     configure_naming_radarr "radarr" "$RADARR_PORT" "$RADARR_KEY"
     configure_root_folder "radarr" "$RADARR_PORT" "$RADARR_KEY" "/media"
     configure_download_client "radarr" "$RADARR_PORT" "$RADARR_KEY"
+    configure_delay_profile "radarr" "$RADARR_PORT" "$RADARR_KEY"
 fi
 
 if [ -n "$SONARR_KEY" ]; then
     log_info "配置 Sonarr..."
     configure_ui_language "sonarr" "$SONARR_PORT" "$SONARR_KEY" "false"
-    configure_metadata "sonarr" "$SONARR_PORT" "$SONARR_KEY" ""
+    # configure_metadata "sonarr" "$SONARR_PORT" "$SONARR_KEY" ""
     configure_naming_sonarr "sonarr" "$SONARR_PORT" "$SONARR_KEY"
     configure_root_folder "sonarr" "$SONARR_PORT" "$SONARR_KEY" "/media"
     configure_download_client "sonarr" "$SONARR_PORT" "$SONARR_KEY"
+    configure_delay_profile "sonarr" "$SONARR_PORT" "$SONARR_KEY"
 fi
 
 if [ -n "$WHISPARR_KEY" ]; then
     log_info "配置 Whisparr..."
     configure_ui_language "whisparr" "$WHISPARR_PORT" "$WHISPARR_KEY" "false"
-    configure_metadata "whisparr" "$WHISPARR_PORT" "$WHISPARR_KEY" "movieMetadataLanguage"
+    # configure_metadata "whisparr" "$WHISPARR_PORT" "$WHISPARR_KEY" "movieMetadataLanguage"
     configure_naming_whisparr "whisparr" "$WHISPARR_PORT" "$WHISPARR_KEY"
     configure_root_folder "whisparr" "$WHISPARR_PORT" "$WHISPARR_KEY" "/media"
     configure_download_client "whisparr" "$WHISPARR_PORT" "$WHISPARR_KEY"
+    configure_delay_profile "whisparr" "$WHISPARR_PORT" "$WHISPARR_KEY"
 fi
 
 log_success "基础配置注入完成"
