@@ -18,6 +18,7 @@
 #   - 后处理与辅助层:
 #     - 6767 (Bazarr): 字幕自动化搜寻与精准匹配
 #     - 5055 (Jellyseerr): 跨平台媒体订阅与请求发现
+#     - 9800 (SubtitleTranslator): 智能字幕翻译与自动化后处理
 #   - 工具/同步层:
 #     - 6970 (qBitrr): 磁力链接与失速自动换种管理
 #     - Recyclarr: 无 Web UI，基于 CLI 同步 TRaSH 最佳质量实践配置
@@ -227,6 +228,31 @@ services:
       - ${RESOURCE}/Downloads:/downloads
     ports:
       - "${QBITRR_PORT}:6970"
+    restart: unless-stopped
+
+  # 11. 智能字幕翻译与后处理 (后处理与辅助层)
+  subtitle-translator:
+    image: subtitle-translator:latest
+    container_name: ${SUBTITLE_TRANSLATOR_HOSTNAME}
+    hostname: ${SUBTITLE_TRANSLATOR_HOSTNAME}
+    environment:
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+      LLM_API_URL: ${ST_LLM_API_URL}
+      LLM_API_KEY: ${ST_LLM_API_KEY}
+      LLM_MODEL: ${ST_LLM_MODEL}
+      LLM_MODEL_TYPE: ${ST_LLM_MODEL_TYPE}
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    volumes:
+      - ./config/subtitle-translator:/app/config
+      - ./data/subtitle-translator:/app/data
+      - ./logs/subtitle-translator:/app/logs
+      - ./prompts/subtitle-translator:/app/prompts
+      - ${RESOURCE}/Media:/media
+    ports:
+      - "${SUBTITLE_TRANSLATOR_PORT}:9800"
     restart: unless-stopped
 
 
