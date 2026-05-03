@@ -20,23 +20,28 @@ from scanner.media_scanner import scan_directory
 
 def setup_logging():
     log_dir = os.environ.get("LOG_DIR", "/app/logs")
+    
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    # 清理已有的 handlers 防止重复注册
+    logger.handlers.clear()
+    
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+    # 1. 始终添加 stdout 控制台日志
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+
+    # 2. 尝试添加文件日志
     try:
         os.makedirs(log_dir, exist_ok=True)
         log_file = os.path.join(log_dir, "subtitle_translator.log")
         file_handler = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
     except OSError:
-        file_handler = logging.StreamHandler(sys.stdout)
-
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-
-    stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setFormatter(formatter)
-    logger.addHandler(stream_handler)
+        pass
 
 setup_logging()
 logger = logging.getLogger(__name__)

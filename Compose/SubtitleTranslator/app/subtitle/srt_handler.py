@@ -7,6 +7,7 @@ SRT 字幕文件处理模块
 import os
 import logging
 import pysrt
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,7 @@ def extract_text_from_srt(srt_path: str, txt_path: str) -> None:
     从 SRT 字幕文件中提取纯文本。
 
     将每条字幕的文本提取为一行，多行字幕合并为单行（换行替换为空格）。
+    同时通过正则表达式过滤掉可能存在的 HTML 标签（如 <i>, <b>, <font> 等）。
     输出文件每行对应一条字幕条目。
 
     Args:
@@ -33,8 +35,10 @@ def extract_text_from_srt(srt_path: str, txt_path: str) -> None:
 
     with open(txt_path, "w", encoding="utf-8") as f:
         for sub in subs:
+            # 过滤 HTML 标签 (如 <i>) 和 ASS 样式标签 (如 {\an8})
+            clean_text = re.sub(r'<[^>]+>|\{[^}]+\}', '', sub.text)
             # 多行文本合并为单行: 将 \n 替换为空格
-            line = sub.text.replace("\n", " ").strip()
+            line = clean_text.replace("\n", " ").strip()
             f.write(line + "\n")
 
     logger.info(f"Text extracted to {txt_path}")
