@@ -67,12 +67,16 @@ def scan_directory(dir_path: str, extensions: List[str]) -> List[str]:
             if is_media_file(f, exts_lower):
                 file_path = os.path.join(root, f)
                 
-                # 检查是否已经存在 .zh.srt (Level 0)
+                # 检查是否已经存在任何中文字幕 (.zh.srt 或 .zh.*.srt)
                 media_stem = os.path.splitext(f)[0]
-                zh_srt_path = os.path.join(root, f"{media_stem}.zh.srt")
+                has_zh = False
+                for filename in files:
+                    if (filename.startswith(f"{media_stem}.zh.") or filename.startswith(f"{media_stem}.zh-")) and filename.endswith(".srt"):
+                        has_zh = True
+                        break
                 
-                if os.path.exists(zh_srt_path):
-                    logger.debug(f"Skipping {f}, already has .zh.srt")
+                if has_zh:
+                    logger.debug(f"Skipping {f}, already has .zh.*.srt subtitle")
                     continue
                 
                 media_files.append(file_path)

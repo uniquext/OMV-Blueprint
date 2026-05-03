@@ -39,6 +39,15 @@ def scan_external_subtitles(media_path: str) -> Dict[str, str]:
                 if not filename.endswith(".srt"):
                     continue
 
+                # 支持通配符前缀匹配，包括专属字幕及外部中文字幕
+                if (filename.startswith(f"{media_stem}.zh.") or filename.startswith(f"{media_stem}.zh-")) and filename.endswith(".srt"):
+                    result["zh"] = os.path.join(search_dir, filename)
+                    continue
+
+                if not filename.startswith(media_stem + "."):
+                    continue
+
+                # 正常提取其他语言变体（如 .en.srt, .ja.srt 等）
                 parts = filename.rsplit(".", 2)
                 if len(parts) != 3:
                     continue
@@ -159,7 +168,10 @@ def execute_funnel_action(job_id: str, media_path: str, funnel_result: Dict) -> 
     level = funnel_result.get("level", -1)
     media_stem = Path(media_path).stem
     media_dir = os.path.dirname(media_path)
-    output_zh_srt = os.path.join(media_dir, f"{media_stem}.zh.srt")
+    if level == 1:
+        output_zh_srt = os.path.join(media_dir, f"{media_stem}.zh.opencc.srt")
+    else:
+        output_zh_srt = os.path.join(media_dir, f"{media_stem}.zh.ai.srt")
 
     if level == 0:
         logger.info(f"Job {job_id}: Level 0 skip, marking done")

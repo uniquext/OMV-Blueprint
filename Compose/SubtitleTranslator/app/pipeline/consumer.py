@@ -74,7 +74,7 @@ def rebuild_srt(job: Dict):
     media_dir = os.path.dirname(media_path)
 
     original_srt_path = job.get("original_srt_path")
-    output_srt_path = job.get("output_srt_path") or os.path.join(media_dir, f"{media_stem}.zh.srt")
+    output_srt_path = job.get("output_srt_path") or os.path.join(media_dir, f"{media_stem}.zh.ai.srt")
 
     translate_task_id = job.get("translate_task_id")
     if not translate_task_id:
