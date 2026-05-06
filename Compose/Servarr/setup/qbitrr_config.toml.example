@@ -1,14 +1,14 @@
 [WebUI]
-# 将内部监听端口改为与宿主机映射一致，避免潜在冲突
+# 将内部监听端口改为 6970，避免潜在冲突
 Port = 6970
 Host = "0.0.0.0"
 
 [qBit]
 # 使用 Servarr 内网容器名通讯
-Host =${QBITTORRENT_HOSTNAME}
+Host = "${QBITTORRENT_HOSTNAME}"
 Port = ${QBITTORRENT_PORT}
-UserName = ${TARGET_USER}
-Password = ${TARGET_PASS}
+UserName = "${TARGET_USER}"
+Password = "${TARGET_PASS}"
 # 仅管理这些分类的任务，保护手动添加的种子
 ManagedCategories = []
 

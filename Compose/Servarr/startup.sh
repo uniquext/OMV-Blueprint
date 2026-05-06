@@ -42,6 +42,10 @@ $SCRIPTS_DIR/05-bazarr.sh
 echo -e "\n============== Jellyseerr 多平台融合 ================"
 $SCRIPTS_DIR/06-jellyseerr.sh
 
+# 7. qBitRR 磁力链接管理初始化
+echo -e "\n============== qBitRR 磁力链接管理 ================"
+$SCRIPTS_DIR/07-qbitrr.sh
+
 echo ""
 log_success "✨ 所有模块初始化完成！"
 log_info "建议访问 Prowlarr 检查同步状态，访问 Jellyseerr 完成初次向导。"
