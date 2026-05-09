@@ -1,14 +1,81 @@
 import os
 import json
 import logging
+import tempfile
 from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 
 CONFIG_PATH = "/app/config/config.json"
 
+
+def atomic_write_json(path: str, data: Any) -> None:
+    """
+    原子写入 JSON 文件
+
+    使用 tempfile + fsync + os.replace() 模式确保写入原子性。
+    如果写入过程中发生异常，原文件内容不受影响。
+    """
+    dir_name = os.path.dirname(path) or "."
+    fd = None
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix=".tmp", dir=dir_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = None  # os.fdopen 接管了 fd，后续不需要再 close
+            json.dump(data, f, indent=4, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        tmp_path = None  # replace 成功，不需要清理
+    except Exception:
+        # 清理临时文件
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        raise
+
+
+def atomic_write_text(path: str, content: str) -> None:
+    """
+    原子写入文本文件
+
+    使用 tempfile + fsync + os.replace() 模式确保写入原子性。
+    如果写入过程中发生异常，原文件内容不受影响。
+    """
+    dir_name = os.path.dirname(path) or "."
+    fd = None
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix=".tmp", dir=dir_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = None  # os.fdopen 接管了 fd
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        tmp_path = None
+    except Exception:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        raise
+
 DEFAULTS = {
-    "app_port": 9800,
     "llm": {
         "api_url": "",
         "api_key": "",
@@ -38,50 +105,6 @@ DEFAULTS = {
     }
 }
 
-ENV_OVERRIDES = {
-    "APP_PORT": ("app_port", int),
-    "LLM_API_URL": ("llm.api_url", str),
-    "LLM_API_KEY": ("llm.api_key", str),
-    "LLM_MODEL": ("llm.model", str),
-    "LLM_MODEL_TYPE": ("llm.model_type", str),
-    "LLM_TIMEOUT": ("llm.timeout", int),
-    "BATCH_SIZE": ("llm.batch_size", int),
-    "CONTEXT_SIZE": ("llm.context_size", int),
-    "RPM_LIMIT": ("llm.rpm_limit", int),
-    "TPM_LIMIT": ("llm.tpm_limit", int),
-    "MAX_RETRIES": ("llm.max_retries", int),
-    "DEBOUNCE_SECONDS": ("pipeline.debounce_seconds", int),
-    "DEBOUNCE_POLL_INTERVAL": ("pipeline.debounce_poll_interval", int),
-    "FUNNEL_WORKERS": ("pipeline.funnel_workers", int),
-    "SCAN_INTERVAL": ("pipeline.scan_interval", int),
-    "SCAN_DIR": ("pipeline.scan_dir", str),
-    "MEDIA_EXTENSIONS": ("media.extensions", lambda x: [ext.strip() for ext in x.split(",")]),
-    "LANG_MAP_OVERRIDE": ("media.lang_map_override", json.loads),
-    "WATCHDOG_ENABLED": ("watchdog.enabled", lambda x: x.lower() == "true"),
-    "WATCHDOG_PATH": ("watchdog.path", str),
-}
-
-def _set_nested_value(config: Dict, path: str, value: Any):
-    """根据点号分隔的路径设置嵌套字典的值"""
-    keys = path.split(".")
-    for key in keys[:-1]:
-        config = config.setdefault(key, {})
-    config[keys[-1]] = value
-
-def _apply_env_overrides(config: Dict) -> bool:
-    """从环境变量覆盖配置，如果发生了覆盖则返回 True"""
-    changed = False
-    for env_key, (config_path, converter) in ENV_OVERRIDES.items():
-        val = os.environ.get(env_key)
-        if val is not None and val != "":
-            try:
-                converted_val = converter(val)
-                _set_nested_value(config, config_path, converted_val)
-                changed = True
-            except Exception as e:
-                logger.error(f"Failed to convert env {env_key}={val}: {e}")
-    return changed
-
 import copy
 
 def _merge_config(default: Dict, user: Dict) -> Dict:
@@ -90,8 +113,10 @@ def _merge_config(default: Dict, user: Dict) -> Dict:
     for key, value in user.items():
         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
             result[key] = _merge_config(result[key], value)
-        else:
+        elif key in result:
+            # 仅合入 DEFAULTS 中已定义的顶层键
             result[key] = value
+        # 未在 DEFAULTS 中定义的顶层键（如 app_port）被丢弃
     return result
 
 _config = None
@@ -105,20 +130,26 @@ def load_config() -> Dict[str, Any]:
     """
     加载配置主流程 (带缓存):
     1. 如果已经加载过，直接返回。
-    2. 如果 config.json 不存在，按 DEFAULTS 生成。
-    3. 读取 config.json 并应用覆盖。
+    2. 如果 config.json 不存在，按 DEFAULTS 生成并原子写入。
+    3. 读取 config.json 并与 DEFAULTS 合并。
+    config.json 为唯一配置来源（app_port 除外，仅通过环境变量 APP_PORT）。
     """
     global _config
     if _config is not None:
         return _config
 
     config_dir = os.path.dirname(CONFIG_PATH)
-    if not os.path.exists(config_dir):
+    if config_dir and not os.path.exists(config_dir):
         os.makedirs(config_dir, exist_ok=True)
 
     if not os.path.exists(CONFIG_PATH):
         logger.info(f"Config file not found, creating default at {CONFIG_PATH}")
         config = copy.deepcopy(DEFAULTS)
+        try:
+            atomic_write_json(CONFIG_PATH, config)
+            logger.info(f"Default config saved to {CONFIG_PATH}")
+        except Exception as e:
+            logger.error(f"Failed to save default config file: {e}")
     else:
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -128,23 +159,9 @@ def load_config() -> Dict[str, Any]:
             logger.error(f"Failed to read config file: {e}")
             config = copy.deepcopy(DEFAULTS)
 
-    # 应用环境变量覆盖
-    changed = _apply_env_overrides(config)
-    
-    # 如果发生了覆盖或文件之前不存在，则写回文件
-    if changed or not os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=4, ensure_ascii=False)
-            logger.info(f"Config updated and saved to {CONFIG_PATH}")
-        except Exception as e:
-            logger.error(f"Failed to save config file: {e}")
-
-    # 必填项校验
-    if not config["llm"].get("api_url") or not config["llm"].get("api_key"):
-        logger.error("LLM_API_URL and LLM_API_KEY must be set in config.json or environment variables.")
-        import sys
-        sys.exit(1)
+    # 必填项校验（仅记录 error 日志，不退出进程）
+    if not config["llm"].get("api_url") or not config["llm"].get("api_key") or not config["llm"].get("model"):
+        logger.error("LLM api_url, api_key and model are not configured. Translation will not work until configured via config.json or API.")
 
     # 自动生成 prompts
     _ensure_prompts(config)
@@ -162,17 +179,17 @@ DEFAULT_SYSTEM_PROMPT = """你是一个专业的字幕翻译助手。
 """
 
 def _ensure_prompts(config: Dict):
+    """自动生成默认的 prompt 文件（使用原子写入）"""
     if not os.path.exists(PROMPTS_DIR):
         os.makedirs(PROMPTS_DIR, exist_ok=True)
     
     sys_prompt_path = os.path.join(PROMPTS_DIR, "system_prompt.txt")
     if not os.path.exists(sys_prompt_path):
         logger.info(f"Generating default system prompt at {sys_prompt_path}")
-        with open(sys_prompt_path, "w", encoding="utf-8") as f:
-            f.write(DEFAULT_SYSTEM_PROMPT)
+        atomic_write_text(sys_prompt_path, DEFAULT_SYSTEM_PROMPT)
             
     glossary_path = os.path.join(PROMPTS_DIR, "glossary.json")
     if not os.path.exists(glossary_path):
         logger.info(f"Generating default glossary at {glossary_path}")
-        with open(glossary_path, "w", encoding="utf-8") as f:
-            json.dump({}, f, indent=4, ensure_ascii=False)
+        atomic_write_json(glossary_path, {})
+

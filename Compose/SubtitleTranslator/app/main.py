@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import fcntl
 import logging
 from logging.handlers import RotatingFileHandler
 import threading
@@ -39,6 +40,10 @@ def setup_logging():
         log_file = os.path.join(log_dir, "subtitle_translator.log")
         file_handler = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)
         file_handler.setFormatter(formatter)
+        # 设置 FD_CLOEXEC 防止 execv 后 fd 泄漏
+        fd = file_handler.stream.fileno()
+        flags = fcntl.fcntl(fd, fcntl.F_GETFD)
+        fcntl.fcntl(fd, fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)
         logger.addHandler(file_handler)
     except OSError:
         pass
@@ -194,5 +199,5 @@ async def health():
 
 
 if __name__ == "__main__":
-    config = load_config()
-    uvicorn.run("main:app", host="0.0.0.0", port=int(config["app_port"]), reload=False)
+    port = int(os.environ.get("APP_PORT", 9800))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
