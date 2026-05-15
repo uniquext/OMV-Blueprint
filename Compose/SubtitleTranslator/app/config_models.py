@@ -16,6 +16,7 @@ class LlmConfig(BaseModel):
     api_key: str
     model: str
     model_type: str
+    temperature: float = Field(ge=0, le=2)
     timeout: int = Field(ge=1)
     batch_size: int = Field(ge=1)
     context_size: int = Field(ge=0)

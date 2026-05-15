@@ -37,7 +37,7 @@ class ScanRequest(BaseModel):
 @router.post("/notify", status_code=status.HTTP_202_ACCEPTED)
 async def notify_endpoint(request: NotifyRequest):
     if not debounce_map or not worker_pool:
-        raise HTTPException(status_code=503, detail="Pipeline not initialized")
+        raise HTTPException(status_code=503, detail={"error": "PIPELINE_NOT_READY", "message": "Pipeline not initialized"})
 
     media_path = request.media_path
     language = request.language
@@ -45,13 +45,13 @@ async def notify_endpoint(request: NotifyRequest):
     logger.info(f"Received notify: media={media_path}, lang={language}")
 
     if os.path.isdir(media_path):
-        raise HTTPException(status_code=400, detail="media_path must be a file, not a directory")
+        raise HTTPException(status_code=400, detail={"error": "INVALID_MEDIA_PATH", "message": "media_path must be a file, not a directory"})
 
     config = load_config()
     extensions = [ext.lower() for ext in config["media"]["extensions"]]
     file_ext = os.path.splitext(media_path)[1].lower()
     if file_ext not in extensions:
-        raise HTTPException(status_code=400, detail=f"media_path extension '{file_ext}' is not a supported media file")
+        raise HTTPException(status_code=400, detail={"error": "UNSUPPORTED_EXTENSION", "message": f"media_path extension '{file_ext}' is not a supported media file"})
 
     lang_map_override = config["media"]["lang_map_override"]
 
@@ -63,7 +63,7 @@ async def notify_endpoint(request: NotifyRequest):
         return {
             "status": "accepted",
             "route": "immediate",
-            "message": "简中字幕已到达，跳过等待层直接处理"
+            "message": "Simplified Chinese subtitle arrived, skipping debounce layer for immediate processing"
         }
     else:
         debounce_map.upsert(media_path, source="notify", language=language or "")
@@ -71,19 +71,19 @@ async def notify_endpoint(request: NotifyRequest):
         return {
             "status": "accepted",
             "route": "debounce",
-            "message": f"已进入等待层，将在 {debounce_seconds} 秒后处理"
+            "message": f"Queued in debounce layer, will process after {debounce_seconds}s"
         }
 
 
 @router.post("/scan", status_code=status.HTTP_200_OK)
 async def scan_endpoint(request: ScanRequest):
     if not worker_pool:
-        raise HTTPException(status_code=503, detail="Pipeline not initialized")
+        raise HTTPException(status_code=503, detail={"error": "PIPELINE_NOT_READY", "message": "Pipeline not initialized"})
 
     if not _scan_lock.acquire(blocking=False):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail={"error": "Scan already in progress", "message": "上次扫描尚未完成，请稍后重试"}
+            detail={"error": "SCAN_IN_PROGRESS", "message": "A scan is already in progress, please retry later"}
         )
 
     try:
@@ -92,7 +92,7 @@ async def scan_endpoint(request: ScanRequest):
         extensions = config["media"]["extensions"]
 
         if not os.path.isdir(scan_dir):
-            raise HTTPException(status_code=400, detail=f"Directory not found: {scan_dir}")
+            raise HTTPException(status_code=400, detail={"error": "DIRECTORY_NOT_FOUND", "message": f"Directory not found: {scan_dir}"})
 
         logger.info(f"Manual scan triggered for {scan_dir}")
         files = scan_directory(scan_dir, extensions)
@@ -104,7 +104,7 @@ async def scan_endpoint(request: ScanRequest):
 
         return {
             "count": enqueued_count,
-            "message": f"已扫描到 {enqueued_count} 个待处理媒体文件，已加入执行层队列"
+            "message": f"Scanned {enqueued_count} media files, enqueued to worker pool"
         }
     finally:
         _scan_lock.release()
@@ -136,7 +136,7 @@ async def put_config(payload: ConfigPayload, background_tasks: BackgroundTasks):
     if not _config_lock.acquire(blocking=False):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Another config update is in progress"
+            detail={"error": "CONFIG_UPDATE_IN_PROGRESS", "message": "Another config update is in progress"}
         )
 
     try:
@@ -149,7 +149,7 @@ async def put_config(payload: ConfigPayload, background_tasks: BackgroundTasks):
             else:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="Cannot restore masked api_key: current api_key is empty. Please provide the actual api_key."
+                    detail={"error": "MASKED_API_KEY_RESTORE_FAILED", "message": "Cannot restore masked api_key: current api_key is empty. Please provide the actual api_key."}
                 )
 
         # 序列化为字典（extra='ignore' 已自动过滤 app_port 等未定义字段）
@@ -167,14 +167,14 @@ async def put_config(payload: ConfigPayload, background_tasks: BackgroundTasks):
 
         return {
             "status": "restarting",
-            "message": "配置已写入，进程即将重启"
+            "message": "Config written, process is restarting"
         }
     except Exception as e:
         _config_lock.release()
         logger.error(f"Failed to update config: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Config update failed: {str(e)}"
+            detail={"error": "CONFIG_WRITE_FAILED", "message": f"Config update failed: {str(e)}"}
         )
 
 
@@ -227,14 +227,13 @@ async def put_prompts(payload: PromptsPayload):
     if payload.system_prompt is None and payload.glossary is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="At least one of 'system_prompt' or 'glossary' must be provided"
+            detail={"error": "EMPTY_PROMPTS_PAYLOAD", "message": "At least one of 'system_prompt' or 'glossary' must be provided"}
         )
 
-    # glossary 类型校验（必须是 dict）
     if payload.glossary is not None and not isinstance(payload.glossary, dict):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="glossary must be a JSON object"
+            detail={"error": "INVALID_GLOSSARY_TYPE", "message": "glossary must be a JSON object"}
         )
 
     if not os.path.exists(PROMPTS_DIR):
@@ -257,7 +256,7 @@ async def put_prompts(payload: PromptsPayload):
     return {
         "status": "updated",
         "updated": updated,
-        "message": f"已更新: {', '.join(updated)}"
+        "message": f"Updated: {', '.join(updated)}"
     }
 
 

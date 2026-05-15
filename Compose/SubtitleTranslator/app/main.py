@@ -70,6 +70,7 @@ def _cleanup_residual_intermediate_files():
             if task:
                 file_path = task["file_path"]
                 protected_paths.add(file_path)
+                protected_paths.add(file_path + ".tmp")
                 if file_path.endswith(".en.txt"):
                     protected_paths.add(file_path.replace(".en.txt", ".zh.txt"))
                 elif file_path.endswith(".ja.txt"):
@@ -85,7 +86,7 @@ def _cleanup_residual_intermediate_files():
     for root, dirs, files in os.walk(scan_dir):
         dirs[:] = [d for d in dirs if not d.startswith('.')]
         for f in files:
-            if f.endswith((".emb.srt", ".emb.txt", ".en.txt", ".ja.txt", ".zh.txt")):
+            if f.endswith((".emb.srt", ".emb.txt", ".en.txt", ".ja.txt", ".zh.txt", ".tmp")):
                 tmp_file = os.path.join(root, f)
                 if tmp_file in protected_paths:
                     logger.debug(f"Skipping protected file for translating job: {tmp_file}")

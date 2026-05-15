@@ -81,6 +81,7 @@ DEFAULTS = {
         "api_key": "",
         "model": "",
         "model_type": "chat",
+        "temperature": 0.3,
         "timeout": 120,
         "batch_size": 20,
         "context_size": 5,
