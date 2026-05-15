@@ -185,6 +185,7 @@ def execute_funnel_action(job_id: str, media_path: str, funnel_result: Dict) -> 
             logger.info(f"Job {job_id}: Graphical subtitles only, cannot extract text, skipping")
         else:
             logger.warning(f"Job {job_id}: No usable subtitle ({reason}), skipping")
+        db.update_job_funnel_info(job_id, funnel_level=None)
         db.update_job_status(job_id, "done")
         return
 

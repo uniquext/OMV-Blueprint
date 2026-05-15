@@ -106,7 +106,7 @@ def call_llm(system_prompt: str, user_prompt: str, glossary: Dict, model_type: s
     if model_type == "mt":
         final_user_content = user_prompt
     else:
-        final_user_content = f"Glossary: {json.dumps(glossary, ensure_ascii=False)}\n\n{user_prompt}"
+        final_user_content = f"术语表：{json.dumps(glossary, ensure_ascii=False)}\n\n{user_prompt}"
 
     payload = {
         "model": _get_config()["llm"]["model"],
@@ -114,7 +114,7 @@ def call_llm(system_prompt: str, user_prompt: str, glossary: Dict, model_type: s
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": final_user_content}
         ],
-        "temperature": 0.3
+        "temperature": _get_config()["llm"]["temperature"]
     }
 
     with httpx.Client(timeout=float(_get_config()["llm"]["timeout"])) as client:
@@ -142,6 +142,7 @@ def parse_response(response_text: str, expected_ids: List[int]) -> List[Translat
     results that include pre-context translation), then validate line count and continuity.
     """
     results = []
+    discarded = 0
     # Lenient regex: captures all content after the pipe symbol
     pattern = re.compile(r"^ID:\s*(\d+)\s*\|\s*(.+)$")
 
@@ -159,6 +160,15 @@ def parse_response(response_text: str, expected_ids: List[int]) -> List[Translat
             # Only keep lines within the current batch ID range, discard context noise
             if line_id in expected_id_set:
                 results.append(TranslatedLine(id=line_id, text=translated_text))
+            else:
+                discarded += 1
+
+    if discarded > 0:
+        logger.warning(
+            f"LLM returned {len(results) + discarded} lines matching ID pattern, "
+            f"but only {len(results)} within expected IDs {expected_ids}. "
+            f"Discarded {discarded} out-of-range lines."
+        )
 
     if len(results) != len(expected_ids):
         raise ValueError(f"Line count validation failed. Expected {len(expected_ids)} lines, got {len(results)} lines.")
@@ -193,6 +203,98 @@ def _build_output_with_line_map(tmp_path: str, out_path: str, line_map: List[Opt
             else:
                 f.write(id_to_text.get(mapped_id, "") + "\n")
 
+def validate_tmp_file(tmp_path: str, batch_size: int) -> int:
+    """
+    校验 .tmp 文件中的完整行数，对齐到批次边界
+
+    逐行解析 .tmp 文件，统计连续递增 ID 的有效行数，
+    然后将结果向下对齐到 batch_size 的整数倍（即只信任完整批次），
+    防止半写批次被续传依赖。若文件不存在返回 0。
+    """
+    if not os.path.exists(tmp_path):
+        return 0
+
+    pattern = re.compile(r"^ID:\s*(\d+)\s*\|\s*(.+)$")
+    consecutive_count = 0
+    current_id = 1
+
+    with open(tmp_path, "r", encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            match = pattern.match(stripped)
+            if match:
+                line_id = int(match.group(1))
+                if line_id == current_id:
+                    consecutive_count = current_id
+                    current_id += 1
+
+    return (consecutive_count // batch_size) * batch_size
+
+
+def compute_resume_batch_idx(current_batch: int, total_batches: int, tmp_path: str, batch_size: int) -> int:
+    """
+    基于 DB 记录和 .tmp 文件实际内容计算断点续传的起始批次索引
+
+    策略：取 DB 和 .tmp 中较小的进度值作为续传起点，以 .tmp 为准（因为文件是实际持久化）。
+    - 若 current_batch == 0（新任务），返回 1
+    - 若 .tmp 文件不存在，返回 1（从头开始）
+    - 否则以 .tmp 中的完整行数推算起始批次
+    """
+    if current_batch == 0 and total_batches == 0:
+        return 1
+
+    if not os.path.exists(tmp_path):
+        return 1
+
+    tmp_valid_lines = validate_tmp_file(tmp_path, batch_size)
+    if tmp_valid_lines == 0:
+        return 1
+
+    tmp_batch_idx = (tmp_valid_lines - 1) // batch_size + 1
+    resume_batch = min(current_batch, tmp_batch_idx)
+
+    if resume_batch < 1:
+        resume_batch = 1
+
+    return resume_batch + 1
+
+
+def truncate_tmp_for_resume(tmp_path: str, batch_size: int) -> int:
+    """
+    截断 .tmp 文件到最近的有效批次边界
+
+    返回值：
+    - -1：.tmp 文件不存在，调用方应将 start_batch_idx 重置为 1
+    - 0：.tmp 存在但无有效行，调用方应将 start_batch_idx 重置为 1
+    - >0：成功截断，返回保留的有效行数
+    """
+    if not os.path.exists(tmp_path):
+        return -1
+
+    valid_lines = validate_tmp_file(tmp_path, batch_size)
+    if valid_lines == 0:
+        return 0
+
+    with open(tmp_path, "r", encoding="utf-8") as rf:
+        all_lines = rf.readlines()
+    pattern = re.compile(r"^ID:\s*(\d+)\s*\|\s*(.+)$")
+    keep_lines = []
+    kept_ids = 0
+    for raw_line in all_lines:
+        match = pattern.match(raw_line.strip())
+        if match and int(match.group(1)) == kept_ids + 1:
+            keep_lines.append(raw_line)
+            kept_ids += 1
+            if kept_ids >= valid_lines:
+                break
+    with open(tmp_path, "w", encoding="utf-8") as wf:
+        wf.writelines(keep_lines)
+    logger.info(f"Truncated .tmp to {valid_lines} valid lines for resume")
+    return valid_lines
+
+
 def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
     """
     Main translation workflow: preprocess -> create_batches -> batch call_llm -> parse_response ->
@@ -221,6 +323,12 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
         glossary = load_glossary()
 
         tmp_path = file_path + ".tmp"
+
+        if start_batch_idx > 1:
+            result = truncate_tmp_for_resume(tmp_path, _get_config()["llm"]["batch_size"])
+            if result < 1:
+                logger.warning(f"Task {task_id}: Cannot resume (truncate result={result}), resetting to batch 1")
+                start_batch_idx = 1
 
         with open(tmp_path, "w" if start_batch_idx == 1 else "a", encoding="utf-8") as tmp_file:
             for batch in batches[start_batch_idx - 1:]:
