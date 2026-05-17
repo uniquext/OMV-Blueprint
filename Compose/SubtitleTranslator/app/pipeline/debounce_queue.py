@@ -56,6 +56,15 @@ class DebounceMap:
         with self._lock:
             return media_path in self._entries
 
+    def snapshot(self) -> Dict:
+        """返回当前待处理条目的快照（线程安全副本）"""
+        with self._lock:
+            entries = [
+                {"media_path": e["media_path"], "ready_at": e["ready_at"]}
+                for e in self._entries.values()
+            ]
+            return {"pending_count": len(entries), "entries": entries}
+
 
 class FunnelWorkerPool:
     def __init__(self, max_workers: int = 5, debounce_map: DebounceMap = None):
@@ -64,6 +73,9 @@ class FunnelWorkerPool:
         self._running = True
         self._futures = []
         self._debounce_map = debounce_map
+        # 活跃任务计数器（线程安全）
+        self._active_count = 0
+        self._active_lock = threading.Lock()
 
         for _ in range(max_workers):
             future = self._executor.submit(self._worker_loop)
@@ -87,9 +99,17 @@ class FunnelWorkerPool:
                 continue
 
             try:
-                self._process_media(media_path)
-            except Exception as e:
-                logger.error(f"Worker error processing {media_path}: {e}")
+                # 计数器递增
+                with self._active_lock:
+                    self._active_count += 1
+                try:
+                    self._process_media(media_path)
+                except Exception as e:
+                    logger.error(f"Worker error processing {media_path}: {e}")
+                finally:
+                    # 计数器递减（try/finally 保护，异常时也正确递减）
+                    with self._active_lock:
+                        self._active_count -= 1
             finally:
                 self._queue.task_done()
 
@@ -112,6 +132,15 @@ class FunnelWorkerPool:
         self._running = False
         self._executor.shutdown(wait=wait)
         logger.info("FunnelWorkerPool shutdown")
+
+    def snapshot(self) -> Dict:
+        """返回当前运行时状态快照"""
+        with self._active_lock:
+            active = self._active_count
+        return {
+            "queue_size": self._queue.qsize(),
+            "active_workers": active,
+        }
 
 
 def start_debounce_scheduler(debounce_map: DebounceMap, worker_pool: FunnelWorkerPool, interval: float = 1.0) -> threading.Thread:

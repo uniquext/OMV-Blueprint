@@ -13,6 +13,7 @@ import config_loader
 from config_models import ConfigPayload, mask_api_key
 from subtitle.lang_utils import normalize_language
 from scanner.media_scanner import scan_directory
+from response import api_success, api_error
 
 debounce_map = None
 worker_pool = None
@@ -20,7 +21,7 @@ worker_pool = None
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-_scan_lock = threading.Lock()
+_scanning_event = threading.Event()
 _config_lock = threading.Lock()
 
 
@@ -30,11 +31,7 @@ class NotifyRequest(BaseModel):
     subtitle_path: Optional[str] = Field(None, description="下载到的字幕路径(辅助信息)")
 
 
-class ScanRequest(BaseModel):
-    dir_path: str = Field(..., description="扫描根目录")
-
-
-@router.post("/notify", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/api/notify", status_code=status.HTTP_202_ACCEPTED)
 async def notify_endpoint(request: NotifyRequest):
     if not debounce_map or not worker_pool:
         raise HTTPException(status_code=503, detail={"error": "PIPELINE_NOT_READY", "message": "Pipeline not initialized"})
@@ -60,35 +57,35 @@ async def notify_endpoint(request: NotifyRequest):
     if normalized_lang == "zh":
         worker_pool.submit_job(media_path)
         logger.info(f"Language is zh, immediate processing: {media_path}")
-        return {
-            "status": "accepted",
-            "route": "immediate",
-            "message": "Simplified Chinese subtitle arrived, skipping debounce layer for immediate processing"
-        }
+        return api_success(
+            data={"route": "immediate", "message": "Simplified Chinese subtitle arrived, skipping debounce layer for immediate processing"},
+            message="accepted"
+        )
     else:
         debounce_map.upsert(media_path, source="notify", language=language or "")
         debounce_seconds = config["pipeline"]["debounce_seconds"]
-        return {
-            "status": "accepted",
-            "route": "debounce",
-            "message": f"Queued in debounce layer, will process after {debounce_seconds}s"
-        }
+        return api_success(
+            data={"route": "debounce", "message": f"Queued in debounce layer, will process after {debounce_seconds}s"},
+            message="accepted"
+        )
 
 
-@router.post("/scan", status_code=status.HTTP_200_OK)
-async def scan_endpoint(request: ScanRequest):
+@router.post("/api/scan", status_code=status.HTTP_200_OK)
+async def scan_endpoint():
+    """无参全盘扫描：使用配置的 pipeline.scan_dir 路径"""
     if not worker_pool:
         raise HTTPException(status_code=503, detail={"error": "PIPELINE_NOT_READY", "message": "Pipeline not initialized"})
 
-    if not _scan_lock.acquire(blocking=False):
+    if _scanning_event.is_set():
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"error": "SCAN_IN_PROGRESS", "message": "A scan is already in progress, please retry later"}
         )
 
+    _scanning_event.set()
     try:
         config = load_config()
-        scan_dir = request.dir_path
+        scan_dir = config["pipeline"]["scan_dir"]
         extensions = config["media"]["extensions"]
 
         if not os.path.isdir(scan_dir):
@@ -102,12 +99,12 @@ async def scan_endpoint(request: ScanRequest):
             if worker_pool.submit_job(file_path):
                 enqueued_count += 1
 
-        return {
-            "count": enqueued_count,
-            "message": f"Scanned {enqueued_count} media files, enqueued to worker pool"
-        }
+        return api_success(
+            data={"count": enqueued_count},
+            message=f"Scanned {enqueued_count} media files, enqueued to worker pool"
+        )
     finally:
-        _scan_lock.release()
+        _scanning_event.clear()
 
 
 # ============================================================================
@@ -122,7 +119,7 @@ async def get_config():
     # api_key 脱敏
     if "llm" in result and "api_key" in result["llm"]:
         result["llm"]["api_key"] = mask_api_key(result["llm"]["api_key"])
-    return result
+    return api_success(data=result)
 
 
 @router.put("/api/config", status_code=status.HTTP_200_OK)
@@ -165,10 +162,10 @@ async def put_config(payload: ConfigPayload, background_tasks: BackgroundTasks):
         # 延迟执行 execv 重启（确保 HTTP 响应先到达客户端）
         background_tasks.add_task(_do_execv_restart)
 
-        return {
-            "status": "restarting",
-            "message": "Config written, process is restarting"
-        }
+        return api_success(
+            data={"status": "restarting"},
+            message="Config written, process is restarting"
+        )
     except Exception as e:
         _config_lock.release()
         logger.error(f"Failed to update config: {e}")
@@ -211,7 +208,7 @@ async def get_prompts():
         except Exception as e:
             logger.error(f"Failed to read glossary: {e}")
 
-    return result
+    return api_success(data=result)
 
 
 @router.put("/api/prompts", status_code=status.HTTP_200_OK)
@@ -253,24 +250,33 @@ async def put_prompts(payload: PromptsPayload):
         updated.append("glossary")
         logger.info("glossary updated via API")
 
-    return {
-        "status": "updated",
-        "updated": updated,
-        "message": f"Updated: {', '.join(updated)}"
-    }
+    return api_success(
+        data={"updated": updated},
+        message=f"Updated: {', '.join(updated)}"
+    )
 
 
 def _do_execv_restart():
     """
     执行 os.execv() 重启进程
 
-    - 先关闭所有 FileHandler 防止 fd 泄漏
+    - 先优雅关闭 WorkerPool（最多等 5 秒）
+    - 关闭所有 FileHandler 防止 fd 泄漏
     - 最多重试 3 次
     - 全部失败后记录 CRITICAL 日志并释放锁
     """
     import time
 
     time.sleep(1)  # 等待 HTTP 响应到达客户端
+
+    # 优雅关闭 WorkerPool，等待当前 SQLite 事务完成
+    if worker_pool is not None:
+        try:
+            logger.info("Shutting down WorkerPool before execv...")
+            worker_pool.shutdown(wait=True, timeout=5)
+            logger.info("WorkerPool shutdown complete")
+        except Exception as e:
+            logger.warning(f"WorkerPool shutdown failed (continuing with execv): {e}")
 
     # 最多重试 3 次
     for attempt in range(3):

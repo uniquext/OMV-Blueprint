@@ -6,12 +6,13 @@ import logging
 from logging.handlers import RotatingFileHandler
 import threading
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 import uvicorn
 
 import db
 from config_loader import load_config
 import api
+from response import api_success
 from pipeline.debounce_queue import DebounceMap, FunnelWorkerPool, start_debounce_scheduler
 from pipeline.consumer import consumer_loop, recover_tasks_on_startup
 from scanner.watchdog_monitor import start_watchdog
@@ -190,13 +191,45 @@ async def lifespan(app: FastAPI):
         watchdog_observer.join()
     worker_pool.shutdown()
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(title="SubtitleTranslator API", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(api.router)
 
 
-@app.get("/health")
+@app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    return api_success(data={"status": "ok"})
+
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse
+
+dist_dir = os.path.join(os.path.dirname(__file__), "dist")
+assets_dir = os.path.join(dist_dir, "assets")
+
+# 为了开发环境兼容，如果 assets 目录不存在则创建
+os.makedirs(assets_dir, exist_ok=True)
+app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+@app.get("/{path:path}")
+async def serve_spa(path: str):
+    # /api/ 前缀的请求不应被兖底拦截（正常情况下不会落到这里，防御性检查）
+    if path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="API endpoint not found")
+    dist_index = os.path.join(dist_dir, "index.html")
+    if os.path.exists(dist_index):
+        with open(dist_index, "r", encoding="utf-8") as f:
+            return HTMLResponse(f.read())
+    return HTMLResponse("SPA dist not found. Please build frontend first.", status_code=404)
 
 
 if __name__ == "__main__":

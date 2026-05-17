@@ -174,9 +174,9 @@ def execute_funnel_action(job_id: str, media_path: str, funnel_result: Dict) -> 
         output_zh_srt = os.path.join(media_dir, f"{media_stem}.zh.ai.srt")
 
     if level == 0:
-        logger.info(f"Job {job_id}: Level 0 skip, marking done")
+        logger.info(f"Job {job_id}: Level 0 skip, marking skipped")
         db.update_job_funnel_info(job_id, funnel_level=0)
-        db.update_job_status(job_id, "done")
+        db.update_job_status(job_id, "skipped")
         return
 
     if level == -1:
@@ -185,8 +185,8 @@ def execute_funnel_action(job_id: str, media_path: str, funnel_result: Dict) -> 
             logger.info(f"Job {job_id}: Graphical subtitles only, cannot extract text, skipping")
         else:
             logger.warning(f"Job {job_id}: No usable subtitle ({reason}), skipping")
-        db.update_job_funnel_info(job_id, funnel_level=None)
-        db.update_job_status(job_id, "done")
+        db.update_job_funnel_info(job_id, funnel_level=-1)
+        db.update_job_status(job_id, "skipped")
         return
 
     db.update_job_status(job_id, "extracting")

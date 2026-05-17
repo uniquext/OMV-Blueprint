@@ -5,6 +5,8 @@ import datetime
 import logging
 from typing import Optional, Dict, List
 
+from constants import TERMINAL_STATES
+
 logger = logging.getLogger(__name__)
 
 DB_PATH = "/app/data/queue.db"
@@ -12,6 +14,8 @@ DB_PATH = "/app/data/queue.db"
 
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
+        # 启用 WAL 模式，支撑 WebUI 并发读写
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS translate_task (
                 id TEXT PRIMARY KEY,
@@ -22,7 +26,9 @@ def init_db():
                 total_batches INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                error TEXT
+                error TEXT,
+                completed_at TEXT,
+                started_at TEXT
             )
         """)
         conn.execute("""
@@ -37,7 +43,8 @@ def init_db():
                 translate_task_id TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                error TEXT
+                error TEXT,
+                completed_at TEXT
             )
         """)
         conn.commit()
@@ -56,12 +63,14 @@ def fetch_next_task() -> Optional[Dict]:
 
         task = dict(row)
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        # 取出任务时自动设置 started_at
         conn.execute(
-            "UPDATE translate_task SET status = 'processing', updated_at = ? WHERE id = ?",
-            (now, task['id'])
+            "UPDATE translate_task SET status = 'processing', started_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, task['id'])
         )
         conn.commit()
         task['status'] = 'processing'
+        task['started_at'] = now
         return task
 
 
@@ -98,9 +107,10 @@ def update_progress(task_id: str, current_batch: int, total_batches: int, progre
 def complete_task(task_id: str):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     with sqlite3.connect(DB_PATH) as conn:
+        # done 是终态，同步设置 completed_at
         conn.execute(
-            "UPDATE translate_task SET status = 'done', updated_at = ? WHERE id = ?",
-            (now, task_id)
+            "UPDATE translate_task SET status = 'done', completed_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, task_id)
         )
         conn.commit()
 
@@ -108,9 +118,10 @@ def complete_task(task_id: str):
 def fail_task(task_id: str, error: str):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     with sqlite3.connect(DB_PATH) as conn:
+        # failed 是终态，同步设置 completed_at
         conn.execute(
-            "UPDATE translate_task SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
-            (error, now, task_id)
+            "UPDATE translate_task SET status = 'failed', error = ?, completed_at = ?, updated_at = ? WHERE id = ?",
+            (error, now, now, task_id)
         )
         conn.commit()
 
@@ -129,8 +140,9 @@ def reset_task_to_queued(task_id: str):
 def create_job(media_path: str) -> Optional[str]:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
+        # 去重查询：终态（done/failed/skipped）的 Job 允许重新创建
         cursor = conn.execute(
-            "SELECT id FROM subtitle_job WHERE media_path = ? AND status NOT IN ('done', 'failed')",
+            "SELECT id FROM subtitle_job WHERE media_path = ? AND status NOT IN ('done', 'failed', 'skipped')",
             (media_path,)
         )
         if cursor.fetchone():
@@ -153,16 +165,18 @@ def create_job(media_path: str) -> Optional[str]:
 
 def update_job_status(job_id: str, status: str, error: str = None):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    # 终态自动设置 completed_at
+    completed_at = now if status in TERMINAL_STATES else None
     with sqlite3.connect(DB_PATH) as conn:
         if error:
             conn.execute(
-                "UPDATE subtitle_job SET status = ?, error = ?, updated_at = ? WHERE id = ?",
-                (status, error, now, job_id)
+                "UPDATE subtitle_job SET status = ?, error = ?, completed_at = COALESCE(?, completed_at), updated_at = ? WHERE id = ?",
+                (status, error, completed_at, now, job_id)
             )
         else:
             conn.execute(
-                "UPDATE subtitle_job SET status = ?, updated_at = ? WHERE id = ?",
-                (status, now, job_id)
+                "UPDATE subtitle_job SET status = ?, completed_at = COALESCE(?, completed_at), updated_at = ? WHERE id = ?",
+                (status, completed_at, now, job_id)
             )
         conn.commit()
     logger.info(f"Job {job_id} status updated to {status}")
