@@ -17,12 +17,12 @@ class LlmConfig(BaseModel):
     model: str
     model_type: str
     temperature: float = Field(ge=0, le=2)
-    timeout: int = Field(ge=1)
-    batch_size: int = Field(ge=1)
-    context_size: int = Field(ge=0)
-    rpm_limit: int = Field(ge=0)
-    tpm_limit: int = Field(ge=0)
-    max_retries: int = Field(ge=0)
+    timeout: int = Field(ge=1, le=600)
+    batch_size: int = Field(ge=1, le=100)
+    context_size: int = Field(ge=0, le=20)
+    rpm_limit: int = Field(ge=0, le=100000)
+    tpm_limit: int = Field(ge=0, le=10000000)
+    max_retries: int = Field(ge=0, le=10)
 
     @field_validator("api_url", "api_key", "model")
     @classmethod
@@ -43,10 +43,10 @@ class PipelineConfig(BaseModel):
     """管道配置"""
     model_config = ConfigDict(extra="ignore", strict=True)
 
-    debounce_seconds: int = Field(ge=0)
-    debounce_poll_interval: int = Field(ge=1)
-    funnel_workers: int = Field(ge=1)
-    scan_interval: int = Field(ge=0)
+    debounce_seconds: int = Field(ge=0, le=600)
+    debounce_poll_interval: int = Field(ge=1, le=60)
+    funnel_workers: int = Field(ge=1, le=20)
+    scan_interval: int = Field(ge=0, le=86400)
     scan_dir: str
 
     @field_validator("scan_dir")

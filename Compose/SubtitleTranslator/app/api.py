@@ -166,6 +166,9 @@ async def put_config(payload: ConfigPayload, background_tasks: BackgroundTasks):
             data={"status": "restarting"},
             message="Config written, process is restarting"
         )
+    except HTTPException:
+        _config_lock.release()
+        raise
     except Exception as e:
         _config_lock.release()
         logger.error(f"Failed to update config: {e}")
