@@ -223,8 +223,9 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
-import { getConfig, putConfig, getPrompts, putPrompts, pollHealth } from '../api/config'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
+import { getConfig, putConfig, getPrompts, putPrompts } from '../api/config'
+import { useSSE } from '../composables/useSSE'
 
 const loadingInit = ref(true)
 const initError = ref('')
@@ -248,9 +249,20 @@ let originalPrompts = null
 let originalLangMapStr = '{}'
 
 const showRestart = ref(false)
+const isRestarting = ref(false)
 const pollTimeout = ref(false)
 let pollTimer = null
-let pollCount = 0
+
+const { connected } = useSSE('/api/events')
+
+watch(connected, async (newVal) => {
+  if (newVal && isRestarting.value) {
+    if (pollTimer) clearTimeout(pollTimer)
+    isRestarting.value = false
+    showRestart.value = false
+    await loadData()
+  }
+})
 
 const savingConfig = ref(false)
 const configSaveError = ref('')
@@ -267,7 +279,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer)
+  if (pollTimer) clearTimeout(pollTimer)
 })
 
 async function loadData() {
@@ -341,25 +353,17 @@ async function saveConfig() {
     payload.media.lang_map_override = parsedLangMap
     await putConfig(payload)
     
-    // 触发重启遮罩和轮询
+    // 触发重启遮罩
     showRestart.value = true
-    pollCount = 0
+    isRestarting.value = true
     pollTimeout.value = false
     
-    pollTimer = setInterval(async () => {
-      pollCount++
-      if (pollCount > 15) { // 30s
-        clearInterval(pollTimer)
+    if (pollTimer) clearTimeout(pollTimer)
+    pollTimer = setTimeout(() => {
+      if (isRestarting.value) {
         pollTimeout.value = true
-        return
       }
-      const isUp = await pollHealth()
-      if (isUp) {
-        clearInterval(pollTimer)
-        showRestart.value = false
-        await loadData()
-      }
-    }, 2000)
+    }, 30000)
 
   } catch (err) {
     configSaveError.value = err.message || '保存配置失败'

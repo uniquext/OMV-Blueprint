@@ -4,8 +4,10 @@ import copy
 import json
 import threading
 import logging
-from typing import Optional
-from fastapi import APIRouter, HTTPException, BackgroundTasks, status
+import asyncio
+from typing import Optional, List, Union
+from fastapi import APIRouter, HTTPException, BackgroundTasks, status, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from config_loader import load_config, atomic_write_json, _reset_config
@@ -17,6 +19,7 @@ from response import api_success, api_error
 
 debounce_map = None
 worker_pool = None
+_event_bus = None
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -98,6 +101,9 @@ async def scan_endpoint():
         for file_path in files:
             if worker_pool.submit_job(file_path):
                 enqueued_count += 1
+
+        if _event_bus:
+            _event_bus.publish("scan_completed", {"count": enqueued_count})
 
         return api_success(
             data={"count": enqueued_count},
@@ -304,4 +310,88 @@ def _do_execv_restart():
     # 所有重试失败
     logger.critical("All execv attempts failed. Process continues with old config in memory.")
     _config_lock.release()
+
+# ============================================================================
+# Dashboard 实时状态 API
+# ============================================================================
+
+@router.get("/api/stats", status_code=status.HTTP_200_OK)
+async def get_stats_api():
+    if not debounce_map or not worker_pool:
+        raise HTTPException(status_code=503, detail={"error": "PIPELINE_NOT_READY", "message": "Pipeline not initialized"})
+    
+    import db
+    stats = db.get_stats()
+    
+    # 内存快照
+    debounce_snapshot = debounce_map.snapshot()
+    pool_snapshot = worker_pool.snapshot()
+    
+    # 获取 EventBus 的最新 snapshot_id
+    snapshot_id = 0
+    if _event_bus:
+        snapshot_id = _event_bus.get_snapshot_id()
+    
+    return api_success(data={
+        **stats,
+        "debouncing": debounce_snapshot.get("pending_count", 0),
+        "queued": pool_snapshot.get("queue_size", 0),
+        "active_workers": pool_snapshot.get("active_workers", 0),
+        "scanning": _scanning_event.is_set(),
+        "snapshot_id": snapshot_id
+    })
+
+@router.get("/api/queue/debouncing", status_code=status.HTTP_200_OK)
+async def get_queue_debouncing():
+    if not debounce_map:
+        raise HTTPException(status_code=503, detail={"error": "PIPELINE_NOT_READY", "message": "Pipeline not initialized"})
+    snapshot = debounce_map.snapshot()
+    return api_success(data=snapshot.get("entries", []))
+
+@router.get("/api/queue/pending", status_code=status.HTTP_200_OK)
+async def get_queue_pending():
+    if not worker_pool:
+        raise HTTPException(status_code=503, detail={"error": "PIPELINE_NOT_READY", "message": "Pipeline not initialized"})
+    snapshot = worker_pool.snapshot()
+    return api_success(data={
+        "fifo_size": snapshot.get("queue_size", 0),
+        "active_workers": snapshot.get("active_workers", 0),
+        "items": snapshot.get("items", [])
+    })
+
+@router.get("/api/jobs", status_code=status.HTTP_200_OK)
+async def get_jobs_api(status: Optional[List[str]] = Query(None)):
+    import db
+    jobs = db.get_jobs(status)
+    return api_success(data={"items": jobs})
+
+
+SSE_HEARTBEAT_TIMEOUT = 30
+
+@router.get("/api/events")
+async def sse_events(request: Request):
+    if not _event_bus:
+        raise HTTPException(status_code=503, detail="EventBus not initialized")
+        
+    async def event_generator():
+        queue = _event_bus.subscribe()
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                    
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=SSE_HEARTBEAT_TIMEOUT)
+                    event_type = event["type"]
+                    payload = event["payload"]
+
+                    yield f"data: {json.dumps({'type': event_type, **payload})}\n\n"
+                    
+                except asyncio.TimeoutError:
+                    # Send heartbeat
+                    yield ":ping\n\n"
+        finally:
+            _event_bus.unsubscribe(queue)
+            
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 

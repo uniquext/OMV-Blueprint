@@ -11,8 +11,24 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = "/app/data/queue.db"
 
+_event_bus = None
+_loop = None
+
+def set_event_bus(bus, loop):
+    global _event_bus, _loop
+    _event_bus = bus
+    _loop = loop
+
+def _publish_event(event_type: str, payload: dict):
+    if _event_bus is not None:
+        try:
+            _event_bus.publish(event_type, payload)
+        except Exception as e:
+            logger.error(f"Failed to publish event {event_type}: {e}")
 
 def init_db():
+
+
     with sqlite3.connect(DB_PATH) as conn:
         # 启用 WAL 模式，支撑 WebUI 并发读写
         conn.execute("PRAGMA journal_mode=WAL")
@@ -103,6 +119,12 @@ def update_progress(task_id: str, current_batch: int, total_batches: int, progre
         )
         conn.commit()
 
+    _publish_event("task_progress", {
+        "task_id": task_id,
+        "current_batch": current_batch,
+        "total_batches": total_batches
+    })
+
 
 def complete_task(task_id: str):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -137,7 +159,7 @@ def reset_task_to_queued(task_id: str):
     logger.info(f"Task {task_id} reset to queued for recovery")
 
 
-def create_job(media_path: str) -> Optional[str]:
+def create_job(media_path: str, source: str = "scheduler") -> Optional[str]:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         # 去重查询：终态（done/failed/skipped）的 Job 允许重新创建
@@ -160,6 +182,13 @@ def create_job(media_path: str) -> Optional[str]:
         )
         conn.commit()
     logger.info(f"Created subtitle job {job_id} for {media_path}")
+    
+    _publish_event("job_created", {
+        "job_id": job_id,
+        "media_path": media_path,
+        "source": source
+    })
+    
     return job_id
 
 
@@ -179,7 +208,24 @@ def update_job_status(job_id: str, status: str, error: str = None):
                 (status, completed_at, now, job_id)
             )
         conn.commit()
+        
+        # We need media_path for the event payload, let's fetch it if not available
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute("SELECT media_path FROM subtitle_job WHERE id = ?", (job_id,))
+        row = cursor.fetchone()
+        media_path = dict(row)["media_path"] if row else ""
+
     logger.info(f"Job {job_id} status updated to {status}")
+    
+    payload = {
+        "job_id": job_id,
+        "status": status,
+        "media_path": media_path
+    }
+    if error:
+        payload["error"] = error
+        
+    _publish_event("job_status_changed", payload)
 
 
 def update_job_funnel_info(job_id: str, funnel_level: int, original_srt_path: str = None,
@@ -205,6 +251,20 @@ def get_jobs_by_status(status: str) -> List[Dict]:
             "SELECT * FROM subtitle_job WHERE status = ?",
             (status,)
         )
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def get_jobs(statuses: list = None) -> list:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            cursor = conn.execute(
+                f"SELECT * FROM subtitle_job WHERE status IN ({placeholders})",
+                statuses
+            )
+        else:
+            cursor = conn.execute("SELECT * FROM subtitle_job")
         return [dict(row) for row in cursor.fetchall()]
 
 
@@ -261,5 +321,69 @@ def create_translate_task_for_job(job_id: str, file_path: str) -> Optional[str]:
         )
         conn.commit()
 
+        # Fetch media_path for the event payload
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute("SELECT media_path FROM subtitle_job WHERE id = ?", (job_id,))
+        row = cursor.fetchone()
+        media_path = dict(row)["media_path"] if row else ""
+
     logger.info(f"Created translate task {task_id} for job {job_id} (file: {file_path})")
+    
+    _publish_event("job_status_changed", {
+        "job_id": job_id,
+        "status": "translating",
+        "media_path": media_path
+    })
+    
     return task_id
+
+
+def get_stats() -> dict:
+    """获取各个状态的 Job 计数、成功率和平均耗时"""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        
+        stats = {
+            "funneling": 0,
+            "extracting": 0,
+            "translating": 0,
+            "rebuilding": 0,
+            "done": 0,
+            "skipped": 0,
+            "failed": 0
+        }
+        
+        # Count statuses
+        cursor = conn.execute("SELECT status, COUNT(*) as count FROM subtitle_job GROUP BY status")
+        for row in cursor.fetchall():
+            if row["status"] in stats:
+                stats[row["status"]] = row["count"]
+                
+        # Calculate success_rate
+        total_finished = stats["done"] + stats["failed"]
+        success_rate = 0.0
+        if total_finished > 0:
+            success_rate = round(stats["done"] / total_finished, 3)
+            
+        # Calculate avg_duration_seconds
+        cursor = conn.execute(
+            "SELECT AVG(strftime('%s', completed_at) - strftime('%s', created_at)) as avg_dur "
+            "FROM subtitle_job WHERE status = 'done' AND completed_at IS NOT NULL"
+        )
+        row = cursor.fetchone()
+        avg_duration = int(row["avg_dur"]) if row and row["avg_dur"] is not None else 0
+        
+        # Calculate avg_translate_seconds
+        cursor = conn.execute(
+            "SELECT AVG(strftime('%s', completed_at) - strftime('%s', started_at)) as avg_trans "
+            "FROM translate_task WHERE status = 'done' AND completed_at IS NOT NULL AND started_at IS NOT NULL"
+        )
+        row = cursor.fetchone()
+        avg_trans = int(row["avg_trans"]) if row and row["avg_trans"] is not None else 0
+        
+        return {
+            **stats,
+            "success_rate": success_rate,
+            "avg_duration_seconds": avg_duration,
+            "avg_translate_seconds": avg_trans
+        }

@@ -13,6 +13,7 @@ import db
 from config_loader import load_config
 import api
 from response import api_success
+from sse import EventBus
 from pipeline.debounce_queue import DebounceMap, FunnelWorkerPool, start_debounce_scheduler
 from pipeline.consumer import consumer_loop, recover_tasks_on_startup
 from scanner.watchdog_monitor import start_watchdog
@@ -55,6 +56,7 @@ logger = logging.getLogger(__name__)
 debounce_map = None
 worker_pool = None
 watchdog_observer = None
+event_bus = None
 
 
 def _cleanup_residual_intermediate_files():
@@ -138,7 +140,13 @@ def recover_startup_jobs():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global debounce_map, worker_pool, watchdog_observer
+    import asyncio
+    global debounce_map, worker_pool, watchdog_observer, event_bus
+
+    loop = asyncio.get_running_loop()
+    event_bus = EventBus(loop)
+    db.set_event_bus(event_bus, loop)
+    api._event_bus = event_bus
 
     config = load_config()
     db.init_db()
@@ -190,6 +198,14 @@ async def lifespan(app: FastAPI):
         watchdog_observer.stop()
         watchdog_observer.join()
     worker_pool.shutdown()
+    
+    api.worker_pool = None
+    api.debounce_map = None
+    db.set_event_bus(None, None)
+    api._event_bus = None
+    event_bus.clear()
+    
+    logger.info("Lifespan shutdown sequence completed.")
 
 from fastapi.middleware.cors import CORSMiddleware
 

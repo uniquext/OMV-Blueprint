@@ -49,8 +49,10 @@
 
     <!-- 操作栏 -->
     <div class="action-bar">
-      <button class="btn btn-primary" id="btn-scan">🔍 全盘扫描</button>
-      <span id="scan-status" style="font-size:12px;color:#999;"></span>
+      <button class="btn btn-primary" id="btn-scan" @click="handleScan" :disabled="isScanning">
+        🔍 {{ isScanning ? '扫描中...' : '全盘扫描' }}
+      </button>
+      <span id="scan-status" style="font-size:12px;color:#d03050;">{{ scanStatus }}</span>
     </div>
 
     <!-- L1 等待中 -->
@@ -60,10 +62,10 @@
         <span class="badge warn-badge">{{ active.l1_waiting.length }}</span>
       </div>
       <template v-if="active.l1_waiting.length > 0">
-        <div class="task-item" v-for="task in active.l1_waiting" :key="task.id">
+        <div class="task-item" v-for="task in active.l1_waiting" :key="task.media_path">
           <span class="icon">📁</span>
-          <span class="path">{{ task.path }}</span>
-          <span class="meta">剩余 {{ task.wait_seconds }}s</span>
+          <span class="path">{{ task.media_path }}</span>
+          <span class="meta">剩余 {{ task.remaining_seconds }}s</span>
         </div>
       </template>
       <div class="empty-state" v-else>暂无活跃任务</div>
@@ -76,10 +78,10 @@
         <span class="badge active-badge">{{ active.l2_queued.length }}</span>
       </div>
       <template v-if="active.l2_queued.length > 0">
-        <div class="task-item" v-for="task in active.l2_queued" :key="task.id">
+        <div class="task-item" v-for="(task, index) in active.l2_queued" :key="task.media_path">
           <span class="icon">📁</span>
-          <span class="path">{{ task.path }}</span>
-          <span class="meta">位置 #{{ task.position }}</span>
+          <span class="path">{{ task.media_path }}</span>
+          <span class="meta">位置 #{{ index + 1 }}</span>
         </div>
       </template>
       <div class="empty-state" v-else>暂无活跃任务</div>
@@ -94,8 +96,8 @@
       <template v-if="active.l2_extracting.length > 0">
         <div class="task-item" v-for="task in active.l2_extracting" :key="task.id">
           <span class="icon">🔍</span>
-          <span class="path">{{ task.path }}</span>
-          <span class="status-tag funneling">{{ task.status }}</span>
+          <span class="path">{{ task.media_path }}</span>
+          <span class="status-tag funneling">{{ task.status === 'funneling' ? '漏斗中' : (task.status === 'extracting' ? '提取中' : task.status) }}</span>
         </div>
       </template>
       <div class="empty-state" v-else>暂无活跃任务</div>
@@ -110,10 +112,10 @@
       <template v-if="active.l3_translating.length > 0">
         <div class="task-item" v-for="task in active.l3_translating" :key="task.id">
           <span class="icon">🌐</span>
-          <span class="path">{{ task.path }}</span>
-          <span class="status-tag translating">翻译中</span>
-          <div class="progress-bar"><div class="fill" :style="{width: task.progress + '%'}"></div></div>
-          <span class="meta">批次 {{ task.current_batch }}/{{ task.total_batch }}</span>
+          <span class="path">{{ task.media_path }}</span>
+          <span class="status-tag translating">{{ task.status === 'translating' ? '翻译中' : (task.status === 'rebuilding' ? '回写中' : task.status) }}</span>
+          <div class="progress-bar"><div class="fill" :style="{width: (task.task_progress || 0) + '%'}"></div></div>
+          <span class="meta" v-if="task.status === 'translating' || task.status === '翻译中'">批次 {{ task.current_batch || 0 }}/{{ task.total_batch || 0 }}</span>
         </div>
       </template>
       <div class="empty-state" v-else>暂无活跃任务</div>
@@ -123,11 +125,191 @@
 </template>
 
 <script setup>
-import { reactive } from 'vue'
-import { dashboardStats, activeTasks } from '../mock/dashboard'
+import { reactive, ref, onMounted } from 'vue'
+import { createDiscreteApi } from 'naive-ui'
+import { getStats, getDebouncing, getPending, getActiveJobs, triggerScan } from '../api/dashboard'
+import { useSSE } from '../composables/useSSE'
 
-const stats = dashboardStats
-const active = reactive({ ...activeTasks, l1_waiting: [...activeTasks.l1_waiting], l2_queued: [...activeTasks.l2_queued], l2_extracting: [...activeTasks.l2_extracting], l3_translating: [...activeTasks.l3_translating] })
+const { message } = createDiscreteApi(['message'])
+
+const stats = reactive({
+  waiting: 0,
+  queued: 0,
+  funneling: 0,
+  translating: 0,
+  completed: 0,
+  skipped: 0,
+  failed: 0,
+  successRate: '0.0%',
+  avgTime: '0s'
+})
+
+const active = reactive({
+  l1_waiting: [],
+  l2_queued: [],
+  l2_extracting: [],
+  l3_translating: []
+})
+
+const isScanning = ref(false)
+const scanStatus = ref('')
+
+const formatSuccessRate = (rate) => {
+  if (rate === undefined || rate === null) return '0.0%'
+  return (rate * 100).toFixed(1) + '%'
+}
+
+const formatAvgTime = (seconds) => {
+  if (seconds === undefined || seconds === null) return '0s'
+  if (seconds >= 60) {
+    const mins = Math.floor(seconds / 60)
+    const secs = seconds % 60
+    return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`
+  }
+  return `${seconds}s`
+}
+
+const fetchData = async () => {
+  try {
+    const [statsData, debouncingData, pendingData, activeJobsData] = await Promise.all([
+      getStats(),
+      getDebouncing(),
+      getPending(),
+      getActiveJobs()
+    ])
+
+    // Map stats
+    stats.waiting = statsData.debouncing || 0
+    stats.queued = statsData.queued || 0
+    stats.funneling = statsData.funneling || 0
+    stats.translating = (statsData.translating || 0) + (statsData.rebuilding || 0)
+    stats.completed = statsData.done || 0
+    stats.skipped = statsData.skipped || 0
+    stats.failed = statsData.failed || 0
+    stats.successRate = formatSuccessRate(statsData.success_rate)
+    stats.avgTime = formatAvgTime(statsData.avg_duration_seconds)
+    isScanning.value = statsData.scanning || false
+    if (isScanning.value) {
+      scanStatus.value = '扫描中...'
+    } else if (scanStatus.value === '扫描中...') {
+      scanStatus.value = ''
+    }
+
+    // Map active tasks
+    active.l1_waiting = debouncingData || []
+    active.l2_queued = pendingData.items || []
+    
+    const activeJobs = activeJobsData.items || []
+    active.l2_extracting = activeJobs.filter(j => j.status === 'funneling' || j.status === 'extracting')
+    active.l3_translating = activeJobs.filter(j => j.status === 'translating' || j.status === 'rebuilding')
+  } catch (error) {
+    console.error('Failed to load dashboard data:', error)
+    // Clear list to show empty states on error
+    active.l1_waiting = []
+    active.l2_queued = []
+    active.l2_extracting = []
+    active.l3_translating = []
+  }
+}
+
+onMounted(() => {
+  fetchData()
+})
+
+const handleScan = async () => {
+  scanStatus.value = '扫描中...'
+  isScanning.value = true
+  try {
+    await triggerScan()
+  } catch (error) {
+    scanStatus.value = error.message || '正在扫描中，请勿重复操作'
+    isScanning.value = false
+  }
+}
+
+const handleSSEEvent = (type, payload) => {
+  if (type === 'job_created') {
+    // stats
+    stats.funneling++
+    
+    // active list
+    const exists = active.l2_extracting.some(j => j.id === payload.job_id)
+    if (!exists) {
+      active.l2_extracting.push({
+        id: payload.job_id,
+        media_path: payload.media_path,
+        status: 'funneling'
+      })
+    }
+  } else if (type === 'job_status_changed') {
+    const finalStatuses = ['done', 'failed', 'skipped']
+    if (finalStatuses.includes(payload.status)) {
+      // Remove from all active lists
+      active.l2_extracting = active.l2_extracting.filter(j => j.id !== payload.job_id)
+      active.l3_translating = active.l3_translating.filter(j => j.id !== payload.job_id)
+      // Done/Failed/Skipped should trigger full HTTP refresh to update database rates & times
+      fetchData()
+    } else {
+      // Internal transition: funneling/extracting/translating/rebuilding
+      // Find where it currently resides and move it
+      let task = active.l2_extracting.find(j => j.id === payload.job_id) || 
+                 active.l3_translating.find(j => j.id === payload.job_id)
+      
+      const newStatus = payload.status
+      
+      if (!task) {
+        task = {
+          id: payload.job_id,
+          media_path: payload.media_path,
+          status: newStatus
+        }
+      } else {
+        // Remove from old lists
+        active.l2_extracting = active.l2_extracting.filter(j => j.id !== payload.job_id)
+        active.l3_translating = active.l3_translating.filter(j => j.id !== payload.job_id)
+        task.status = newStatus
+      }
+
+      // Add to new list
+      if (newStatus === 'funneling' || newStatus === 'extracting') {
+        active.l2_extracting.push(task)
+      } else if (newStatus === 'translating' || newStatus === 'rebuilding') {
+        if (newStatus === 'translating' && task.task_progress === undefined) {
+          task.task_progress = 0
+          task.current_batch = 0
+          task.total_batch = 0
+        }
+        active.l3_translating.push(task)
+      }
+
+      // Trigger stats refresh to stay consistent
+      fetchData()
+    }
+  } else if (type === 'task_progress') {
+    const task = active.l3_translating.find(j => j.translate_task_id === payload.task_id)
+    if (task) {
+      const total = payload.total_batches || 1
+      task.task_progress = Math.round((payload.current_batch / total) * 100)
+      task.current_batch = payload.current_batch
+      task.total_batch = payload.total_batches
+    }
+  } else if (type === 'scan_completed') {
+    isScanning.value = false
+    scanStatus.value = ''
+    message.success(`全盘扫描完成，已入队 ${payload.count || 0} 个文件`)
+    fetchData()
+  }
+}
+
+const handleSnapshotGap = (newId, expectedId) => {
+  console.warn(`Snapshot gap detected! expected ${expectedId}, got ${newId}. Reloading...`)
+  fetchData()
+}
+
+useSSE('/api/events', {
+  onEvent: handleSSEEvent,
+  onSnapshotGap: handleSnapshotGap
+})
 </script>
 
 <style scoped>

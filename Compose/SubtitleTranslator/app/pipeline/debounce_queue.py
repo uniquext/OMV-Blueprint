@@ -1,4 +1,6 @@
 import time
+import math
+import datetime
 import queue
 import logging
 import threading
@@ -59,10 +61,19 @@ class DebounceMap:
     def snapshot(self) -> Dict:
         """返回当前待处理条目的快照（线程安全副本）"""
         with self._lock:
-            entries = [
-                {"media_path": e["media_path"], "ready_at": e["ready_at"]}
-                for e in self._entries.values()
-            ]
+            now = time.time()
+            entries = []
+            for e in self._entries.values():
+                ready_at = e["ready_at"]
+                remaining = max(0, math.ceil(ready_at - now))
+                ready_at_iso = datetime.datetime.fromtimestamp(ready_at, tz=datetime.timezone.utc).isoformat()
+                entries.append({
+                    "media_path": e["media_path"],
+                    "ready_at": ready_at_iso,
+                    "source": e.get("source", ""),
+                    "language": e.get("language", ""),
+                    "remaining_seconds": remaining
+                })
             return {"pending_count": len(entries), "entries": entries}
 
 
