@@ -323,6 +323,10 @@ async def get_stats_api():
     import db
     stats = db.get_stats()
     
+    # 时钟负数耗时异常时，向 EventBus 组播发布 timing_anomaly_detected SSE 事件
+    if stats.get("has_timing_anomaly") and _event_bus:
+        _event_bus.publish("timing_anomaly_detected", {"message": "检测到时钟异常或耗时数据为负数，可能存在系统时钟回拨！"})
+    
     # 内存快照
     debounce_snapshot = debounce_map.snapshot()
     pool_snapshot = worker_pool.snapshot()
@@ -340,6 +344,7 @@ async def get_stats_api():
         "scanning": _scanning_event.is_set(),
         "snapshot_id": snapshot_id
     })
+
 
 @router.get("/api/queue/debouncing", status_code=status.HTTP_200_OK)
 async def get_queue_debouncing():
@@ -360,10 +365,100 @@ async def get_queue_pending():
     })
 
 @router.get("/api/jobs", status_code=status.HTTP_200_OK)
-async def get_jobs_api(status: Optional[List[str]] = Query(None)):
+async def get_jobs_api(
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=100, description="每页容量"),
+    status: Optional[List[str]] = Query(None, description="状态多选"),
+    funnel_level: Optional[int] = Query(None, description="漏斗级别"),
+    date_from: Optional[str] = Query(None, description="起始时间 ISO 格式"),
+    date_to: Optional[str] = Query(None, description="结束时间 ISO 格式")
+):
     import db
-    jobs = db.get_jobs(status)
-    return api_success(data={"items": jobs})
+    try:
+        items, total = db.query_jobs(
+            page=page,
+            page_size=page_size,
+            status=status,
+            funnel_level=funnel_level,
+            date_from=date_from,
+            date_to=date_to
+        )
+        return api_success(data={
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size
+        })
+    except Exception as e:
+        logger.error(f"Error querying jobs: {e}")
+        return api_error(message=f"Failed to query jobs: {e}")
+
+
+@router.get("/api/tasks", status_code=status.HTTP_200_OK)
+async def get_tasks_api(
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=100, description="每页容量"),
+    status: Optional[str] = Query(None, description="任务状态")
+):
+    import db
+    try:
+        items, total = db.query_tasks(
+            page=page,
+            page_size=page_size,
+            status=status
+        )
+        return api_success(data={
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size
+        })
+    except Exception as e:
+        logger.error(f"Error querying tasks: {e}")
+        return api_error(message=f"Failed to query tasks: {e}")
+
+
+@router.get("/api/jobs/stats", status_code=status.HTTP_200_OK)
+async def get_jobs_stats_api():
+    import db
+    try:
+        stats = db.get_jobs_stats()
+        return api_success(data=stats)
+    except Exception as e:
+        logger.error(f"Error getting jobs stats: {e}")
+        return api_error(message=f"Failed to get jobs stats: {e}")
+
+
+@router.get("/api/logs", status_code=status.HTTP_200_OK)
+async def get_logs_api(
+    lines: int = Query(200, ge=1, le=2000, description="倒数读取的行数")
+):
+    from collections import deque
+    log_dir = os.environ.get("LOG_DIR", "/app/logs")
+    log_file = os.path.join(log_dir, "subtitle_translator.log")
+    
+    if not os.path.exists(log_file):
+        return api_success(data={
+            "content": "No log file found",
+            "lines": 0
+        })
+        
+    try:
+        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+            log_lines = deque(f, lines)
+            content = "".join(log_lines)
+            actual_lines = len(log_lines)
+            
+        return api_success(data={
+            "content": content,
+            "lines": actual_lines
+        })
+    except Exception as e:
+        logger.error(f"Error reading log file: {e}")
+        return api_success(data={
+            "content": f"Error reading log file: {e}",
+            "lines": 0
+        })
 
 
 SSE_HEARTBEAT_TIMEOUT = 30

@@ -3,16 +3,21 @@ import uuid
 import json
 import datetime
 import logging
+import time
+import os
 from typing import Optional, Dict, List
 
 from constants import TERMINAL_STATES
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = "/app/data/queue.db"
+DB_PATH = os.environ.get("DB_PATH", "/app/data/queue.db")
 
 _event_bus = None
 _loop = None
+_last_anomaly_check_time = 0.0
+_cached_has_anomaly = False
+_cached_anomaly_reason = None
 
 def set_event_bus(bus, loop):
     global _event_bus, _loop
@@ -339,7 +344,8 @@ def create_translate_task_for_job(job_id: str, file_path: str) -> Optional[str]:
 
 
 def get_stats() -> dict:
-    """获取各个状态的 Job 计数、成功率和平均耗时"""
+    """获取各个状态 of Job 计数、成功率和平均耗时"""
+    global _last_anomaly_check_time, _cached_has_anomaly, _cached_anomaly_reason
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         
@@ -365,25 +371,195 @@ def get_stats() -> dict:
         if total_finished > 0:
             success_rate = round(stats["done"] / total_finished, 3)
             
-        # Calculate avg_duration_seconds
+        # Calculate avg_duration_seconds (已剔除负数耗时的时钟异常数据)
         cursor = conn.execute(
             "SELECT AVG(strftime('%s', completed_at) - strftime('%s', created_at)) as avg_dur "
-            "FROM subtitle_job WHERE status = 'done' AND completed_at IS NOT NULL"
+            "FROM subtitle_job "
+            "WHERE status = 'done' AND completed_at IS NOT NULL "
+            "AND (strftime('%s', completed_at) - strftime('%s', created_at)) >= 0"
         )
         row = cursor.fetchone()
         avg_duration = int(row["avg_dur"]) if row and row["avg_dur"] is not None else 0
         
-        # Calculate avg_translate_seconds
+        # Calculate avg_translate_seconds (已剔除负数耗时的时钟异常数据)
         cursor = conn.execute(
             "SELECT AVG(strftime('%s', completed_at) - strftime('%s', started_at)) as avg_trans "
-            "FROM translate_task WHERE status = 'done' AND completed_at IS NOT NULL AND started_at IS NOT NULL"
+            "FROM translate_task "
+            "WHERE status = 'done' AND completed_at IS NOT NULL AND started_at IS NOT NULL "
+            "AND (strftime('%s', completed_at) - strftime('%s', started_at)) >= 0"
         )
         row = cursor.fetchone()
         avg_trans = int(row["avg_trans"]) if row and row["avg_trans"] is not None else 0
+
+        # Calculate funnel_translate_stats (按漏斗级别分组的平均纯翻译时间，且排除负数)
+        funnel_stats = {}
+        cursor = conn.execute(
+            "SELECT j.funnel_level, AVG(strftime('%s', t.completed_at) - strftime('%s', t.started_at)) as avg_trans "
+            "FROM subtitle_job j "
+            "INNER JOIN translate_task t ON j.translate_task_id = t.id "
+            "WHERE t.status = 'done' AND t.completed_at IS NOT NULL AND t.started_at IS NOT NULL "
+            "AND (strftime('%s', t.completed_at) - strftime('%s', t.started_at)) >= 0 "
+            "GROUP BY j.funnel_level"
+        )
+        for row in cursor.fetchall():
+            if row["funnel_level"] is not None and row["avg_trans"] is not None:
+                funnel_stats[str(row["funnel_level"])] = int(row["avg_trans"])
         
+        # 5秒节流时钟回拨与负数耗时扫描
+        now_sec = time.time()
+        if now_sec - _last_anomaly_check_time > 5.0:
+            # 扫描 Job 表
+            cursor = conn.execute(
+                "SELECT id, media_path, (strftime('%s', completed_at) - strftime('%s', created_at)) as dur "
+                "FROM subtitle_job "
+                "WHERE status = 'done' AND completed_at IS NOT NULL "
+                "AND (strftime('%s', completed_at) - strftime('%s', created_at)) < 0 LIMIT 1"
+            )
+            row_job = cursor.fetchone()
+            
+            # 扫描 Task 表
+            cursor = conn.execute(
+                "SELECT id, file_path, (strftime('%s', completed_at) - strftime('%s', started_at)) as dur "
+                "FROM translate_task "
+                "WHERE status = 'done' AND completed_at IS NOT NULL AND started_at IS NOT NULL "
+                "AND (strftime('%s', completed_at) - strftime('%s', started_at)) < 0 LIMIT 1"
+            )
+            row_task = cursor.fetchone()
+            
+            if row_job:
+                _cached_has_anomaly = True
+                _cached_anomaly_reason = f"Detected negative duration in job {row_job['id']} ({row_job['media_path']}): {row_job['dur']}s"
+            elif row_task:
+                _cached_has_anomaly = True
+                _cached_anomaly_reason = f"Detected negative duration in task {row_task['id']} ({row_task['file_path']}): {row_task['dur']}s"
+            else:
+                _cached_has_anomaly = False
+                _cached_anomaly_reason = None
+            
+            _last_anomaly_check_time = now_sec
+            
         return {
             **stats,
             "success_rate": success_rate,
             "avg_duration_seconds": avg_duration,
-            "avg_translate_seconds": avg_trans
+            "avg_translate_seconds": avg_trans,
+            "funnel_translate_stats": funnel_stats,
+            "has_timing_anomaly": _cached_has_anomaly,
+            "anomaly_reason": _cached_anomaly_reason
         }
+
+
+def query_jobs(page: int = 1, page_size: int = 20, status: list = None, funnel_level: int = None, date_from: str = None, date_to: str = None) -> tuple:
+    """分页与多条件模糊过滤查询 Job 列表"""
+    conditions = []
+    params = []
+    
+    if status:
+        # 移除空值或过滤非字符串 status 防止注入
+        valid_statuses = [s for s in status if isinstance(s, str) and s]
+        if valid_statuses:
+            placeholders = ",".join("?" for _ in valid_statuses)
+            conditions.append(f"status IN ({placeholders})")
+            params.extend(valid_statuses)
+            
+    if funnel_level is not None:
+        conditions.append("funnel_level = ?")
+        params.append(funnel_level)
+        
+    if date_from:
+        conditions.append("created_at >= ?")
+        params.append(date_from)
+        
+    if date_to:
+        conditions.append("created_at <= ?")
+        params.append(date_to)
+        
+    where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+    
+    count_sql = f"SELECT COUNT(*) FROM subtitle_job{where_clause}"
+    
+    # 按照创建时间倒序排列，并子查询计算 translate_duration（排除歧义风险）
+    offset = (page - 1) * page_size
+    fetch_sql = (
+        f"SELECT *, "
+        f"(SELECT strftime('%s', t.completed_at) - strftime('%s', t.started_at) "
+        f" FROM translate_task t WHERE t.id = subtitle_job.translate_task_id AND t.completed_at IS NOT NULL AND t.started_at IS NOT NULL) as translate_duration "
+        f"FROM subtitle_job{where_clause} ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    )
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        
+        # 获取总数
+        cursor = conn.execute(count_sql, params)
+        total = cursor.fetchone()[0]
+        
+        # 分页获取数据
+        fetch_params = params + [page_size, offset]
+        cursor = conn.execute(fetch_sql, fetch_params)
+        items = [dict(row) for row in cursor.fetchall()]
+        
+    return items, total
+
+
+def query_tasks(page: int = 1, page_size: int = 20, status: str = None) -> tuple:
+    """分页与状态过滤查询翻译任务列表"""
+    conditions = []
+    params = []
+    
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+        
+    where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+    
+    count_sql = f"SELECT COUNT(*) FROM translate_task{where_clause}"
+    
+    offset = (page - 1) * page_size
+    fetch_sql = f"SELECT * FROM translate_task{where_clause} ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        
+        # 获取总数
+        cursor = conn.execute(count_sql, params)
+        total = cursor.fetchone()[0]
+        
+        # 分页获取数据
+        fetch_params = params + [page_size, offset]
+        cursor = conn.execute(fetch_sql, fetch_params)
+        items = [dict(row) for row in cursor.fetchall()]
+        
+    return items, total
+
+
+def get_jobs_stats() -> dict:
+    """获取终态 Job 的计数与成功率（skipped 任务不计入分母，防除零保护）"""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        
+        cursor = conn.execute(
+            """
+            SELECT 
+                COUNT(CASE WHEN status = 'done' THEN 1 END) as done,
+                COUNT(CASE WHEN status = 'skipped' THEN 1 END) as skipped,
+                COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed
+            FROM subtitle_job
+            """
+        )
+        row = cursor.fetchone()
+        
+        done = row["done"] or 0
+        skipped = row["skipped"] or 0
+        failed = row["failed"] or 0
+        
+        total_finished = done + failed
+        success_rate = round(done / total_finished, 3) if total_finished > 0 else 0.0
+        
+        return {
+            "done": done,
+            "skipped": skipped,
+            "failed": failed,
+            "success_rate": success_rate
+        }
+

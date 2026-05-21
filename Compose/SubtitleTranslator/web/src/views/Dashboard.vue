@@ -1,5 +1,18 @@
 <template>
   <div class="dashboard">
+    <!-- 时钟回拨异常警告横幅 -->
+    <div 
+      v-if="hasAnomaly" 
+      id="timing-anomaly-alert" 
+      class="anomaly-alert-banner"
+    >
+      <span class="warning-icon">⚠️</span>
+      <div class="alert-content">
+        <strong class="alert-title">时钟回拨异常警告</strong>
+        <span class="alert-reason">{{ anomalyReason }}</span>
+      </div>
+    </div>
+
     <!-- 统计卡片 -->
     <div class="stats-grid">
       <div class="stat-card">
@@ -41,9 +54,14 @@
         <div class="sub">done/(done+failed)</div>
       </div>
       <div class="stat-card">
-        <div class="label">⏱️ 平均耗时</div>
+        <div class="label">⏱️ 端到端耗时</div>
         <div class="value">{{ stats.avgTime }}</div>
         <div class="sub">入队→完成</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">⏳ 纯翻译耗时</div>
+        <div class="value">{{ stats.avgTranslateTime }}</div>
+        <div class="sub">纯大模型翻译</div>
       </div>
     </div>
 
@@ -141,8 +159,12 @@ const stats = reactive({
   skipped: 0,
   failed: 0,
   successRate: '0.0%',
-  avgTime: '0s'
+  avgTime: '0s',
+  avgTranslateTime: '0s'
 })
+
+const hasAnomaly = ref(false)
+const anomalyReason = ref('')
 
 const active = reactive({
   l1_waiting: [],
@@ -188,6 +210,10 @@ const fetchData = async () => {
     stats.failed = statsData.failed || 0
     stats.successRate = formatSuccessRate(statsData.success_rate)
     stats.avgTime = formatAvgTime(statsData.avg_duration_seconds)
+    stats.avgTranslateTime = formatAvgTime(statsData.avg_translate_seconds)
+    hasAnomaly.value = statsData.has_timing_anomaly || false
+    anomalyReason.value = statsData.anomaly_reason || ''
+    
     isScanning.value = statsData.scanning || false
     if (isScanning.value) {
       scanStatus.value = '扫描中...'
@@ -298,6 +324,10 @@ const handleSSEEvent = (type, payload) => {
     scanStatus.value = ''
     message.success(`全盘扫描完成，已入队 ${payload.count || 0} 个文件`)
     fetchData()
+  } else if (type === 'timing_anomaly_detected') {
+    hasAnomaly.value = true
+    anomalyReason.value = payload.reason || ''
+    message.error("检测到数据库存在时钟回拨或负数耗时异常！已启用系统警告屏障。")
   }
 }
 
@@ -353,4 +383,41 @@ useSSE('/api/events', {
 
 /* 空状态 */
 .empty-state { text-align: center; padding: 32px 16px; color: #ccc; font-size: 13px; }
+
+/* 异常报警条 */
+.anomaly-alert-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #fdf6ec;
+  border: 1px solid #faecd8;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+  color: #e6a23c;
+  animation: shake 0.5s ease-in-out;
+}
+.anomaly-alert-banner .warning-icon {
+  font-size: 20px;
+}
+.anomaly-alert-banner .alert-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.anomaly-alert-banner .alert-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+.anomaly-alert-banner .alert-reason {
+  font-size: 12px;
+  color: #e6a23c;
+  opacity: 0.85;
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-4px); }
+  75% { transform: translateX(4px); }
+}
 </style>

@@ -6,7 +6,7 @@ from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 
-CONFIG_PATH = "/app/config/config.json"
+CONFIG_PATH = os.environ.get("CONFIG_PATH", "/app/config/config.json")
 
 
 def atomic_write_json(path: str, data: Any) -> None:
@@ -170,7 +170,7 @@ def load_config() -> Dict[str, Any]:
     _config = config
     return _config
 
-PROMPTS_DIR = "/app/prompts"
+PROMPTS_DIR = os.environ.get("PROMPTS_DIR", "/app/prompts")
 
 DEFAULT_SYSTEM_PROMPT = """你是一个专业的字幕翻译助手。
 你的任务是将输入的字幕文本翻译成简体中文。
