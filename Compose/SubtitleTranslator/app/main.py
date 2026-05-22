@@ -9,11 +9,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 import uvicorn
 
-import db
-from config_loader import load_config
-import api
-from response import api_success
-from sse import EventBus
+from core import db
+from core.config_loader import load_config
+import api.router
+from api.response import api_success
+from api.sse import EventBus
 from pipeline.debounce_queue import DebounceMap, FunnelWorkerPool, start_debounce_scheduler
 from pipeline.consumer import consumer_loop, recover_tasks_on_startup
 from scanner.watchdog_monitor import start_watchdog
@@ -23,12 +23,12 @@ from scanner.media_scanner import scan_directory
 
 def setup_logging():
     log_dir = os.environ.get("LOG_DIR", "/app/logs")
-    
+
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     # 清理已有的 handlers 防止重复注册
     logger.handlers.clear()
-    
+
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
     # 1. 始终添加 stdout 控制台日志
@@ -109,7 +109,7 @@ def recover_startup_jobs():
     recover_tasks_on_startup()
 
     failed_count = 0
-    statuses_to_fail = ["funneling", "extracting", "rebuilding"]
+    statuses_to_fail = ["funneling", "extracting", "translating", "rebuilding"]
 
     for s in statuses_to_fail:
         jobs = db.get_jobs_by_status(s)
@@ -146,7 +146,7 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
     event_bus = EventBus(loop)
     db.set_event_bus(event_bus, loop)
-    api._event_bus = event_bus
+    api.router._event_bus = event_bus
 
     config = load_config()
     db.init_db()
@@ -164,8 +164,8 @@ async def lifespan(app: FastAPI):
     poll_interval = config["pipeline"]["debounce_poll_interval"]
     start_debounce_scheduler(debounce_map, worker_pool, interval=poll_interval)
 
-    api.debounce_map = debounce_map
-    api.worker_pool = worker_pool
+    api.router.debounce_map = debounce_map
+    api.router.worker_pool = worker_pool
 
     consumer_thread = threading.Thread(target=consumer_loop, daemon=True)
     consumer_thread.start()
@@ -187,7 +187,7 @@ async def lifespan(app: FastAPI):
         if files:
             logger.info(f"Startup scan found {len(files)} files to process")
             for f in files:
-                worker_pool.submit_job(f)
+                worker_pool.submit_job(f, source="startup")
     except Exception as e:
         logger.error(f"Startup scan failed: {e}")
 
@@ -198,13 +198,13 @@ async def lifespan(app: FastAPI):
         watchdog_observer.stop()
         watchdog_observer.join()
     worker_pool.shutdown()
-    
-    api.worker_pool = None
-    api.debounce_map = None
+
+    api.router.worker_pool = None
+    api.router.debounce_map = None
     db.set_event_bus(None, None)
-    api._event_bus = None
+    api.router._event_bus = None
     event_bus.clear()
-    
+
     logger.info("Lifespan shutdown sequence completed.")
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -219,12 +219,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(api.router)
-
-
-@app.get("/api/health")
-async def health():
-    return api_success(data={"status": "ok"})
+app.include_router(api.router.router)
 
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
@@ -238,7 +233,7 @@ app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
 @app.get("/{path:path}")
 async def serve_spa(path: str):
-    # /api/ 前缀的请求不应被兖底拦截（正常情况下不会落到这里，防御性检查）
+    # /api/ 前缀的请求不应被兜底拦截（正常情况下不会落到这里，防御性检查）
     if path.startswith("api/"):
         raise HTTPException(status_code=404, detail="API endpoint not found")
     dist_index = os.path.join(dist_dir, "index.html")

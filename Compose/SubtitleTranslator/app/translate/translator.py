@@ -6,11 +6,11 @@ import json
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from .prompt_loader import load_system_prompt, load_glossary
-import db
+from core import db
 from .rate_limiter import rate_limiter
 import logging
 from .eta_tracker import eta_tracker
-from config_loader import load_config
+from core.config_loader import load_config
 
 logger = logging.getLogger(__name__)
 

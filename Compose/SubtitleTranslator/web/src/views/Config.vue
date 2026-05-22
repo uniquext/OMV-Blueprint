@@ -57,8 +57,8 @@
             <div class="form-group">
               <label>模型类型 (model_type)</label>
               <select v-model="config.llm.model_type">
-                <option value="chat">chat — 注入术语表 + 语义指令</option>
-                <option value="mt">mt — 纯文本直译，不注入术语表</option>
+                <option value="chat">Chat — 智能对话</option>
+                <option value="mt">MT — 机器翻译</option>
               </select>
             </div>
           </div>

@@ -8,7 +8,12 @@
 </template>
 
 <script setup>
+import { provide } from 'vue'
 import NavBar from './components/NavBar.vue'
+import { useSSE } from './composables/useSSE'
+
+const { connected } = useSSE('/api/events')
+provide('sseConnected', connected)
 </script>
 
 <style>

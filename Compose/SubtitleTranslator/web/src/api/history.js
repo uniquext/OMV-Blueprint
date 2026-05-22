@@ -1,31 +1,10 @@
-async function handleResponse(response) {
-  if (!response.ok) {
-    let errorMsg = `HTTP Error: ${response.status}`
-    try {
-      const errorData = await response.json()
-      if (errorData.message) {
-        errorMsg = errorData.message
-      } else if (errorData.detail) {
-        if (typeof errorData.detail === 'string') {
-          errorMsg = errorData.detail
-        } else if (errorData.detail.message) {
-          errorMsg = errorData.detail.message
-        }
-      }
-    } catch (e) {
-      // ignore
-    }
-    throw new Error(errorMsg)
-  }
-  const json = await response.json()
-  return json.data
-}
+import { handleResponse } from './http'
 
 export async function getJobs(params = {}) {
   const queryParts = []
   if (params.page !== undefined) queryParts.push(`page=${params.page}`)
   if (params.page_size !== undefined) queryParts.push(`page_size=${params.page_size}`)
-  
+
   if (params.status && Array.isArray(params.status)) {
     params.status.forEach(st => {
       if (st) queryParts.push(`status=${encodeURIComponent(st)}`)
@@ -33,7 +12,7 @@ export async function getJobs(params = {}) {
   } else if (params.status) {
     queryParts.push(`status=${encodeURIComponent(params.status)}`)
   }
-  
+
   if (params.funnel_level !== undefined && params.funnel_level !== null && params.funnel_level !== '') {
     queryParts.push(`funnel_level=${params.funnel_level}`)
   }
@@ -43,7 +22,7 @@ export async function getJobs(params = {}) {
   if (params.date_to) {
     queryParts.push(`date_to=${encodeURIComponent(params.date_to)}`)
   }
-  
+
   const queryStr = queryParts.length > 0 ? `?${queryParts.join('&')}` : ''
   const response = await fetch(`/api/jobs${queryStr}`)
   return handleResponse(response)

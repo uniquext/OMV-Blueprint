@@ -7,7 +7,7 @@ import threading
 from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor
 
-import db
+from core import db
 from pipeline.funnel import evaluate_media, execute_funnel_action
 from subtitle.lang_utils import normalize_language
 
@@ -94,18 +94,18 @@ class FunnelWorkerPool:
 
         logger.info(f"FunnelWorkerPool started with {max_workers} workers")
 
-    def submit_job(self, media_path: str) -> bool:
+    def submit_job(self, media_path: str, source: str = "scheduler") -> bool:
         if self._debounce_map and self._debounce_map.contains(media_path):
             logger.debug(f"Skipped enqueue, key in debounce map: {media_path}")
             return False
-        self._queue.put(media_path)
+        self._queue.put({"media_path": media_path, "source": source})
         logger.debug(f"Submitted to FIFO: {media_path}")
         return True
 
     def _worker_loop(self) -> None:
         while self._running:
             try:
-                media_path = self._queue.get(timeout=0.5)
+                item = self._queue.get(timeout=0.5)
             except queue.Empty:
                 continue
 
@@ -114,6 +114,11 @@ class FunnelWorkerPool:
                 with self._active_lock:
                     self._active_count += 1
                 try:
+                    # 兼容旧格式（纯字符串）和新格式（字典）
+                    if isinstance(item, dict):
+                        media_path = item["media_path"]
+                    else:
+                        media_path = item
                     self._process_media(media_path)
                 except Exception as e:
                     logger.error(f"Worker error processing {media_path}: {e}")
@@ -145,12 +150,21 @@ class FunnelWorkerPool:
         logger.info("FunnelWorkerPool shutdown")
 
     def snapshot(self) -> Dict:
-        """返回当前运行时状态快照"""
+        """返回当前运行时状态快照（含队列条目列表）"""
         with self._active_lock:
             active = self._active_count
+        # 获取队列中的待处理条目（不消费，仅窥视）
+        items = []
+        with self._queue.mutex:
+            for entry in self._queue.queue:
+                if isinstance(entry, dict):
+                    items.append({"media_path": entry["media_path"], "source": entry.get("source", "")})
+                else:
+                    items.append({"media_path": entry, "source": ""})
         return {
             "queue_size": self._queue.qsize(),
             "active_workers": active,
+            "items": items,
         }
 
 
@@ -160,7 +174,7 @@ def start_debounce_scheduler(debounce_map: DebounceMap, worker_pool: FunnelWorke
         while worker_pool._running:
             ready = debounce_map.pop_ready()
             for entry in ready:
-                worker_pool.submit_job(entry["media_path"])
+                worker_pool.submit_job(entry["media_path"], source=entry.get("source", ""))
             time.sleep(interval)
 
     thread = threading.Thread(target=scheduler_loop, daemon=True)

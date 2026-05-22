@@ -8,7 +8,7 @@ import logging
 from typing import List
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from config_loader import load_config
+from core.config_loader import load_config
 from scanner.media_scanner import scan_directory
 
 logger = logging.getLogger(__name__)
@@ -37,7 +37,7 @@ def job_scan_and_enqueue(worker_pool, extensions: List[str]) -> None:
         enqueued_count = 0
         for file_path in files:
             # 直接推入 WorkerPool 队列
-            success = worker_pool.submit_job(file_path)
+            success = worker_pool.submit_job(file_path, source="scheduler")
             if success:
                 enqueued_count += 1
                 

@@ -255,10 +255,10 @@ const handleScan = async () => {
 
 const handleSSEEvent = (type, payload) => {
   if (type === 'job_created') {
-    // stats
+    // 增量更新：统计卡片 funneling++
     stats.funneling++
     
-    // active list
+    // 增量更新：活跃列表添加条目
     const exists = active.l2_extracting.some(j => j.id === payload.job_id)
     if (!exists) {
       active.l2_extracting.push({
@@ -270,14 +270,21 @@ const handleSSEEvent = (type, payload) => {
   } else if (type === 'job_status_changed') {
     const finalStatuses = ['done', 'failed', 'skipped']
     if (finalStatuses.includes(payload.status)) {
-      // Remove from all active lists
+      // 终态：从活跃列表移除
       active.l2_extracting = active.l2_extracting.filter(j => j.id !== payload.job_id)
       active.l3_translating = active.l3_translating.filter(j => j.id !== payload.job_id)
-      // Done/Failed/Skipped should trigger full HTTP refresh to update database rates & times
+
+      // 增量更新统计卡片
+      if (payload.status === 'done') stats.completed++
+      else if (payload.status === 'skipped') stats.skipped++
+      else if (payload.status === 'failed') stats.failed++
+
+      // 非终态计数递减（从哪个阶段离开）
+      // 注意：无法精确知道之前在哪个阶段，但终态时 DB 计数已更新，全量刷新更安全
+      // 终态触发全量刷新以更新成功率、耗时等聚合指标
       fetchData()
     } else {
-      // Internal transition: funneling/extracting/translating/rebuilding
-      // Find where it currently resides and move it
+      // 非终态内部流转：本地增量移动，不发 HTTP 请求
       let task = active.l2_extracting.find(j => j.id === payload.job_id) || 
                  active.l3_translating.find(j => j.id === payload.job_id)
       
@@ -290,13 +297,14 @@ const handleSSEEvent = (type, payload) => {
           status: newStatus
         }
       } else {
-        // Remove from old lists
+        // 从旧列表移除
         active.l2_extracting = active.l2_extracting.filter(j => j.id !== payload.job_id)
         active.l3_translating = active.l3_translating.filter(j => j.id !== payload.job_id)
         task.status = newStatus
       }
 
-      // Add to new list
+      // 增量更新统计卡片：阶段间移动
+      // funneling/extracting 属于 L2，translating/rebuilding 属于 L3
       if (newStatus === 'funneling' || newStatus === 'extracting') {
         active.l2_extracting.push(task)
       } else if (newStatus === 'translating' || newStatus === 'rebuilding') {
@@ -308,8 +316,7 @@ const handleSSEEvent = (type, payload) => {
         active.l3_translating.push(task)
       }
 
-      // Trigger stats refresh to stay consistent
-      fetchData()
+      // 不调用 fetchData()，纯本地增量更新
     }
   } else if (type === 'task_progress') {
     const task = active.l3_translating.find(j => j.translate_task_id === payload.task_id)
@@ -323,6 +330,7 @@ const handleSSEEvent = (type, payload) => {
     isScanning.value = false
     scanStatus.value = ''
     message.success(`全盘扫描完成，已入队 ${payload.count || 0} 个文件`)
+    // 扫描完成可能导致大量数据涌入，触发全量刷新
     fetchData()
   } else if (type === 'timing_anomaly_detected') {
     hasAnomaly.value = true

@@ -1,26 +1,4 @@
-async function handleResponse(response) {
-  if (!response.ok) {
-    let errorMsg = `HTTP Error: ${response.status}`
-    try {
-      const errorData = await response.json()
-      if (errorData.detail) {
-        if (typeof errorData.detail === 'string') {
-          errorMsg = errorData.detail
-        } else if (errorData.detail.message) {
-          errorMsg = errorData.detail.message
-        } else if (Array.isArray(errorData.detail)) {
-          errorMsg = 'Validation Error: ' + JSON.stringify(errorData.detail)
-        }
-      }
-    } catch (e) {
-      // json parse failed, keep generic message
-    }
-    throw new Error(errorMsg)
-  }
-
-  const json = await response.json()
-  return json.data
-}
+import { handleResponse } from './http'
 
 export async function getConfig() {
   const response = await fetch('/api/config')

@@ -292,7 +292,7 @@ async function fetchJobs() {
         status: item.status,
         level: lvl !== null && lvl !== undefined ? lvl : '-',
         levelDesc,
-        source: 'watchdog',
+        source: item.source || 'scheduler',
         created_at: item.created_at ? new Date(item.created_at).toLocaleString() : '-',
         completed_at: item.completed_at ? new Date(item.completed_at).toLocaleString() : null,
         original_srt: item.original_srt_path,

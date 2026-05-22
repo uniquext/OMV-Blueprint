@@ -10,12 +10,12 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, status, Query, Re
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
-from config_loader import load_config, atomic_write_json, _reset_config
-import config_loader
-from config_models import ConfigPayload, mask_api_key
+from core.config_loader import load_config, atomic_write_json, _reset_config
+import core.config_loader
+from core.config_models import ConfigPayload, mask_api_key
 from subtitle.lang_utils import normalize_language
 from scanner.media_scanner import scan_directory
-from response import api_success, api_error
+from api.response import api_success, api_error
 
 debounce_map = None
 worker_pool = None
@@ -58,7 +58,7 @@ async def notify_endpoint(request: NotifyRequest):
     normalized_lang = normalize_language(language, lang_map_override) if language else ""
 
     if normalized_lang == "zh":
-        worker_pool.submit_job(media_path)
+        worker_pool.submit_job(media_path, source="notify")
         logger.info(f"Language is zh, immediate processing: {media_path}")
         return api_success(
             data={"route": "immediate", "message": "Simplified Chinese subtitle arrived, skipping debounce layer for immediate processing"},
@@ -99,7 +99,7 @@ async def scan_endpoint():
 
         enqueued_count = 0
         for file_path in files:
-            if worker_pool.submit_job(file_path):
+            if worker_pool.submit_job(file_path, source="scan"):
                 enqueued_count += 1
 
         if _event_bus:
@@ -159,7 +159,7 @@ async def put_config(payload: ConfigPayload, background_tasks: BackgroundTasks):
         config_dict = payload.model_dump()
 
         # 原子写入
-        atomic_write_json(config_loader.CONFIG_PATH, config_dict)
+        atomic_write_json(core.config_loader.CONFIG_PATH, config_dict)
         logger.info("Config updated via API, scheduling restart")
 
         # 重置配置缓存
@@ -168,6 +168,7 @@ async def put_config(payload: ConfigPayload, background_tasks: BackgroundTasks):
         # 延迟执行 execv 重启（确保 HTTP 响应先到达客户端）
         background_tasks.add_task(_do_execv_restart)
 
+        # 注意：锁在 _do_execv_restart 中释放（execv 后进程重建，或全部重试失败后显式释放）
         return api_success(
             data={"status": "restarting"},
             message="Config written, process is restarting"
@@ -197,7 +198,7 @@ class PromptsPayload(BaseModel):
 @router.get("/api/prompts", status_code=status.HTTP_200_OK)
 async def get_prompts():
     """返回 system_prompt 和 glossary 的当前内容"""
-    from config_loader import PROMPTS_DIR
+    from core.config_loader import PROMPTS_DIR
 
     result = {"system_prompt": "", "glossary": {}}
 
@@ -228,7 +229,7 @@ async def put_prompts(payload: PromptsPayload):
     支持部分更新（只传 system_prompt 或只传 glossary），即时生效无需重启。
     """
     import json as json_module
-    from config_loader import PROMPTS_DIR, atomic_write_text, atomic_write_json
+    from core.config_loader import PROMPTS_DIR, atomic_write_text, atomic_write_json
 
     if payload.system_prompt is None and payload.glossary is None:
         raise HTTPException(
@@ -290,7 +291,7 @@ def _do_execv_restart():
     # 最多重试 3 次
     for attempt in range(3):
         logger.info(f"Executing os.execv() restart (attempt {attempt + 1}/3)")
-        
+
         # 必须在日志输出后关闭 FileHandler，否则日志写入会导致 handler 重新打开文件
         root_logger = logging.getLogger()
         for handler in root_logger.handlers:
@@ -319,23 +320,23 @@ def _do_execv_restart():
 async def get_stats_api():
     if not debounce_map or not worker_pool:
         raise HTTPException(status_code=503, detail={"error": "PIPELINE_NOT_READY", "message": "Pipeline not initialized"})
-    
-    import db
+
+    from core import db
     stats = db.get_stats()
-    
+
     # 时钟负数耗时异常时，向 EventBus 组播发布 timing_anomaly_detected SSE 事件
     if stats.get("has_timing_anomaly") and _event_bus:
         _event_bus.publish("timing_anomaly_detected", {"message": "检测到时钟异常或耗时数据为负数，可能存在系统时钟回拨！"})
-    
+
     # 内存快照
     debounce_snapshot = debounce_map.snapshot()
     pool_snapshot = worker_pool.snapshot()
-    
+
     # 获取 EventBus 的最新 snapshot_id
     snapshot_id = 0
     if _event_bus:
         snapshot_id = _event_bus.get_snapshot_id()
-    
+
     return api_success(data={
         **stats,
         "debouncing": debounce_snapshot.get("pending_count", 0),
@@ -373,7 +374,7 @@ async def get_jobs_api(
     date_from: Optional[str] = Query(None, description="起始时间 ISO 格式"),
     date_to: Optional[str] = Query(None, description="结束时间 ISO 格式")
 ):
-    import db
+    from core import db
     try:
         items, total = db.query_jobs(
             page=page,
@@ -391,7 +392,7 @@ async def get_jobs_api(
         })
     except Exception as e:
         logger.error(f"Error querying jobs: {e}")
-        return api_error(message=f"Failed to query jobs: {e}")
+        return api_error(code=500, message=f"Failed to query jobs: {e}")
 
 
 @router.get("/api/tasks", status_code=status.HTTP_200_OK)
@@ -400,7 +401,7 @@ async def get_tasks_api(
     page_size: int = Query(20, ge=1, le=100, description="每页容量"),
     status: Optional[str] = Query(None, description="任务状态")
 ):
-    import db
+    from core import db
     try:
         items, total = db.query_tasks(
             page=page,
@@ -415,18 +416,18 @@ async def get_tasks_api(
         })
     except Exception as e:
         logger.error(f"Error querying tasks: {e}")
-        return api_error(message=f"Failed to query tasks: {e}")
+        return api_error(code=500, message=f"Failed to query tasks: {e}")
 
 
 @router.get("/api/jobs/stats", status_code=status.HTTP_200_OK)
 async def get_jobs_stats_api():
-    import db
+    from core import db
     try:
         stats = db.get_jobs_stats()
         return api_success(data=stats)
     except Exception as e:
         logger.error(f"Error getting jobs stats: {e}")
-        return api_error(message=f"Failed to get jobs stats: {e}")
+        return api_error(code=500, message=f"Failed to get jobs stats: {e}")
 
 
 @router.get("/api/logs", status_code=status.HTTP_200_OK)
@@ -436,19 +437,19 @@ async def get_logs_api(
     from collections import deque
     log_dir = os.environ.get("LOG_DIR", "/app/logs")
     log_file = os.path.join(log_dir, "subtitle_translator.log")
-    
+
     if not os.path.exists(log_file):
         return api_success(data={
             "content": "No log file found",
             "lines": 0
         })
-        
+
     try:
         with open(log_file, "r", encoding="utf-8", errors="replace") as f:
             log_lines = deque(f, lines)
             content = "".join(log_lines)
             actual_lines = len(log_lines)
-            
+
         return api_success(data={
             "content": content,
             "lines": actual_lines
@@ -467,26 +468,25 @@ SSE_HEARTBEAT_TIMEOUT = 30
 async def sse_events(request: Request):
     if not _event_bus:
         raise HTTPException(status_code=503, detail="EventBus not initialized")
-        
+
     async def event_generator():
         queue = _event_bus.subscribe()
         try:
             while True:
                 if await request.is_disconnected():
                     break
-                    
+
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=SSE_HEARTBEAT_TIMEOUT)
                     event_type = event["type"]
                     payload = event["payload"]
 
                     yield f"data: {json.dumps({'type': event_type, **payload})}\n\n"
-                    
+
                 except asyncio.TimeoutError:
                     # Send heartbeat
                     yield ":ping\n\n"
         finally:
             _event_bus.unsubscribe(queue)
-            
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+    return StreamingResponse(event_generator(), media_type="text/event-stream")

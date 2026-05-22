@@ -183,14 +183,13 @@ def _ensure_prompts(config: Dict):
     """自动生成默认的 prompt 文件（使用原子写入）"""
     if not os.path.exists(PROMPTS_DIR):
         os.makedirs(PROMPTS_DIR, exist_ok=True)
-    
+
     sys_prompt_path = os.path.join(PROMPTS_DIR, "system_prompt.txt")
     if not os.path.exists(sys_prompt_path):
         logger.info(f"Generating default system prompt at {sys_prompt_path}")
         atomic_write_text(sys_prompt_path, DEFAULT_SYSTEM_PROMPT)
-            
+
     glossary_path = os.path.join(PROMPTS_DIR, "glossary.json")
     if not os.path.exists(glossary_path):
         logger.info(f"Generating default glossary at {glossary_path}")
         atomic_write_json(glossary_path, {})
-

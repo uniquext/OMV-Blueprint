@@ -3,7 +3,8 @@ import logging
 from typing import Dict
 from pathlib import Path
 
-import db
+from core import db
+from core.config_loader import load_config
 from subtitle.lang_utils import normalize_language
 from subtitle.srt_handler import extract_text_from_srt
 from subtitle.opencc_handler import convert_traditional_to_simplified
@@ -12,7 +13,6 @@ from subtitle.ffmpeg_handler import (
     is_graphical_codec,
     extract_subtitle_track,
 )
-from config_loader import load_config
 
 logger = logging.getLogger(__name__)
 

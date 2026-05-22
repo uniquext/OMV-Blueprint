@@ -7,13 +7,16 @@
       <router-link to="/config" class="nav-link" active-class="active">配置</router-link>
     </div>
     <div class="right-info">
-      <span class="sse-dot"></span>
-      <span>SSE 已连接</span>
+      <span class="sse-dot" :class="{ disconnected: !sseConnected }"></span>
+      <span>{{ sseConnected ? 'SSE 已连接' : 'SSE 未连接' }}</span>
     </div>
   </div>
 </template>
 
 <script setup>
+import { inject } from 'vue'
+
+const sseConnected = inject('sseConnected')
 </script>
 
 <style scoped>
@@ -25,5 +28,6 @@
 .navbar .nav-link.active { color: #18a058; background: #e8f8ef; font-weight: 500; }
 .navbar .right-info { margin-left: auto; font-size: 12px; color: #999; display: flex; align-items: center; gap: 8px; }
 .sse-dot { width: 8px; height: 8px; border-radius: 50%; background: #18a058; display: inline-block; animation: pulse 2s infinite; }
+.sse-dot.disconnected { background: #d03050; animation: none; }
 @keyframes pulse { 0%,100%{ opacity:1; } 50%{ opacity:0.4; } }
 </style>

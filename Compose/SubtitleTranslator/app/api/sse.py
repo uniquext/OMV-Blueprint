@@ -32,7 +32,7 @@ class EventBus:
         # To avoid modifying the caller's dictionary, create a shallow copy
         event_payload = payload.copy()
         event_payload["snapshot_id"] = current_id
-        
+
         event = {
             "type": event_type,
             "payload": event_payload

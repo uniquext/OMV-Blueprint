@@ -5,10 +5,10 @@ import logging
 from pathlib import Path
 from typing import Dict, Optional, List
 
-import db
+from core import db
 from subtitle.srt_handler import rebuild_srt_with_translation
 from translate.translator import translate_file, compute_resume_batch_idx
-from config_loader import load_config
+from core.config_loader import load_config
 
 logger = logging.getLogger(__name__)
 
