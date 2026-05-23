@@ -28,6 +28,12 @@ _scanning_event = threading.Event()
 _config_lock = threading.Lock()
 
 
+@router.get("/api/health", status_code=status.HTTP_200_OK)
+async def health_endpoint():
+    """健康检查端点"""
+    return api_success(data={"status": "ok"})
+
+
 class NotifyRequest(BaseModel):
     media_path: str = Field(..., description="媒体文件完整路径")
     language: Optional[str] = Field(None, description="字幕语言码")

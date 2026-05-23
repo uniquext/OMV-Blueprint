@@ -20,7 +20,7 @@ class RateLimiter:
     def _ensure_config(self):
         if self._rpm_limit is not None:
             return
-        from config_loader import load_config
+        from core.config_loader import load_config
         config = load_config()
         self._rpm_limit = config["llm"]["rpm_limit"]
         self._tpm_limit = config["llm"]["tpm_limit"]

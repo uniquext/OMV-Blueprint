@@ -366,7 +366,11 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
                         
                         logger.debug(f"LLM response text:\n{response_text}")
 
-                        translation_results = parse_response(response_text, expected_ids)
+                        try:
+                            translation_results = parse_response(response_text, expected_ids)
+                        except ValueError as ve:
+                            logger.error(f"Validation failed during parsing.\n=== User Prompt ===\n{user_prompt}\n=== LLM Response ===\n{response_text}\n===================")
+                            raise ve
                         break
                     except Exception as e:
                         if attempt >= max_retries:

@@ -1,5 +1,5 @@
 # 第一阶段：前端构建
-FROM node:20-alpine AS frontend-builder
+FROM node:22-alpine AS frontend-builder
 WORKDIR /web
 # 仅复制 package.json 进行依赖安装，利用缓存
 COPY web/package*.json ./
@@ -11,6 +11,11 @@ RUN npm run build
 # 第二阶段：后端运行
 FROM python:3.9-slim
 WORKDIR /app
+
+# 安装系统依赖（包含 ffmpeg 和 ffprobe）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
 # 安装后端依赖
 COPY app/requirements.txt ./
