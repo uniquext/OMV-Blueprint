@@ -22,201 +22,206 @@
 
     <!-- config.json 编辑 -->
     <div class="config-section" v-if="!loadingInit && !initError">
-      <div class="config-section-title">⚙️ config.json 配置</div>
-      
-      <div v-if="configSaveError" class="error-message config-error">
-        {{ configSaveError }}
+      <!-- TAB 切换 -->
+      <div class="config-tabs">
+        <button class="config-tab" :class="{ active: activeTab === 'config' }" @click="activeTab = 'config'">⚙️ Config</button>
+        <button class="config-tab" :class="{ active: activeTab === 'prompt' }" @click="activeTab = 'prompt'">📝 Prompt</button>
       </div>
 
-      <!-- ═══ LLM 区块 ═══ -->
-      <div class="config-subsection">
-        <div class="subsection-title">🤖 LLM</div>
-        <div class="config-form">
-          <div class="form-row">
-            <div class="form-group">
-              <label>API Key</label>
-              <div class="input-with-toggle">
-                <input :type="showApiKey ? 'text' : 'password'" v-model="config.llm.api_key" />
-                <button type="button" class="toggle-btn" @click="showApiKey = !showApiKey" tabindex="-1">
-                  {{ showApiKey ? '🙈' : '👁️' }}
-                </button>
+      <!-- ═══ Config TAB ═══ -->
+      <div v-show="activeTab === 'config'">
+        <div v-if="configSaveError" class="error-message config-error">
+          {{ configSaveError }}
+        </div>
+
+        <!-- ═══ LLM 区块 ═══ -->
+        <div class="config-subsection">
+          <div class="subsection-title">🤖 LLM</div>
+          <div class="config-form">
+            <div class="form-row">
+              <div class="form-group">
+                <label>API Key</label>
+                <div class="input-with-toggle">
+                  <input :type="showApiKey ? 'text' : 'password'" v-model="config.llm.api_key" />
+                  <button type="button" class="toggle-btn" @click="showApiKey = !showApiKey" tabindex="-1">
+                    {{ showApiKey ? '🙈' : '👁️' }}
+                  </button>
+                </div>
+                <div class="hint">OpenAI / 兼容 API 密钥，读取时脱敏展示</div>
               </div>
-              <div class="hint">OpenAI / 兼容 API 密钥，读取时脱敏展示</div>
+              <div class="form-group">
+                <label>API Base URL</label>
+                <input type="text" v-model="config.llm.api_url" placeholder="https://api.openai.com/v1" />
+              </div>
             </div>
-            <div class="form-group">
-              <label>API Base URL</label>
-              <input type="text" v-model="config.llm.api_url" placeholder="https://api.openai.com/v1" />
+            <div class="form-row">
+              <div class="form-group">
+                <label>模型名称 (model)</label>
+                <input type="text" v-model="config.llm.model" placeholder="gpt-4o" />
+                <div class="hint">填写模型标识符，如 gpt-4o、deepseek-chat 等</div>
+              </div>
+              <div class="form-group">
+                <label>模型类型 (model_type)</label>
+                <select v-model="config.llm.model_type">
+                  <option value="chat">Chat — 智能对话</option>
+                  <option value="mt">MT — 机器翻译</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>温度 (temperature)</label>
+                <input type="number" v-model.number="config.llm.temperature" min="0" max="2" step="0.1" />
+              </div>
+              <div class="form-group">
+                <label>超时 (timeout)</label>
+                <input type="number" v-model.number="config.llm.timeout" min="1" max="600" />
+                <div class="hint">单次请求超时秒数</div>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>批次大小 (batch_size)</label>
+                <input type="number" v-model.number="config.llm.batch_size" min="1" max="100" />
+                <div class="hint">每次翻译请求的字幕行数</div>
+              </div>
+              <div class="form-group">
+                <label>上下文条数 (context_size)</label>
+                <input type="number" v-model.number="config.llm.context_size" min="0" max="20" />
+                <div class="hint">携带前文翻译结果条数以提高连贯性</div>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>RPM 限制 (rpm_limit)</label>
+                <input type="number" v-model.number="config.llm.rpm_limit" min="0" />
+                <div class="hint">每分钟请求次数限制，0 表示不限制</div>
+              </div>
+              <div class="form-group">
+                <label>TPM 限制 (tpm_limit)</label>
+                <input type="number" v-model.number="config.llm.tpm_limit" min="0" />
+                <div class="hint">每分钟 Token 数限制，0 表示不限制</div>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>最大重试次数 (max_retries)</label>
+                <input type="number" v-model.number="config.llm.max_retries" min="0" max="10" />
+              </div>
+              <div class="form-group"></div>
             </div>
           </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>模型名称 (model)</label>
-              <input type="text" v-model="config.llm.model" placeholder="gpt-4o" />
-              <div class="hint">填写模型标识符，如 gpt-4o、deepseek-chat 等</div>
+        </div>
+
+        <!-- ═══ Pipeline 区块 ═══ -->
+        <div class="config-subsection">
+          <div class="subsection-title">⚡ Pipeline</div>
+          <div class="config-form">
+            <div class="form-row">
+              <div class="form-group">
+                <label>并发工人数 (funnel_workers)</label>
+                <input type="number" v-model.number="config.pipeline.funnel_workers" min="1" max="20" />
+                <div class="hint">同时翻译的文件数上限</div>
+              </div>
+              <div class="form-group">
+                <label>防抖等待秒数 (debounce_seconds)</label>
+                <input type="number" v-model.number="config.pipeline.debounce_seconds" min="0" max="600" />
+                <div class="hint">文件变化后等待该时间稳定后再处理</div>
+              </div>
             </div>
-            <div class="form-group">
-              <label>模型类型 (model_type)</label>
-              <select v-model="config.llm.model_type">
-                <option value="chat">Chat — 智能对话</option>
-                <option value="mt">MT — 机器翻译</option>
-              </select>
+            <div class="form-row">
+              <div class="form-group">
+                <label>防抖轮询间隔 (debounce_poll_interval)</label>
+                <input type="number" v-model.number="config.pipeline.debounce_poll_interval" min="1" max="60" />
+                <div class="hint">等待层内部轮询间隔，检查到期条目推入执行层</div>
+              </div>
+              <div class="form-group">
+                <label>定时扫描间隔 (scan_interval)</label>
+                <input type="number" v-model.number="config.pipeline.scan_interval" min="0" />
+                <div class="hint">全量扫描间隔秒数，0 表示禁用</div>
+              </div>
             </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>温度 (temperature)</label>
-              <input type="number" v-model.number="config.llm.temperature" min="0" max="2" step="0.1" />
-            </div>
-            <div class="form-group">
-              <label>超时 (timeout)</label>
-              <input type="number" v-model.number="config.llm.timeout" min="1" max="600" />
-              <div class="hint">单次请求超时秒数</div>
-            </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>批次大小 (batch_size)</label>
-              <input type="number" v-model.number="config.llm.batch_size" min="1" max="100" />
-              <div class="hint">每次翻译请求的字幕行数</div>
-            </div>
-            <div class="form-group">
-              <label>上下文条数 (context_size)</label>
-              <input type="number" v-model.number="config.llm.context_size" min="0" max="20" />
-              <div class="hint">携带前文翻译结果条数以提高连贯性</div>
-            </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>RPM 限制 (rpm_limit)</label>
-              <input type="number" v-model.number="config.llm.rpm_limit" min="0" />
-              <div class="hint">每分钟请求次数限制，0 表示不限制</div>
-            </div>
-            <div class="form-group">
-              <label>TPM 限制 (tpm_limit)</label>
-              <input type="number" v-model.number="config.llm.tpm_limit" min="0" />
-              <div class="hint">每分钟 Token 数限制，0 表示不限制</div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>扫描目录 (scan_dir)</label>
+                <input type="text" v-model="config.pipeline.scan_dir" />
+              </div>
+              <div class="form-group"></div>
             </div>
           </div>
-          <div class="form-row">
+        </div>
+
+        <!-- ═══ Media 区块 ═══ -->
+        <div class="config-subsection">
+          <div class="subsection-title">🎬 Media</div>
+          <div class="config-form">
             <div class="form-group">
-              <label>最大重试次数 (max_retries)</label>
-              <input type="number" v-model.number="config.llm.max_retries" min="0" max="10" />
+              <label>视频扩展名 (extensions)</label>
+              <input type="text" v-model="extensionsStr" />
+              <div class="hint">逗号分隔，如 .mkv,.mp4,.avi</div>
             </div>
-            <div class="form-group"></div>
+            <div class="form-group">
+              <label>语言映射覆盖 (lang_map_override)</label>
+              <textarea v-model="langMapStr" class="json-textarea"></textarea>
+              <div class="hint">JSON 对象，自定义字幕语言标识到标准语言代码的映射</div>
+            </div>
           </div>
+        </div>
+
+        <!-- ═══ Watchdog 区块 ═══ -->
+        <div class="config-subsection">
+          <div class="subsection-title">🐕 Watchdog</div>
+          <div class="config-form">
+            <div class="form-row">
+              <div class="form-group">
+                <label>启用文件监控 (enabled)</label>
+                <select v-model="config.watchdog.enabled">
+                  <option :value="true">是</option>
+                  <option :value="false">否</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>监控路径 (path)</label>
+                <input type="text" v-model="config.watchdog.path" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <button class="btn" :class="{ 'btn-flash': configResetFlash }" @click="resetConfig" :disabled="savingConfig">重置</button>
+          <button class="btn btn-primary" @click="saveConfig" :disabled="savingConfig">
+            💾 {{ savingConfig ? '保存中...' : '保存配置' }}
+          </button>
         </div>
       </div>
 
-      <!-- ═══ Pipeline 区块 ═══ -->
-      <div class="config-subsection">
-        <div class="subsection-title">⚡ Pipeline</div>
-        <div class="config-form">
-          <div class="form-row">
-            <div class="form-group">
-              <label>并发工人数 (funnel_workers)</label>
-              <input type="number" v-model.number="config.pipeline.funnel_workers" min="1" max="20" />
-              <div class="hint">同时翻译的文件数上限</div>
-            </div>
-            <div class="form-group">
-              <label>防抖等待秒数 (debounce_seconds)</label>
-              <input type="number" v-model.number="config.pipeline.debounce_seconds" min="0" max="600" />
-              <div class="hint">文件变化后等待该时间稳定后再处理</div>
-            </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>防抖轮询间隔 (debounce_poll_interval)</label>
-              <input type="number" v-model.number="config.pipeline.debounce_poll_interval" min="1" max="60" />
-              <div class="hint">等待层内部轮询间隔，检查到期条目推入执行层</div>
-            </div>
-            <div class="form-group">
-              <label>定时扫描间隔 (scan_interval)</label>
-              <input type="number" v-model.number="config.pipeline.scan_interval" min="0" />
-              <div class="hint">全量扫描间隔秒数，0 表示禁用</div>
-            </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>扫描目录 (scan_dir)</label>
-              <input type="text" v-model="config.pipeline.scan_dir" />
-            </div>
-            <div class="form-group"></div>
-          </div>
+      <!-- ═══ Prompt TAB ═══ -->
+      <div v-show="activeTab === 'prompt'">
+        <div v-if="promptSaveError" class="error-message config-error">
+          {{ promptSaveError }}
         </div>
-      </div>
+        <div v-if="promptSaveSuccess" class="success-message">
+          {{ promptSaveSuccess }}
+        </div>
 
-      <!-- ═══ Media 区块 ═══ -->
-      <div class="config-subsection">
-        <div class="subsection-title">🎬 Media</div>
         <div class="config-form">
           <div class="form-group">
-            <label>视频扩展名 (extensions)</label>
-            <input type="text" v-model="extensionsStr" />
-            <div class="hint">逗号分隔，如 .mkv,.mp4,.avi</div>
+            <label>系统提示词 (System Prompt)</label>
+            <textarea v-model="prompts.system_prompt"></textarea>
           </div>
           <div class="form-group">
-            <label>语言映射覆盖 (lang_map_override)</label>
-            <textarea v-model="langMapStr" class="json-textarea"></textarea>
-            <div class="hint">JSON 对象，自定义字幕语言标识到标准语言代码的映射</div>
+            <label>术语表 (Glossary)</label>
+            <textarea v-model="prompts.glossaryStr"></textarea>
+            <div class="hint">JSON 格式，键为英文原文，值为期望的翻译结果</div>
           </div>
         </div>
-      </div>
-
-      <!-- ═══ Watchdog 区块 ═══ -->
-      <div class="config-subsection">
-        <div class="subsection-title">🐕 Watchdog</div>
-        <div class="config-form">
-          <div class="form-row">
-            <div class="form-group">
-              <label>启用文件监控 (enabled)</label>
-              <select v-model="config.watchdog.enabled">
-                <option :value="true">是</option>
-                <option :value="false">否</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label>监控路径 (path)</label>
-              <input type="text" v-model="config.watchdog.path" />
-            </div>
-          </div>
+        <div class="form-actions">
+          <button class="btn" :class="{ 'btn-flash': promptResetFlash }" @click="resetPrompts" :disabled="savingPrompt">重置</button>
+          <button class="btn btn-primary" @click="savePrompts" :disabled="savingPrompt">
+            💾 {{ savingPrompt ? '保存中...' : '保存 Prompt' }}
+          </button>
         </div>
-      </div>
-
-      <div class="form-actions">
-        <button class="btn" :class="{ 'btn-flash': configResetFlash }" @click="resetConfig" :disabled="savingConfig">重置</button>
-        <button class="btn btn-primary" @click="saveConfig" :disabled="savingConfig">
-          💾 {{ savingConfig ? '保存中...' : '保存配置' }}
-        </button>
-      </div>
-    </div>
-
-    <!-- Prompt 编辑 -->
-    <div class="config-section" v-if="!loadingInit && !initError">
-      <div class="config-section-title">📝 Prompt 编辑</div>
-      
-      <div v-if="promptSaveError" class="error-message config-error">
-        {{ promptSaveError }}
-      </div>
-      <div v-if="promptSaveSuccess" class="success-message">
-        {{ promptSaveSuccess }}
-      </div>
-
-      <div class="config-form">
-        <div class="form-group">
-          <label>系统提示词 (System Prompt)</label>
-          <textarea v-model="prompts.system_prompt"></textarea>
-        </div>
-        <div class="form-group">
-          <label>术语表 (Glossary)</label>
-          <textarea v-model="prompts.glossaryStr"></textarea>
-          <div class="hint">JSON 格式，键为英文原文，值为期望的翻译结果</div>
-        </div>
-      </div>
-      <div class="form-actions">
-        <button class="btn" :class="{ 'btn-flash': promptResetFlash }" @click="resetPrompts" :disabled="savingPrompt">重置</button>
-        <button class="btn btn-primary" @click="savePrompts" :disabled="savingPrompt">
-          💾 {{ savingPrompt ? '保存中...' : '保存 Prompt' }}
-        </button>
       </div>
     </div>
   </div>
@@ -231,6 +236,7 @@ const loadingInit = ref(true)
 const initError = ref('')
 
 const showApiKey = ref(false)
+const activeTab = ref('config')
 
 const config = reactive({ llm: {}, pipeline: {}, media: {}, watchdog: {} })
 const prompts = reactive({ system_prompt: '', glossaryStr: '{}' })
@@ -426,7 +432,10 @@ async function savePrompts() {
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .config-section { background: #fff; border-radius: 8px; border: 1px solid #e8e8ec; margin-bottom: 16px; overflow: hidden; }
-.config-section-title { padding: 14px 16px; font-weight: 500; font-size: 14px; border-bottom: 1px solid #f0f0f4; background: #fafafa; }
+.config-tabs { display: flex; border-bottom: 1px solid #e8e8ec; background: #fafafa; }
+.config-tab { flex: 1; padding: 12px 16px; border: none; background: none; cursor: pointer; font-size: 14px; font-weight: 500; color: #999; border-bottom: 2px solid transparent; transition: all 0.2s; }
+.config-tab:hover { color: #555; background: #f0f0f4; }
+.config-tab.active { color: #18a058; border-bottom-color: #18a058; background: #fff; }
 .config-subsection { border-bottom: 1px solid #f0f0f4; }
 .config-subsection:last-of-type { border-bottom: none; }
 .subsection-title { padding: 10px 16px; font-size: 13px; font-weight: 500; color: #555; background: #f8f8fa; border-bottom: 1px solid #f0f0f4; }

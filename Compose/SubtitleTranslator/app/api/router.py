@@ -436,6 +436,17 @@ async def get_jobs_stats_api():
         return api_error(code=500, message=f"Failed to get jobs stats: {e}")
 
 
+@router.get("/api/tasks/{task_id}/errors", status_code=status.HTTP_200_OK)
+async def get_task_errors(task_id: str):
+    """获取指定翻译任务的错误诊断快照"""
+    from core import db
+    task = db.get_task(task_id)
+    if not task:
+        return api_error(code=404, message="Task not found")
+    errors = db.get_translation_errors(task_id)
+    return api_success(data=errors)
+
+
 @router.get("/api/logs", status_code=status.HTTP_200_OK)
 async def get_logs_api(
     lines: int = Query(200, ge=1, le=2000, description="倒数读取的行数")

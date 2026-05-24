@@ -37,3 +37,8 @@ export async function getLogs(lines = 200) {
   const response = await fetch(`/api/logs?lines=${lines}`)
   return handleResponse(response)
 }
+
+export async function getTaskErrors(taskId) {
+  const response = await fetch(`/api/tasks/${taskId}/errors`)
+  return handleResponse(response)
+}

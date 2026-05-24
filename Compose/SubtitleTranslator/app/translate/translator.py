@@ -22,6 +22,37 @@ def _get_config():
         _config = load_config()
     return _config
 
+
+def _save_error_snapshot(
+    task_id: str,
+    batch_idx: int,
+    error_reason: str,
+    system_prompt: str,
+    glossary: dict,
+    user_prompt: str,
+    llm_response: str = None
+):
+    """将错误诊断快照写入数据库，写入失败仅记录日志不阻断主流程"""
+    try:
+        import json as json_module
+        glossary_str = json_module.dumps(glossary, ensure_ascii=False) if glossary is not None else None
+        llm_settings = {
+            "model": _get_config()["llm"]["model"],
+            "temperature": _get_config()["llm"]["temperature"]
+        }
+        db.insert_translation_error(
+            task_id=task_id,
+            batch_idx=batch_idx,
+            error_reason=error_reason,
+            system_prompt=system_prompt,
+            glossary=glossary_str,
+            user_prompt=user_prompt,
+            llm_response=llm_response,
+            llm_settings=llm_settings
+        )
+    except Exception as e:
+        logger.warning(f"Failed to save error snapshot for task {task_id}: {e}")
+
 @dataclass
 class Batch:
     """A translation batch, containing the current lines and pre-context."""
@@ -349,6 +380,7 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
                 translation_results = []
 
                 max_retries = _get_config()["llm"]["max_retries"]
+                response_text = None
                 for attempt in range(max_retries + 1):
                     try:
                         start_time = time.time()
@@ -374,6 +406,16 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
                         break
                     except Exception as e:
                         if attempt >= max_retries:
+                            # 重试耗尽，写入错误诊断快照后再抛出异常
+                            _save_error_snapshot(
+                                task_id=task_id,
+                                batch_idx=batch.batch_idx,
+                                error_reason=str(e),
+                                system_prompt=system_prompt,
+                                glossary=glossary,
+                                user_prompt=user_prompt,
+                                llm_response=response_text
+                            )
                             raise e
                         sleep_time = 5 * (2 ** attempt)
                         logger.warning(f"LLM Error: {e}, retrying in {sleep_time}s...")

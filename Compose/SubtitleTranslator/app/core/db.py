@@ -69,6 +69,21 @@ def init_db():
                 completed_at TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS translation_errors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                batch_idx INTEGER,
+                error_reason TEXT NOT NULL,
+                system_prompt TEXT,
+                glossary TEXT,
+                user_prompt TEXT,
+                llm_response TEXT,
+                llm_settings TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(task_id) REFERENCES translate_task(id)
+            )
+        """)
         conn.commit()
     logger.info(f"Database initialized at {DB_PATH}")
 
@@ -563,3 +578,48 @@ def get_jobs_stats() -> dict:
             "failed": failed,
             "success_rate": success_rate
         }
+
+
+def insert_translation_error(
+    task_id: str,
+    batch_idx: int,
+    error_reason: str,
+    system_prompt: str = None,
+    glossary: str = None,
+    user_prompt: str = None,
+    llm_response: str = None,
+    llm_settings: dict = None
+) -> int:
+    """插入一条翻译错误诊断快照，返回新记录的 id"""
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    settings_json = json.dumps(llm_settings, ensure_ascii=False) if llm_settings is not None else None
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            """INSERT INTO translation_errors
+               (task_id, batch_idx, error_reason, system_prompt, glossary, user_prompt, llm_response, llm_settings, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (task_id, batch_idx, error_reason, system_prompt, glossary, user_prompt, llm_response, settings_json, now)
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_translation_errors(task_id: str) -> List[Dict]:
+    """查询指定任务的所有错误诊断记录，按 id 升序返回"""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(
+            "SELECT * FROM translation_errors WHERE task_id = ? ORDER BY id ASC",
+            (task_id,)
+        )
+        results = []
+        for row in cursor.fetchall():
+            record = dict(row)
+            # llm_settings JSON 安全反序列化
+            if record.get("llm_settings") is not None:
+                try:
+                    record["llm_settings"] = json.loads(record["llm_settings"])
+                except (json.JSONDecodeError, TypeError):
+                    pass  # JSON 损坏时保留原始字符串
+            results.append(record)
+        return results

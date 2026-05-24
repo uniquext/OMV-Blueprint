@@ -175,7 +175,7 @@ def execute_funnel_action(job_id: str, media_path: str, funnel_result: Dict) -> 
 
     if level == 0:
         logger.info(f"Job {job_id}: Level 0 skip, marking skipped")
-        db.update_job_funnel_info(job_id, funnel_level=0)
+        db.update_job_funnel_info(job_id, funnel_level=0, output_srt_path=funnel_result.get("srt_path"))
         db.update_job_status(job_id, "skipped")
         return
 

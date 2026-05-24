@@ -32,7 +32,6 @@
       </select>
       <input type="date" v-model="filterDateFrom" />
       <input type="date" v-model="filterDateTo" />
-      <button class="btn" @click="handleSearch">筛选</button>
     </div>
 
     <!-- 任务列表 -->
@@ -44,7 +43,6 @@
             <th>媒体文件</th>
             <th>状态</th>
             <th>漏斗级别</th>
-            <th>来源</th>
             <th>创建时间</th>
             <th>翻译耗时</th>
             <th>耗时</th>
@@ -62,7 +60,6 @@
               <td class="path-cell" :title="task.path">{{ task.path }}</td>
               <td><span class="status-tag" :class="task.status">{{ statusLabel(task.status) }}</span></td>
               <td>Level {{ task.level }}</td>
-              <td><span class="source-tag">{{ task.source }}</span></td>
               <td>{{ task.created_at }}</td>
               <td>
                 <template v-if="task.translate_duration === null || task.translate_duration === undefined">
@@ -79,23 +76,33 @@
             </tr>
             <!-- 详情展开行 -->
             <tr v-if="expandedRows[idx]" class="detail-row open">
-              <td :colspan="8">
+              <td :colspan="7">
                 <div class="detail-content">
                   <div class="field"><span class="k">Job ID:</span><span class="v">{{ task.id }}</span></div>
-                  <div class="field"><span class="k">媒体路径:</span><span class="v">{{ task.path }}</span></div>
-                  <div class="field" v-if="task.original_srt"><span class="k">原始字幕:</span><span class="v">{{ task.original_srt }}</span></div>
-                  <div class="field" v-if="task.output_srt"><span class="k">输出字幕:</span><span class="v">{{ task.output_srt }}</span></div>
+                  <div class="field"><span class="k">状态:</span><span class="v"><span class="status-tag" :class="task.status">{{ statusLabel(task.status) }}</span></span></div>
                   <div class="field" v-if="task.levelDesc"><span class="k">{{ task.status === 'skipped' ? '跳过原因:' : '漏斗级别:' }}</span><span class="v">Level {{ task.level }} — {{ task.levelDesc }}</span></div>
-                  <div class="field" v-if="task.batch_info"><span class="k">翻译批次:</span><span class="v">{{ task.batch_info }}</span></div>
-                  <div class="field" v-if="task.error"><span class="k">错误信息:</span><span class="v error-text">{{ task.error }}</span></div>
+                  <div class="field"><span class="k">任务来源:</span><span class="v">{{ sourceLabel(task.source) }}</span></div>
                   <div class="field"><span class="k">创建时间:</span><span class="v">{{ task.created_at }}</span></div>
-                  <div class="field" v-if="task.completed_at"><span class="k">完成时间:</span><span class="v">{{ task.completed_at }}</span></div>
+                  <div class="field"><span class="k">完成时间:</span><span class="v" :class="{ 'placeholder-text': !task.completed_at }">{{ task.completed_at || '--' }}</span></div>
+                  <div class="field full-width"><span class="k">媒体路径:</span><span class="v">{{ task.path }}</span></div>
+                  <div class="field full-width">
+                    <span class="k">结果字幕:</span>
+                    <span class="v" :class="{ 'placeholder-text': !task.output_srt }">{{ task.output_srt ? basename(task.output_srt) : '--' }}</span>
+                  </div>
+                  <div class="field full-width" v-if="task.error">
+                    <span class="k">错误信息:</span>
+                    <span
+                      class="v error-text"
+                      :class="{ 'error-clickable': task.status === 'failed' && task.translate_task_id }"
+                      @click="task.status === 'failed' && task.translate_task_id && openDiagnostics(task.translate_task_id)"
+                    >{{ task.error }}</span>
+                  </div>
                 </div>
               </td>
             </tr>
           </template>
           <tr v-if="tasks.length === 0">
-            <td colspan="8" style="text-align:center;color:#999;padding:24px;">暂无历史记录</td>
+            <td colspan="7" style="text-align:center;color:#999;padding:24px;">暂无历史记录</td>
           </tr>
         </tbody>
       </table>
@@ -105,6 +112,64 @@
           {{ p }}
         </button>
         <button :disabled="currentPage === totalPages" @click="changePage(currentPage + 1)">下一页</button>
+      </div>
+    </div>
+
+    <!-- LLM Diagnostics 模态框 -->
+    <div class="diag-overlay" v-if="diagVisible" @click.self="closeDiagnostics">
+      <div class="diag-modal">
+        <div class="diag-header">
+          <span class="diag-title">LLM 诊断信息</span>
+          <button class="diag-close" @click="closeDiagnostics">&times;</button>
+        </div>
+        <div class="diag-body">
+          <div v-if="diagLoading" style="text-align:center;padding:24px;color:#999;">加载中...</div>
+          <div v-else-if="diagErrors.length === 0" style="text-align:center;padding:24px;color:#999;">无可用的诊断数据</div>
+          <div v-else class="diag-collapse">
+            <div v-for="(err, eidx) in diagErrors" :key="eidx" class="diag-panel">
+              <div class="diag-panel-header" @click="toggleDiagPanel(eidx)">
+                <span>{{ diagPanelExpanded[eidx] ? '▼' : '▶' }} Batch #{{ err.batch_idx }} — {{ err.error_reason }}</span>
+              </div>
+              <div v-if="diagPanelExpanded[eidx]" class="diag-panel-body">
+                <!-- MetaData 标签 -->
+                <div class="diag-meta" v-if="err.llm_settings">
+                  <span class="diag-tag" v-if="err.llm_settings.model">Model: {{ err.llm_settings.model }}</span>
+                  <span class="diag-tag" v-if="err.llm_settings.temperature !== undefined">Temperature: {{ err.llm_settings.temperature }}</span>
+                </div>
+                <!-- 可折叠的 System Prompt -->
+                <div class="diag-section" v-if="err.system_prompt">
+                  <div class="diag-section-header" @click="toggleDiagSection(`${eidx}-sys`)">
+                    <span>{{ diagSectionExpanded[`${eidx}-sys`] ? '▼' : '▶' }} System Prompt</span>
+                  </div>
+                  <div v-if="diagSectionExpanded[`${eidx}-sys`]" class="diag-section-content">
+                    <pre>{{ err.system_prompt }}</pre>
+                  </div>
+                </div>
+                <!-- 可折叠的 Glossary -->
+                <div class="diag-section" v-if="err.glossary">
+                  <div class="diag-section-header" @click="toggleDiagSection(`${eidx}-glo`)">
+                    <span>{{ diagSectionExpanded[`${eidx}-glo`] ? '▼' : '▶' }} Glossary</span>
+                  </div>
+                  <div v-if="diagSectionExpanded[`${eidx}-glo`]" class="diag-section-content">
+                    <pre>{{ typeof err.glossary === 'string' ? err.glossary : JSON.stringify(err.glossary, null, 2) }}</pre>
+                  </div>
+                </div>
+                <!-- User Prompt vs LLM Response 对比区域 -->
+                <div class="diag-compare">
+                  <div class="diag-compare-item" v-if="err.user_prompt">
+                    <div class="diag-compare-label">User Prompt</div>
+                    <pre class="diag-compare-code">{{ err.user_prompt }}</pre>
+                  </div>
+                  <div class="diag-compare-item">
+                    <div class="diag-compare-label">LLM Response</div>
+                    <pre class="diag-compare-code" v-if="err.llm_response">{{ err.llm_response }}</pre>
+                    <div class="diag-compare-placeholder" v-else>无响应数据（可能为网络超时）</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -139,7 +204,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
-import { getJobs, getJobsStats, getLogs } from '../api/history'
+import { getJobs, getJobsStats, getLogs, getTaskErrors } from '../api/history'
 
 const stats = reactive({
   done: 0,
@@ -219,6 +284,56 @@ function statusLabel(status) {
   return map[status] || status
 }
 
+function sourceLabel(source) {
+  const map = { scheduler: '定时扫描', watchdog: '文件监控', notify: 'API 通知', scan: '手动扫描', startup: '启动恢复' }
+  return map[source] || source || '--'
+}
+
+// ============ LLM Diagnostics 模态框 ============
+
+const diagVisible = ref(false)
+const diagLoading = ref(false)
+const diagErrors = ref([])
+const diagPanelExpanded = reactive({})
+const diagSectionExpanded = reactive({})
+
+function toggleDiagPanel(idx) {
+  diagPanelExpanded[idx] = !diagPanelExpanded[idx]
+}
+
+function toggleDiagSection(key) {
+  diagSectionExpanded[key] = !diagSectionExpanded[key]
+}
+
+async function openDiagnostics(taskId) {
+  diagVisible.value = true
+  diagLoading.value = true
+  diagErrors.value = []
+  // 重置展开状态
+  Object.keys(diagPanelExpanded).forEach(k => delete diagPanelExpanded[k])
+  Object.keys(diagSectionExpanded).forEach(k => delete diagSectionExpanded[k])
+
+  try {
+    const data = await getTaskErrors(taskId)
+    diagErrors.value = data || []
+    // 默认展开第一个面板
+    if (diagErrors.value.length > 0) {
+      diagPanelExpanded[0] = true
+    }
+  } catch (err) {
+    console.error('Failed to fetch diagnostics:', err)
+    diagErrors.value = []
+  } finally {
+    diagLoading.value = false
+  }
+}
+
+function closeDiagnostics() {
+  diagVisible.value = false
+}
+
+// ============ 日志解析 ============
+
 // 自动解析后端返回的原始日志字符串为 UI 终端日志条目
 const logEntries = computed(() => {
   if (!logContent.value) return []
@@ -226,10 +341,10 @@ const logEntries = computed(() => {
     let level = 'INFO'
     if (line.includes('ERROR') || line.includes('failed') || line.includes('Exception') || line.includes('CRITICAL')) level = 'ERROR'
     else if (line.includes('WARNING') || line.includes('WARN')) level = 'WARN'
-    
+
     let time = ''
     let msg = line
-    
+
     // 正则提取时间戳和消息，匹配标准 Python logging 格式："2026-05-20 15:23:57,892 - module - LEVEL - message"
     const match = line.match(/^(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2},\d{3})\s*-\s*\w+\s*-\s*([A-Z]+)\s*-\s*(.*)$/)
     if (match) {
@@ -264,7 +379,7 @@ async function fetchJobs() {
       date_from: filterDateFrom.value ? `${filterDateFrom.value}T00:00:00` : null,
       date_to: filterDateTo.value ? `${filterDateTo.value}T23:59:59` : null
     })
-    
+
     tasks.value = (data.items || []).map(item => {
       let duration = '-'
       if (item.created_at && item.completed_at) {
@@ -277,7 +392,7 @@ async function fetchJobs() {
           else duration = `${Math.floor(diffSec / 60)}m ${diffSec % 60}s`
         }
       }
-      
+
       let levelDesc = ''
       const lvl = item.funnel_level
       if (lvl === 0) levelDesc = '存在中文字幕（直接跳过）'
@@ -285,7 +400,7 @@ async function fetchJobs() {
       else if (lvl === 2) levelDesc = '外部英/日文字幕翻译（LLM）'
       else if (lvl === 3) levelDesc = '内嵌英/日文字幕提取并翻译（ffmpeg + LLM）'
       else if (lvl === -1) levelDesc = '图形字幕、ffprobe 报错或无可用字幕轨道'
-      
+
       return {
         id: item.id,
         path: item.media_path,
@@ -298,11 +413,12 @@ async function fetchJobs() {
         original_srt: item.original_srt_path,
         output_srt: item.output_srt_path,
         error: item.error,
+        translate_task_id: item.translate_task_id,
         translate_duration: item.translate_duration,
         duration
       }
     })
-    
+
     totalCount.value = data.total || 0
     // 清空展开行的缓存
     for (const key in expandedRows) {
@@ -327,6 +443,11 @@ function handleSearch() {
   fetchJobs()
 }
 
+// 筛选条件变化时自动搜索
+watch([filterStatusList, filterFunnelLevel, filterDateFrom, filterDateTo], () => {
+  handleSearch()
+})
+
 function changePage(page) {
   if (page < 1 || page > totalPages.value) return
   currentPage.value = page
@@ -340,11 +461,11 @@ const pageNumbers = computed(() => {
   const maxPagesToShow = 5
   let start = Math.max(1, currentPage.value - 2)
   let end = Math.min(totalPages.value, start + maxPagesToShow - 1)
-  
+
   if (end - start + 1 < maxPagesToShow) {
     start = Math.max(1, end - maxPagesToShow + 1)
   }
-  
+
   for (let i = start; i <= end; i++) {
     pages.push(i)
   }
@@ -370,6 +491,11 @@ onUnmounted(() => {
   }
   document.removeEventListener('click', handleClickOutsideStatusDropdown)
 })
+function basename(path) {
+  if (!path) return ''
+  const parts = path.split(/[/\\]/)
+  return parts.pop()
+}
 </script>
 
 <style scoped>
@@ -420,9 +546,13 @@ tbody tr:last-child td { border-bottom: none; }
 .detail-row td { background: #fafbfc; padding: 12px 20px !important; }
 .detail-content { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px; font-size: 12px; }
 .detail-content .field { display: flex; gap: 8px; }
+.detail-content .field.full-width { grid-column: span 2; }
 .detail-content .field .k { color: #999; min-width: 80px; }
 .detail-content .field .v { color: #555; word-break: break-all; }
 .detail-content .field .v.error-text { color: #d03050; }
+.detail-content .field .v.error-clickable { cursor: pointer; text-decoration: underline dotted; }
+.detail-content .field .v.error-clickable:hover { color: #b02040; }
+.detail-content .field .v.placeholder-text { color: #bbb; }
 
 /* 分页 */
 .pagination { display: flex; justify-content: center; align-items: center; gap: 4px; padding: 14px; }
@@ -430,6 +560,39 @@ tbody tr:last-child td { border-bottom: none; }
 .pagination button:hover { border-color: #18a058; color: #18a058; }
 .pagination button.active { background: #18a058; color: #fff; border-color: #18a058; }
 .pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ============ LLM Diagnostics 模态框 ============ */
+.diag-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.45); z-index: 1000; display: flex; align-items: center; justify-content: center; }
+.diag-modal { background: #fff; border-radius: 10px; width: 94%; max-width: 1200px; max-height: 85vh; display: flex; flex-direction: column; box-shadow: 0 8px 32px rgba(0,0,0,0.18); }
+.diag-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; border-bottom: 1px solid #e8e8ec; }
+.diag-title { font-size: 15px; font-weight: 600; color: #333; }
+.diag-close { background: none; border: none; font-size: 22px; cursor: pointer; color: #999; padding: 0 4px; line-height: 1; }
+.diag-close:hover { color: #333; }
+.diag-body { padding: 16px 20px; overflow-y: auto; flex: 1; }
+
+/* 折叠面板 */
+.diag-panel { border: 1px solid #e8e8ec; border-radius: 6px; margin-bottom: 10px; overflow: hidden; }
+.diag-panel-header { padding: 10px 14px; background: #fafafa; cursor: pointer; font-size: 13px; font-weight: 500; color: #333; user-select: none; }
+.diag-panel-header:hover { background: #f0f0f4; }
+.diag-panel-body { padding: 14px; }
+
+/* MetaData 标签 */
+.diag-meta { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.diag-tag { display: inline-block; padding: 2px 10px; border-radius: 4px; font-size: 12px; background: #e8f0fe; color: #2080f0; font-weight: 500; }
+
+/* 可折叠区域 */
+.diag-section { margin-bottom: 10px; border: 1px solid #f0f0f4; border-radius: 4px; overflow: hidden; }
+.diag-section-header { padding: 8px 12px; background: #fafafa; cursor: pointer; font-size: 12px; font-weight: 500; color: #666; user-select: none; }
+.diag-section-header:hover { background: #f0f0f4; }
+.diag-section-content { padding: 10px 12px; }
+.diag-section-content pre { margin: 0; white-space: pre-wrap; word-break: break-all; font-size: 12px; color: #555; font-family: "SF Mono", "Fira Code", monospace; line-height: 1.6; background: #f8f8fa; padding: 8px; border-radius: 4px; max-height: 200px; overflow-y: auto; }
+
+/* 对比区域：左右栏 */
+.diag-compare { display: flex; gap: 12px; margin-top: 12px; }
+.diag-compare-item { flex: 1; min-width: 0; }
+.diag-compare-label { font-size: 12px; font-weight: 600; color: #666; margin-bottom: 4px; }
+.diag-compare-code { margin: 0; white-space: pre-wrap; word-break: break-all; font-size: 12px; color: #333; font-family: "SF Mono", "Fira Code", monospace; line-height: 1.6; background: #1e1e2e; color: #cdd6f4; padding: 10px; border-radius: 6px; max-height: 300px; overflow-y: auto; }
+.diag-compare-placeholder { font-size: 12px; color: #999; font-style: italic; padding: 10px; background: #f8f8fa; border-radius: 6px; }
 
 /* 日志查看器 */
 .log-viewer { background: #1e1e2e; border-radius: 8px; padding: 14px; max-height: 260px; overflow-y: auto; font-family: "SF Mono", "Fira Code", monospace; font-size: 12px; line-height: 1.7; }
@@ -440,4 +603,3 @@ tbody tr:last-child td { border-bottom: none; }
 .log-line .lvl-err { color: #f38ba8; }
 .log-line .msg { color: #cdd6f4; }
 </style>
-
