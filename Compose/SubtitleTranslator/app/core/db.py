@@ -213,6 +213,37 @@ def create_job(media_path: str, source: str = "scheduler") -> Optional[str]:
     return job_id
 
 
+def backfill_job(media_path: str, funnel_level: int, output_srt_path: str = None) -> Optional[str]:
+    """回填已存在的字幕文件记录到 subtitle_job"""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        # 全量去重查询：任何状态下，只要有该 media_path 存在，就跳过
+        cursor = conn.execute(
+            "SELECT id FROM subtitle_job WHERE media_path = ? LIMIT 1",
+            (media_path,)
+        )
+        if cursor.fetchone():
+            return None
+
+        job_id = str(uuid.uuid4())
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        
+        conn.execute(
+            """
+            INSERT INTO subtitle_job (
+                id, media_path, status, funnel_level, output_srt_path,
+                source, created_at, updated_at, completed_at
+            )
+            VALUES (?, ?, 'skipped', ?, ?, 'scheduler', ?, ?, ?)
+            """,
+            (job_id, media_path, funnel_level, output_srt_path, now, now, now)
+        )
+        conn.commit()
+        
+    logger.info(f"Backfilled job {job_id} for {media_path} with level {funnel_level}")
+    return job_id
+
+
 def update_job_status(job_id: str, status: str, error: str = None):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     # 终态自动设置 completed_at

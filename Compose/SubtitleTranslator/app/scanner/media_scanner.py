@@ -32,6 +32,24 @@ def is_media_file(filename: str, extensions: List[str]) -> bool:
     return ext in extensions
 
 
+def classify_zh_subtitle(filename: str) -> int:
+    """
+    根据中文字幕文件名分类到 funnel_level。
+    
+    规则：
+    - *.zh.ai.srt -> Level 2
+    - *.zh.opencc.srt -> Level 1
+    - *.zh.srt, *.zh-*.srt -> Level 0
+    """
+    filename = filename.lower()
+    if filename.endswith(".zh.ai.srt"):
+        return 2
+    elif filename.endswith(".zh.opencc.srt"):
+        return 1
+    else:
+        return 0
+
+
 def scan_directory(dir_path: str, extensions: List[str]) -> List[str]:
     """
     递归扫描目录，返回所有需要处理的媒体文件完整路径。
@@ -70,13 +88,19 @@ def scan_directory(dir_path: str, extensions: List[str]) -> List[str]:
                 # 检查是否已经存在任何中文字幕 (.zh.srt 或 .zh.*.srt)
                 media_stem = os.path.splitext(f)[0]
                 has_zh = False
+                zh_subtitle_filename = None
                 for filename in files:
                     if (filename.startswith(f"{media_stem}.zh.") or filename.startswith(f"{media_stem}.zh-")) and filename.endswith(".srt"):
                         has_zh = True
+                        zh_subtitle_filename = filename
                         break
                 
                 if has_zh:
                     logger.debug(f"Skipping {f}, already has .zh.*.srt subtitle")
+                    from core import db
+                    level = classify_zh_subtitle(zh_subtitle_filename)
+                    output_srt_path = os.path.join(root, zh_subtitle_filename)
+                    db.backfill_job(file_path, level, output_srt_path)
                     continue
                 
                 media_files.append(file_path)
