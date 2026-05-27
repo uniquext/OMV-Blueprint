@@ -179,6 +179,13 @@ DEFAULT_SYSTEM_PROMPT = """你是一个专业的字幕翻译助手。
 保持输出格式与输入一致：ID: n | 翻译后的文本
 """
 
+def is_llm_configured() -> bool:
+    """检查 LLM 必要参数（api_url, api_key, model）是否已配置"""
+    config = load_config()
+    llm = config.get("llm", {})
+    return bool(llm.get("api_url") and llm.get("api_key") and llm.get("model"))
+
+
 def _ensure_prompts(config: Dict):
     """自动生成默认的 prompt 文件（使用原子写入）"""
     if not os.path.exists(PROMPTS_DIR):

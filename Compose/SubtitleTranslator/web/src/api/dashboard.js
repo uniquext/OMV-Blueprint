@@ -20,6 +20,12 @@ export async function getActiveJobs() {
     return handleResponse(response);
 }
 
+export async function getJobsByStatuses(statuses, page = 1, pageSize = 20) {
+    const statusQuery = statuses.map(s => `status=${s}`).join('&');
+    const response = await fetch(`/api/jobs?${statusQuery}&page=${page}&page_size=${pageSize}&sort_dir=asc`);
+    return handleResponse(response);
+}
+
 export async function triggerScan() {
     const response = await fetch('/api/scan', {
         method: 'POST'

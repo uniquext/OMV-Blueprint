@@ -378,7 +378,8 @@ async def get_jobs_api(
     status: Optional[List[str]] = Query(None, description="状态多选"),
     funnel_level: Optional[int] = Query(None, description="漏斗级别"),
     date_from: Optional[str] = Query(None, description="起始时间 ISO 格式"),
-    date_to: Optional[str] = Query(None, description="结束时间 ISO 格式")
+    date_to: Optional[str] = Query(None, description="结束时间 ISO 格式"),
+    sort_dir: str = Query("desc", description="排序方向")
 ):
     from core import db
     try:
@@ -388,7 +389,8 @@ async def get_jobs_api(
             status=status,
             funnel_level=funnel_level,
             date_from=date_from,
-            date_to=date_to
+            date_to=date_to,
+            sort_dir=sort_dir
         )
         return api_success(data={
             "items": items,

@@ -175,7 +175,10 @@ def execute_funnel_action(job_id: str, media_path: str, funnel_result: Dict) -> 
 
     if level == 0:
         logger.info(f"Job {job_id}: Level 0 skip, marking skipped")
-        db.update_job_funnel_info(job_id, funnel_level=0, output_srt_path=funnel_result.get("srt_path"))
+        original_srt = funnel_result.get("srt_path")
+        if not original_srt and funnel_result.get("source_type") == "embedded":
+            original_srt = f"内置轨道: Stream #{funnel_result.get('stream_index')} ({funnel_result.get('language')})"
+        db.update_job_funnel_info(job_id, funnel_level=0, original_srt_path=original_srt, output_srt_path=original_srt)
         db.update_job_status(job_id, "skipped")
         return
 

@@ -59,7 +59,7 @@
               </td>
               <td class="path-cell" :title="task.path">{{ task.path }}</td>
               <td><span class="status-tag" :class="task.status">{{ statusLabel(task.status) }}</span></td>
-              <td>Level {{ task.level }}</td>
+              <td><span :class="['level-tag', `level-${task.level}`]">{{ levelLabel(task.level) }}</span></td>
               <td>{{ task.created_at }}</td>
               <td>
                 <template v-if="task.translate_duration === null || task.translate_duration === undefined">
@@ -85,6 +85,12 @@
                   <div class="field"><span class="k">创建时间:</span><span class="v">{{ task.created_at }}</span></div>
                   <div class="field"><span class="k">完成时间:</span><span class="v" :class="{ 'placeholder-text': !task.completed_at }">{{ task.completed_at || '--' }}</span></div>
                   <div class="field full-width"><span class="k">媒体路径:</span><span class="v">{{ task.path }}</span></div>
+                  <div class="field full-width">
+                    <span class="k">来源字幕:</span>
+                    <span class="v" :class="{ 'placeholder-text': !task.original_srt }">{{ task.original_srt ? basename(task.original_srt) : '--' }}
+                      <span v-if="task.original_srt && task.original_srt.includes('.emb.')" class="embed-hint">（内嵌提取）</span>
+                    </span>
+                  </div>
                   <div class="field full-width">
                     <span class="k">结果字幕:</span>
                     <span class="v" :class="{ 'placeholder-text': !task.output_srt }">{{ task.output_srt ? basename(task.output_srt) : '--' }}</span>
@@ -287,6 +293,17 @@ function statusLabel(status) {
 function sourceLabel(source) {
   const map = { scheduler: '定时扫描', watchdog: '文件监控', notify: 'API 通知', scan: '手动扫描', startup: '启动恢复' }
   return map[source] || source || '--'
+}
+
+function levelLabel(level) {
+  const map = {
+    '-1': 'L-1 无字幕',
+    '0': 'L0 已有中文',
+    '1': 'L1 繁简转换',
+    '2': 'L2 外置翻译',
+    '3': 'L3 内嵌翻译'
+  }
+  return map[String(level)] || `Level ${level}`
 }
 
 // ============ LLM Diagnostics 模态框 ============
@@ -541,6 +558,17 @@ tbody tr:last-child td { border-bottom: none; }
 
 /* 来源标签 */
 .source-tag { font-size: 11px; background: #f0f0f4; padding: 2px 6px; border-radius: 3px; color: #888; }
+
+/* Level 标签 */
+.level-tag { font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 500; }
+.level-tag.level--1 { background: #f5f5f8; color: #999; }
+.level-tag.level-0 { background: #e8f8ef; color: #18a058; }
+.level-tag.level-1 { background: #e8f0fe; color: #2080f0; }
+.level-tag.level-2 { background: #fdf6ec; color: #f0a020; }
+.level-tag.level-3 { background: #faf0fc; color: #a020f0; }
+
+/* 内嵌字幕提示 */
+.embed-hint { font-size: 11px; color: #a020f0; font-weight: 500; }
 
 /* 详情展开行 */
 .detail-row td { background: #fafbfc; padding: 12px 20px !important; }

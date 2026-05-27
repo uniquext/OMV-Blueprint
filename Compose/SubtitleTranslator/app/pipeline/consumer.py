@@ -8,7 +8,7 @@ from typing import Dict, Optional, List
 from core import db
 from subtitle.srt_handler import rebuild_srt_with_translation
 from translate.translator import translate_file, compute_resume_batch_idx
-from core.config_loader import load_config
+from core.config_loader import load_config, is_llm_configured
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +90,12 @@ def process_task(task_id: str):
 def consumer_loop():
     logger.info("Consumer loop started")
     while True:
+        # LLM 未配置时暂停消费，避免翻译报错
+        if not is_llm_configured():
+            logger.debug("LLM not configured, consumer paused")
+            time.sleep(10)
+            continue
+
         task = db.fetch_next_task()
         if task is None:
             time.sleep(1)

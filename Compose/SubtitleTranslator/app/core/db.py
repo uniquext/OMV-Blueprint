@@ -231,12 +231,12 @@ def backfill_job(media_path: str, funnel_level: int, output_srt_path: str = None
         conn.execute(
             """
             INSERT INTO subtitle_job (
-                id, media_path, status, funnel_level, output_srt_path,
+                id, media_path, status, funnel_level, original_srt_path, output_srt_path,
                 source, created_at, updated_at, completed_at
             )
-            VALUES (?, ?, 'skipped', ?, ?, 'scheduler', ?, ?, ?)
+            VALUES (?, ?, 'skipped', ?, ?, ?, 'scheduler', ?, ?, ?)
             """,
-            (job_id, media_path, funnel_level, output_srt_path, now, now, now)
+            (job_id, media_path, funnel_level, output_srt_path, output_srt_path, now, now, now)
         )
         conn.commit()
         
@@ -261,11 +261,12 @@ def update_job_status(job_id: str, status: str, error: str = None):
             )
         conn.commit()
 
-        # We need media_path for the event payload, let's fetch it if not available
+        # We need media_path and translate_task_id for the event payload
         conn.row_factory = sqlite3.Row
-        cursor = conn.execute("SELECT media_path FROM subtitle_job WHERE id = ?", (job_id,))
+        cursor = conn.execute("SELECT media_path, translate_task_id FROM subtitle_job WHERE id = ?", (job_id,))
         row = cursor.fetchone()
         media_path = dict(row)["media_path"] if row else ""
+        translate_task_id = dict(row)["translate_task_id"] if row else None
 
     logger.info(f"Job {job_id} status updated to {status}")
 
@@ -274,6 +275,8 @@ def update_job_status(job_id: str, status: str, error: str = None):
         "status": status,
         "media_path": media_path
     }
+    if translate_task_id:
+        payload["translate_task_id"] = translate_task_id
     if error:
         payload["error"] = error
 
@@ -384,7 +387,8 @@ def create_translate_task_for_job(job_id: str, file_path: str) -> Optional[str]:
     _publish_event("job_status_changed", {
         "job_id": job_id,
         "status": "translating",
-        "media_path": media_path
+        "media_path": media_path,
+        "translate_task_id": task_id
     })
 
     return task_id
@@ -452,6 +456,15 @@ def get_stats() -> dict:
             if row["funnel_level"] is not None and row["avg_trans"] is not None:
                 funnel_stats[str(row["funnel_level"])] = int(row["avg_trans"])
 
+        # 按漏斗级别分组计数(仅统计非终态的活跃任务)
+        level_counts = {}
+        cursor = conn.execute(
+            "SELECT funnel_level, COUNT(*) as count FROM subtitle_job WHERE status NOT IN ('done', 'skipped', 'failed') GROUP BY funnel_level"
+        )
+        for row in cursor.fetchall():
+            if row["funnel_level"] is not None:
+                level_counts[str(row["funnel_level"])] = row["count"]
+
         # 5秒节流时钟回拨与负数耗时扫描
         now_sec = time.time()
         if now_sec - _last_anomaly_check_time > 5.0:
@@ -491,13 +504,14 @@ def get_stats() -> dict:
             "avg_duration_seconds": avg_duration,
             "avg_translate_seconds": avg_trans,
             "funnel_translate_stats": funnel_stats,
+            "level_counts": level_counts,
             "has_timing_anomaly": _cached_has_anomaly,
             "anomaly_reason": _cached_anomaly_reason
         }
 
 
-def query_jobs(page: int = 1, page_size: int = 20, status: list = None, funnel_level: int = None, date_from: str = None, date_to: str = None) -> tuple:
-    """分页与多条件模糊过滤查询 Job 列表"""
+def query_jobs(page: int = 1, page_size: int = 20, status: list = None, funnel_level: int = None, date_from: str = None, date_to: str = None, sort_dir: str = "desc") -> tuple:
+    """分页与多条件模糊过滤查询 Job 列表，LEFT JOIN translate_task 获取翻译进度"""
     conditions = []
     params = []
 
@@ -506,32 +520,39 @@ def query_jobs(page: int = 1, page_size: int = 20, status: list = None, funnel_l
         valid_statuses = [s for s in status if isinstance(s, str) and s]
         if valid_statuses:
             placeholders = ",".join("?" for _ in valid_statuses)
-            conditions.append(f"status IN ({placeholders})")
+            conditions.append(f"sj.status IN ({placeholders})")
             params.extend(valid_statuses)
 
     if funnel_level is not None:
-        conditions.append("funnel_level = ?")
+        conditions.append("sj.funnel_level = ?")
         params.append(funnel_level)
 
     if date_from:
-        conditions.append("created_at >= ?")
+        conditions.append("sj.created_at >= ?")
         params.append(date_from)
 
     if date_to:
-        conditions.append("created_at <= ?")
+        conditions.append("sj.created_at <= ?")
         params.append(date_to)
 
     where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
 
-    count_sql = f"SELECT COUNT(*) FROM subtitle_job{where_clause}"
+    count_sql = f"SELECT COUNT(*) FROM subtitle_job sj{where_clause}"
 
-    # 按照创建时间倒序排列，并子查询计算 translate_duration（排除歧义风险）
+    # LEFT JOIN translate_task 获取翻译任务状态和批次进度
     offset = (page - 1) * page_size
     fetch_sql = (
-        f"SELECT *, "
-        f"(SELECT strftime('%s', t.completed_at) - strftime('%s', t.started_at) "
-        f" FROM translate_task t WHERE t.id = subtitle_job.translate_task_id AND t.completed_at IS NOT NULL AND t.started_at IS NOT NULL) as translate_duration "
-        f"FROM subtitle_job{where_clause} ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        f"SELECT sj.*, "
+        f"tt.status as task_status, "
+        f"tt.current_batch, "
+        f"tt.total_batches, "
+        f"tt.progress as task_progress, "
+        f"CASE WHEN tt.completed_at IS NOT NULL AND tt.started_at IS NOT NULL "
+        f"  THEN strftime('%s', tt.completed_at) - strftime('%s', tt.started_at) "
+        f"  ELSE NULL END as translate_duration "
+        f"FROM subtitle_job sj "
+        f"LEFT JOIN translate_task tt ON sj.translate_task_id = tt.id "
+        f"{where_clause} ORDER BY sj.created_at {sort_dir.upper()} LIMIT ? OFFSET ?"
     )
 
     with sqlite3.connect(DB_PATH) as conn:

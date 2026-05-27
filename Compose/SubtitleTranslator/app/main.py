@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException
 import uvicorn
 
 from core import db
-from core.config_loader import load_config
+from core.config_loader import load_config, is_llm_configured
 import api.router
 from api.response import api_success
 from api.sse import EventBus
@@ -181,15 +181,19 @@ async def lifespan(app: FastAPI):
 
     start_scheduler(worker_pool, extensions)
 
-    scan_dir = config["pipeline"]["scan_dir"]
-    try:
-        files = scan_directory(scan_dir, extensions)
-        if files:
-            logger.info(f"Startup scan found {len(files)} files to process")
-            for f in files:
-                worker_pool.submit_job(f, source="startup")
-    except Exception as e:
-        logger.error(f"Startup scan failed: {e}")
+    # LLM 未配置时跳过启动扫描，避免触发大量翻译报错
+    if is_llm_configured():
+        scan_dir = config["pipeline"]["scan_dir"]
+        try:
+            files = scan_directory(scan_dir, extensions)
+            if files:
+                logger.info(f"Startup scan found {len(files)} files to process")
+                for f in files:
+                    worker_pool.submit_job(f, source="startup")
+        except Exception as e:
+            logger.error(f"Startup scan failed: {e}")
+    else:
+        logger.warning("LLM not configured, skipping startup scan. Please configure LLM settings via WebUI to enable translation.")
 
     yield
 
