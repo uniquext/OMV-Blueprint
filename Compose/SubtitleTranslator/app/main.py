@@ -226,7 +226,7 @@ app.add_middleware(
 app.include_router(api.router.router)
 
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 
 dist_dir = os.path.join(os.path.dirname(__file__), "dist")
 assets_dir = os.path.join(dist_dir, "assets")
@@ -240,6 +240,16 @@ async def serve_spa(path: str):
     # /api/ 前缀的请求不应被兜底拦截（正常情况下不会落到这里，防御性检查）
     if path.startswith("api/"):
         raise HTTPException(status_code=404, detail="API endpoint not found")
+        
+    # 如果请求的是 dist 根目录下的实际文件（如 app-icon.svg 等）
+    file_path = os.path.join(dist_dir, path)
+    if path and os.path.isfile(file_path):
+        return FileResponse(file_path)
+        
+    # 如果请求看起来像是一个具体的静态文件（带后缀）但不存在，则直接返回 404，防止返回 HTML 导致浏览器解析异常（例如对 favicon.ico 的静默请求）
+    if path and "." in path.split("/")[-1]:
+        raise HTTPException(status_code=404, detail="File not found")
+        
     dist_index = os.path.join(dist_dir, "index.html")
     if os.path.exists(dist_index):
         with open(dist_index, "r", encoding="utf-8") as f:

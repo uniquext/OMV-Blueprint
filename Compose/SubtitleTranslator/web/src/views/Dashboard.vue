@@ -59,9 +59,9 @@
         <div class="sub">入队→完成</div>
       </div>
       <div class="stat-card">
-        <div class="label">⏳ 纯翻译耗时</div>
-        <div class="value">{{ stats.avgTranslateTime }}</div>
-        <div class="sub">纯大模型翻译</div>
+        <div class="label">🪙 Token 消耗</div>
+        <div class="value">{{ formatTokens(stats.totalTokens || 0) }}</div>
+        <div class="sub">累计模型消耗</div>
       </div>
     </div>
 
@@ -175,7 +175,7 @@ const stats = reactive({
   failed: 0,
   successRate: '0.0%',
   avgTime: '0s',
-  avgTranslateTime: '0s'
+  totalTokens: 0
 })
 
 const hasAnomaly = ref(false)
@@ -258,6 +258,10 @@ const formatAvgTime = (seconds) => {
   return `${seconds}s`
 }
 
+const formatTokens = (tokens) => {
+  return new Intl.NumberFormat('en-US').format(tokens || 0)
+}
+
 const formatTime = (isoStr) => {
   if (!isoStr) return ''
   const d = new Date(isoStr)
@@ -338,7 +342,7 @@ const fetchStats = async () => {
     stats.failed = data.failed || 0
     stats.successRate = formatSuccessRate(data.success_rate)
     stats.avgTime = formatAvgTime(data.avg_duration_seconds)
-    stats.avgTranslateTime = formatAvgTime(data.avg_translate_seconds)
+    stats.totalTokens = data.total_tokens || 0
     hasAnomaly.value = data.has_timing_anomaly || false
     anomalyReason.value = data.anomaly_reason || ''
     isScanning.value = data.scanning || false

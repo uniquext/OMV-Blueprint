@@ -120,7 +120,7 @@ def create_batches(lines: List[str], batch_size: int = None, context_size: int =
         batch_idx += 1
     return batches
 
-def call_llm(system_prompt: str, user_prompt: str, glossary: Dict, model_type: str = "chat") -> str:
+def call_llm(system_prompt: str, user_prompt: str, glossary: Dict, model_type: str = "chat", temperature: float = None) -> tuple[str, int]:
     """
     Uses httpx to call the LLM API and returns the raw response text.
 
@@ -139,13 +139,16 @@ def call_llm(system_prompt: str, user_prompt: str, glossary: Dict, model_type: s
     else:
         final_user_content = f"术语表：{json.dumps(glossary, ensure_ascii=False)}\n\n{user_prompt}"
 
+    if temperature is None:
+        temperature = _get_config()["llm"]["temperature"]
+
     payload = {
         "model": _get_config()["llm"]["model"],
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": final_user_content}
         ],
-        "temperature": _get_config()["llm"]["temperature"]
+        "temperature": temperature
     }
 
     with httpx.Client(timeout=float(_get_config()["llm"]["timeout"])) as client:
@@ -159,7 +162,7 @@ def call_llm(system_prompt: str, user_prompt: str, glossary: Dict, model_type: s
         logger.info(f"LLM token_usage", extra={"token_usage": usage})
         rate_limiter.post_request_update(total_tokens)
 
-        return data["choices"][0]["message"]["content"]
+        return data["choices"][0]["message"]["content"], total_tokens
 
 
 def parse_response(response_text: str, expected_ids: List[int]) -> List[TranslatedLine]:
@@ -331,6 +334,7 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
     Main translation workflow: preprocess -> create_batches -> batch call_llm -> parse_response ->
     atomic append to .tmp -> update DB progress -> backfill blank lines after completion -> .zh.txt
     """
+    task_tokens = 0
     try:
         lines, line_map = preprocess(file_path)
         if not lines:
@@ -344,7 +348,7 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
                 for _ in line_map:
                     f.write("\n")
             db.update_progress(task_id, 0, 0, "100%")
-            db.complete_task(task_id)
+            db.complete_task(task_id, task_tokens)
             return
 
         batches = create_batches(lines)
@@ -380,11 +384,15 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
                 translation_results = []
 
                 max_retries = _get_config()["llm"]["max_retries"]
+                base_temperature = _get_config()["llm"]["temperature"]
+                validation_failures = 0
                 response_text = None
                 for attempt in range(max_retries + 1):
+                    current_temperature = max(0.1, base_temperature - 0.1 * validation_failures)
                     try:
                         start_time = time.time()
-                        response_text = call_llm(system_prompt, user_prompt, glossary, model_type=model_type)
+                        response_text, tokens = call_llm(system_prompt, user_prompt, glossary, model_type=model_type, temperature=current_temperature)
+                        task_tokens += tokens
                         elapsed = time.time() - start_time
                         
                         # Add duration to sliding window
@@ -402,6 +410,7 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
                             translation_results = parse_response(response_text, expected_ids)
                         except ValueError as ve:
                             logger.error(f"Validation failed during parsing.\n=== User Prompt ===\n{user_prompt}\n=== LLM Response ===\n{response_text}\n===================")
+                            validation_failures += 1
                             raise ve
                         break
                     except Exception as e:
@@ -448,8 +457,8 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
         # Clean up .tmp intermediate file
         os.remove(tmp_path)
 
-        db.complete_task(task_id)
-        logger.info(f"Task {task_id} completed: {out_path}")
+        db.complete_task(task_id, task_tokens)
+        logger.info(f"Task {task_id} completed: {out_path} (Tokens used: {task_tokens})")
 
     except Exception as e:
         db.fail_task(task_id, str(e))

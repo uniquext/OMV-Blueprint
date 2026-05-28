@@ -49,7 +49,8 @@ def init_db():
                 updated_at TEXT NOT NULL,
                 error TEXT,
                 completed_at TEXT,
-                started_at TEXT
+                started_at TEXT,
+                tokens INTEGER DEFAULT 0
             )
         """)
         conn.execute("""
@@ -147,13 +148,13 @@ def update_progress(task_id: str, current_batch: int, total_batches: int, progre
     })
 
 
-def complete_task(task_id: str):
+def complete_task(task_id: str, tokens: int = 0):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     with sqlite3.connect(DB_PATH) as conn:
         # done 是终态，同步设置 completed_at
         conn.execute(
-            "UPDATE translate_task SET status = 'done', completed_at = ?, updated_at = ? WHERE id = ?",
-            (now, now, task_id)
+            "UPDATE translate_task SET status = 'done', completed_at = ?, updated_at = ?, tokens = ? WHERE id = ?",
+            (now, now, tokens, task_id)
         )
         conn.commit()
 
@@ -432,15 +433,12 @@ def get_stats() -> dict:
         row = cursor.fetchone()
         avg_duration = int(row["avg_dur"]) if row and row["avg_dur"] is not None else 0
 
-        # Calculate avg_translate_seconds (已剔除负数耗时的时钟异常数据)
+        # Calculate total tokens consumed
         cursor = conn.execute(
-            "SELECT AVG(strftime('%s', completed_at) - strftime('%s', started_at)) as avg_trans "
-            "FROM translate_task "
-            "WHERE status = 'done' AND completed_at IS NOT NULL AND started_at IS NOT NULL "
-            "AND (strftime('%s', completed_at) - strftime('%s', started_at)) >= 0"
+            "SELECT SUM(tokens) as total_tokens FROM translate_task"
         )
         row = cursor.fetchone()
-        avg_trans = int(row["avg_trans"]) if row and row["avg_trans"] is not None else 0
+        total_tokens = int(row["total_tokens"]) if row and row["total_tokens"] is not None else 0
 
         # Calculate funnel_translate_stats (按漏斗级别分组的平均纯翻译时间，且排除负数)
         funnel_stats = {}
@@ -502,7 +500,7 @@ def get_stats() -> dict:
             **stats,
             "success_rate": success_rate,
             "avg_duration_seconds": avg_duration,
-            "avg_translate_seconds": avg_trans,
+            "total_tokens": total_tokens,
             "funnel_translate_stats": funnel_stats,
             "level_counts": level_counts,
             "has_timing_anomaly": _cached_has_anomaly,

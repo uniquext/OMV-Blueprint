@@ -12,6 +12,79 @@ import re
 logger = logging.getLogger(__name__)
 
 
+def _deduplicate_layers(texts):
+    if not texts:
+        return texts
+    n = len(texts)
+    # 1. 检查 Interleaved 模式 (如 A A B B C C)
+    for n_repeats in range(n, 1, -1):
+        if n % n_repeats == 0:
+            is_interleaved = True
+            for i in range(0, n, n_repeats):
+                if len(set(texts[i:i+n_repeats])) != 1:
+                    is_interleaved = False
+                    break
+            if is_interleaved:
+                return [texts[i] for i in range(0, n, n_repeats)]
+    
+    # 2. 检查 Block 模式 (如 A B C A B C)
+    for chunk_size in range(1, n // 2 + 1):
+        if n % chunk_size == 0:
+            chunk = texts[:chunk_size]
+            if texts == chunk * (n // chunk_size):
+                return chunk
+                
+    return texts
+
+
+def _process_group(group, merged):
+    if not group:
+        return
+    if len(group) == 1:
+        merged.append(group[0])
+        return
+        
+    texts = [sub.text for sub in group]
+    deduped_texts = _deduplicate_layers(texts)
+    
+    # 将去重后的文本用换行符连接成一个单独的 subtitle 条目
+    new_sub = group[0]
+    new_sub.text = "\n".join(deduped_texts)
+    merged.append(new_sub)
+
+
+def optimize_srt(srt_path: str) -> None:
+    """
+    优化 SRT 文件，将具有完全相同起止时间的字幕条目合并为一条。
+    通过智能模式识别（交错模式与块模式），解决 ASS 格式特效图层导致的冗余条目问题，
+    同时确保不会误删同时间轴内合理的重复字符（如 "sweet" 中的连续 'e'）。
+    """
+    subs = pysrt.open(srt_path, encoding="utf-8")
+    original_count = len(subs)
+    if original_count == 0:
+        return
+        
+    merged = pysrt.SubRipFile()
+    current_group = []
+    
+    for sub in subs:
+        if not current_group:
+            current_group.append(sub)
+        else:
+            if sub.start == current_group[0].start and sub.end == current_group[0].end:
+                current_group.append(sub)
+            else:
+                _process_group(current_group, merged)
+                current_group = [sub]
+                
+    if current_group:
+        _process_group(current_group, merged)
+        
+    if len(merged) < original_count:
+        logger.info(f"Optimized SRT {srt_path}: Merged {original_count} entries into {len(merged)} entries.")
+        merged.save(srt_path, encoding="utf-8")
+
+
 def extract_text_from_srt(srt_path: str, txt_path: str) -> None:
     """
     从 SRT 字幕文件中提取纯文本。
@@ -29,6 +102,9 @@ def extract_text_from_srt(srt_path: str, txt_path: str) -> None:
     """
     if not os.path.exists(srt_path):
         raise FileNotFoundError(f"SRT file not found: {srt_path}")
+
+    # 在提取前进行优化，消除冗余时间轴
+    optimize_srt(srt_path)
 
     subs = pysrt.open(srt_path, encoding="utf-8")
     logger.info(f"Extracting text from {srt_path}: {len(subs)} entries")
