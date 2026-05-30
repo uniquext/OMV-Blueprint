@@ -69,165 +69,135 @@ def scan_external_subtitles(media_path: str) -> Dict[str, str]:
 def evaluate_media(media_path: str) -> Dict:
     external = scan_external_subtitles(media_path)
 
-    if "zh" in external:
-        logger.info(f"Level 0 skip (external zh): {media_path}")
-        return {
-            "level": 0, "source_type": "external",
-            "srt_path": external["zh"], "language": "zh"
-        }
-
-    if "zt" in external:
-        logger.info(f"Level 1 (external zt): {media_path}")
-        return {
-            "level": 1, "source_type": "external",
-            "srt_path": external["zt"], "language": "zt"
-        }
-
-    if "en" in external:
-        logger.info(f"Level 2 (external en): {media_path}")
-        return {
-            "level": 2, "source_type": "external",
-            "srt_path": external["en"], "language": "en"
-        }
-
-    if "ja" in external:
-        logger.info(f"Level 2 (external ja): {media_path}")
-        return {
-            "level": 2, "source_type": "external",
-            "srt_path": external["ja"], "language": "ja"
-        }
-
     config = load_config()
     lang_map_override = config["media"]["lang_map_override"]
+    strategy = config.get("strategy", {"location_priority": "external", "language_priority": "chinese"})
+    loc_prio = strategy.get("location_priority", "external")
+    lang_prio = strategy.get("language_priority", "chinese")
 
     try:
         streams = get_subtitle_streams(media_path)
     except Exception as e:
         logger.error(f"ffprobe failed for {media_path}: {e}")
-        return {"level": -1, "reason": "ffprobe_error"}
+        return {"funnel_type": -1, "reason": "ffprobe_error"}
 
-    if not streams:
-        logger.warning(f"No subtitles found: {media_path}")
-        return {"level": -1, "reason": "no_subtitle"}
+    candidates = {}
 
-    text_streams: Dict[str, Dict] = {}
+    if "zh" in external:
+        candidates[20] = {"funnel_type": 20, "srt_path": external["zh"], "language": "zh"}
+    if "zt" in external:
+        candidates[21] = {"funnel_type": 21, "srt_path": external["zt"], "language": "zt"}
+    
+    for ext_lang in ["en", "ja"]:
+        if ext_lang in external:
+            candidates[22] = {"funnel_type": 22, "srt_path": external[ext_lang], "language": ext_lang}
+            break
+
     has_graphical = False
+    if streams:
+        for stream in streams:
+            codec = stream.get("codec_name", "")
+            if is_graphical_codec(codec):
+                has_graphical = True
+                continue
 
-    for stream in streams:
-        codec = stream.get("codec_name", "")
-        if is_graphical_codec(codec):
-            has_graphical = True
-            continue
+            lang = stream.get("tags", {}).get("language", "")
+            normalized = normalize_language(lang, lang_map_override)
+            if normalized == "zh" and 10 not in candidates:
+                candidates[10] = {"funnel_type": 10, "stream_index": stream["index"], "language": "zh"}
+            elif normalized == "zt" and 11 not in candidates:
+                candidates[11] = {"funnel_type": 11, "stream_index": stream["index"], "language": "zt"}
+            elif normalized in ["en", "ja"] and 12 not in candidates:
+                candidates[12] = {"funnel_type": 12, "stream_index": stream["index"], "language": normalized}
 
-        lang = stream.get("tags", {}).get("language", "")
-        normalized = normalize_language(lang, lang_map_override)
-        if normalized and normalized not in text_streams:
-            text_streams[normalized] = stream
+    if loc_prio == "internal" and lang_prio == "absolute":
+        order = [10, 11, 12, 20, 21, 22]
+    elif loc_prio == "internal" and lang_prio == "chinese":
+        order = [10, 20, 11, 21, 12, 22]
+    elif loc_prio == "external" and lang_prio == "absolute":
+        order = [20, 21, 22, 10, 11, 12]
+    else: # external + chinese
+        order = [20, 10, 21, 11, 22, 12]
 
-    if "zh" in text_streams:
-        s = text_streams["zh"]
-        logger.info(f"Level 0 skip (embedded zh): {media_path}")
-        return {
-            "level": 0, "source_type": "embedded",
-            "stream_index": s["index"], "language": "zh"
-        }
-
-    if "zt" in text_streams:
-        s = text_streams["zt"]
-        logger.info(f"Level 1 (embedded zt): {media_path}")
-        return {
-            "level": 1, "source_type": "embedded",
-            "stream_index": s["index"], "language": "zt"
-        }
-
-    if "en" in text_streams:
-        s = text_streams["en"]
-        logger.info(f"Level 3 (embedded en): {media_path}")
-        return {
-            "level": 3, "source_type": "embedded",
-            "stream_index": s["index"], "language": "en"
-        }
-
-    if "ja" in text_streams:
-        s = text_streams["ja"]
-        logger.info(f"Level 3 (embedded ja): {media_path}")
-        return {
-            "level": 3, "source_type": "embedded",
-            "stream_index": s["index"], "language": "ja"
-        }
+    for t in order:
+        if t in candidates:
+            logger.info(f"Evaluated {media_path}: Selected Type {t}")
+            return candidates[t]
 
     if has_graphical:
         logger.info(f"Graphical subtitles only: {media_path}")
-        return {"level": -1, "reason": "graphical_only"}
+        return {"funnel_type": -1, "reason": "graphical_only"}
 
     logger.warning(f"No usable subtitles: {media_path}")
-    return {"level": -1, "reason": "no_subtitle"}
+    return {"funnel_type": -1, "reason": "no_subtitle"}
 
 
 def execute_funnel_action(job_id: str, media_path: str, funnel_result: Dict) -> None:
-    level = funnel_result.get("level", -1)
+    funnel_type = funnel_result.get("funnel_type", -1)
     media_stem = Path(media_path).stem
     media_dir = os.path.dirname(media_path)
-    if level == 1:
+    
+    if funnel_type in (11, 21):
         output_zh_srt = os.path.join(media_dir, f"{media_stem}.zh.opencc.srt")
     else:
         output_zh_srt = os.path.join(media_dir, f"{media_stem}.zh.ai.srt")
 
-    if level == 0:
-        logger.info(f"Job {job_id}: Level 0 skip, marking skipped")
+    if funnel_type in (10, 20):
+        logger.info(f"Job {job_id}: Type {funnel_type} skip, marking skipped")
         original_srt = funnel_result.get("srt_path")
-        if not original_srt and funnel_result.get("source_type") == "embedded":
+        if not original_srt and funnel_type == 10:
             original_srt = f"内置轨道: Stream #{funnel_result.get('stream_index')} ({funnel_result.get('language')})"
-        db.update_job_funnel_info(job_id, funnel_level=0, original_srt_path=original_srt, output_srt_path=original_srt)
+        db.update_job_funnel_info(job_id, funnel_type=funnel_type, original_srt_path=original_srt, output_srt_path=original_srt)
         db.update_job_status(job_id, "skipped")
         return
 
-    if level == -1:
+    if funnel_type == -1:
         reason = funnel_result.get("reason", "unknown")
         if reason == "graphical_only":
             logger.info(f"Job {job_id}: Graphical subtitles only, cannot extract text, skipping")
         else:
             logger.warning(f"Job {job_id}: No usable subtitle ({reason}), skipping")
-        db.update_job_funnel_info(job_id, funnel_level=-1)
+        db.update_job_funnel_info(job_id, funnel_type=-1)
         db.update_job_status(job_id, "skipped")
         return
 
     db.update_job_status(job_id, "extracting")
 
-    if level == 1:
-        source_type = funnel_result["source_type"]
-        if source_type == "external":
-            srt_path = funnel_result["srt_path"]
-            db.update_job_funnel_info(job_id, funnel_level=1,
-                                      original_srt_path=srt_path,
-                                      output_srt_path=output_zh_srt)
-            convert_traditional_to_simplified(srt_path, output_zh_srt)
-        else:
-            stream_index = funnel_result["stream_index"]
-            emb_srt = os.path.join(media_dir, f"{media_stem}.zt.emb.srt")
-            db.update_job_funnel_info(job_id, funnel_level=1,
-                                      original_srt_path=emb_srt,
-                                      output_srt_path=output_zh_srt,
-                                      cleanup_files=[emb_srt])
-            extract_subtitle_track(media_path, stream_index, emb_srt)
-            convert_traditional_to_simplified(emb_srt, output_zh_srt)
-            try:
-                os.remove(emb_srt)
-            except OSError:
-                pass
-
+    if funnel_type == 21:
+        srt_path = funnel_result["srt_path"]
+        db.update_job_funnel_info(job_id, funnel_type=21,
+                                  original_srt_path=srt_path,
+                                  output_srt_path=output_zh_srt)
+        convert_traditional_to_simplified(srt_path, output_zh_srt)
         db.update_job_status(job_id, "done")
-        logger.info(f"Job {job_id}: Level 1 conversion done -> {output_zh_srt}")
+        logger.info(f"Job {job_id}: Type 21 conversion done -> {output_zh_srt}")
         return
 
-    if level == 2:
+    if funnel_type == 11:
+        stream_index = funnel_result["stream_index"]
+        emb_srt = os.path.join(media_dir, f"{media_stem}.zt.emb.srt")
+        db.update_job_funnel_info(job_id, funnel_type=11,
+                                  original_srt_path=emb_srt,
+                                  output_srt_path=output_zh_srt,
+                                  cleanup_files=[emb_srt])
+        extract_subtitle_track(media_path, stream_index, emb_srt)
+        convert_traditional_to_simplified(emb_srt, output_zh_srt)
+        try:
+            os.remove(emb_srt)
+        except OSError:
+            pass
+        db.update_job_status(job_id, "done")
+        logger.info(f"Job {job_id}: Type 11 conversion done -> {output_zh_srt}")
+        return
+
+    if funnel_type == 22:
         srt_path = funnel_result["srt_path"]
         lang = funnel_result["language"]
         txt_path = os.path.join(media_dir, f"{media_stem}.{lang}.txt")
         zh_txt_path = os.path.join(media_dir, f"{media_stem}.zh.txt")
         cleanup = [txt_path, zh_txt_path]
 
-        db.update_job_funnel_info(job_id, funnel_level=2,
+        db.update_job_funnel_info(job_id, funnel_type=22,
                                   original_srt_path=srt_path,
                                   output_srt_path=output_zh_srt,
                                   cleanup_files=cleanup)
@@ -236,12 +206,12 @@ def execute_funnel_action(job_id: str, media_path: str, funnel_result: Dict) -> 
         task_id = db.create_translate_task_for_job(job_id, txt_path)
 
         if task_id:
-            logger.info(f"Job {job_id}: Level 2 extract done, task {task_id} created")
+            logger.info(f"Job {job_id}: Type 22 extract done, task {task_id} created")
         else:
-            logger.warning(f"Job {job_id}: Level 2 extract done, but task deduped")
+            logger.warning(f"Job {job_id}: Type 22 extract done, but task deduped")
         return
 
-    if level == 3:
+    if funnel_type == 12:
         stream_index = funnel_result["stream_index"]
         lang = funnel_result["language"]
         emb_srt = os.path.join(media_dir, f"{media_stem}.{lang}.emb.srt")
@@ -249,7 +219,7 @@ def execute_funnel_action(job_id: str, media_path: str, funnel_result: Dict) -> 
         emb_zh_txt = os.path.join(media_dir, f"{media_stem}.{lang}.emb.zh.txt")
         cleanup = [emb_srt, emb_txt, emb_zh_txt]
 
-        db.update_job_funnel_info(job_id, funnel_level=3,
+        db.update_job_funnel_info(job_id, funnel_type=12,
                                   original_srt_path=emb_srt,
                                   output_srt_path=output_zh_srt,
                                   cleanup_files=cleanup)
@@ -259,7 +229,7 @@ def execute_funnel_action(job_id: str, media_path: str, funnel_result: Dict) -> 
         task_id = db.create_translate_task_for_job(job_id, emb_txt)
 
         if task_id:
-            logger.info(f"Job {job_id}: Level 3 extract done, task {task_id} created")
+            logger.info(f"Job {job_id}: Type 12 extract done, task {task_id} created")
         else:
-            logger.warning(f"Job {job_id}: Level 3 extract done, but task deduped")
+            logger.warning(f"Job {job_id}: Type 12 extract done, but task deduped")
         return

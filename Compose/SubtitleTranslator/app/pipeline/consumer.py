@@ -64,7 +64,6 @@ def process_task(task_id: str):
     if updated_task is None:
         return
 
-    job = db.get_job_by_translate_task(task_id)
     if job is None:
         logger.debug(f"Task {task_id}: No associated SubtitleJob, skipping rebuild")
         return

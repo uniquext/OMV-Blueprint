@@ -109,7 +109,7 @@ def recover_startup_jobs():
     recover_tasks_on_startup()
 
     failed_count = 0
-    statuses_to_fail = ["funneling", "extracting", "translating", "rebuilding"]
+    statuses_to_fail = ["funneling", "extracting", "rebuilding"]
 
     for s in statuses_to_fail:
         jobs = db.get_jobs_by_status(s)
@@ -184,8 +184,10 @@ async def lifespan(app: FastAPI):
     # LLM 未配置时跳过启动扫描，避免触发大量翻译报错
     if is_llm_configured():
         scan_dir = config["pipeline"]["scan_dir"]
+        ignore_list_str = config["pipeline"].get("ignore_list", "")
+        ignore_list = [i.strip() for i in ignore_list_str.split(",") if i.strip()]
         try:
-            files = scan_directory(scan_dir, extensions)
+            files = scan_directory(scan_dir, extensions, ignore_list)
             if files:
                 logger.info(f"Startup scan found {len(files)} files to process")
                 for f in files:

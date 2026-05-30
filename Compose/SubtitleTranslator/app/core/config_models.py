@@ -39,6 +39,28 @@ class LlmConfig(BaseModel):
         return v
 
 
+class StrategyConfig(BaseModel):
+    """漏斗策略矩阵配置"""
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    location_priority: str
+    language_priority: str
+
+    @field_validator("location_priority")
+    @classmethod
+    def _valid_location(cls, v: str) -> str:
+        if v not in ("internal", "external"):
+            raise ValueError("must be 'internal' or 'external'")
+        return v
+
+    @field_validator("language_priority")
+    @classmethod
+    def _valid_language(cls, v: str) -> str:
+        if v not in ("chinese", "absolute"):
+            raise ValueError("must be 'chinese' or 'absolute'")
+        return v
+
+
 class PipelineConfig(BaseModel):
     """管道配置"""
     model_config = ConfigDict(extra="ignore", strict=True)
@@ -48,6 +70,7 @@ class PipelineConfig(BaseModel):
     funnel_workers: int = Field(ge=1, le=20)
     scan_interval: int = Field(ge=0, le=86400)
     scan_dir: str
+    ignore_list: str = ""
 
     @field_validator("scan_dir")
     @classmethod
@@ -113,6 +136,7 @@ class ConfigPayload(BaseModel):
     pipeline: PipelineConfig
     media: MediaConfig
     watchdog: WatchdogConfig
+    strategy: StrategyConfig
 
 
 def mask_api_key(key: str) -> str:

@@ -94,7 +94,8 @@ DEFAULTS = {
         "debounce_poll_interval": 10,
         "funnel_workers": 5,
         "scan_interval": 0,
-        "scan_dir": "/media"
+        "scan_dir": "/media",
+        "ignore_list": ""
     },
     "media": {
         "extensions": [".mkv", ".mp4", ".avi", ".wmv", ".flv", ".ts", ".m2ts"],
@@ -103,6 +104,10 @@ DEFAULTS = {
     "watchdog": {
         "enabled": True,
         "path": "/media"
+    },
+    "strategy": {
+        "location_priority": "external",
+        "language_priority": "chinese"
     }
 }
 

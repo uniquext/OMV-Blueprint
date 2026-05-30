@@ -25,6 +25,7 @@
       <!-- TAB 切换 -->
       <div class="config-tabs">
         <button class="config-tab" :class="{ active: activeTab === 'config' }" @click="activeTab = 'config'">⚙️ Config</button>
+        <button class="config-tab" :class="{ active: activeTab === 'strategy' }" @click="activeTab = 'strategy'">🎯 Strategy</button>
         <button class="config-tab" :class="{ active: activeTab === 'prompt' }" @click="activeTab = 'prompt'">📝 Prompt</button>
       </div>
 
@@ -146,7 +147,11 @@
                 <label>扫描目录 (scan_dir)</label>
                 <input type="text" v-model="config.pipeline.scan_dir" />
               </div>
-              <div class="form-group"></div>
+              <div class="form-group">
+                <label>扫描忽略列表 (ignore_list)</label>
+                <input type="text" :value="config.pipeline.ignore_list" readonly class="readonly-input" @click="openIgnoreModal" />
+                <div class="hint">点击编辑，目录精确匹配，文件子串匹配。例如: Extras,downloads/seed</div>
+              </div>
             </div>
           </div>
         </div>
@@ -196,6 +201,46 @@
         </div>
       </div>
 
+      <!-- ═══ Strategy TAB ═══ -->
+      <div v-show="activeTab === 'strategy'">
+        <div v-if="configSaveError" class="error-message config-error">
+          {{ configSaveError }}
+        </div>
+        <div class="config-subsection">
+          <div class="subsection-title">🎯 漏斗策略矩阵</div>
+          <div class="config-form">
+            <div class="form-row">
+              <div class="form-group">
+                <label>位置偏好 (location_priority)</label>
+                <select v-model="config.strategy.location_priority">
+                  <option value="internal">内置字幕优先 (Internal First)</option>
+                  <option value="external">外置字幕优先 (External First)</option>
+                </select>
+                <div class="hint">当内外置同时存在时优先处理哪种来源</div>
+              </div>
+              <div class="form-group">
+                <label>语言偏好 (language_priority)</label>
+                <select v-model="config.strategy.language_priority">
+                  <option value="chinese">中文字幕优先 (Chinese First)</option>
+                  <option value="absolute">绝对优先 (Absolute First)</option>
+                </select>
+                <div class="hint">优先寻找中文字幕，或按位置偏好严格筛选</div>
+              </div>
+            </div>
+            <div class="strategy-preview">
+              <div class="preview-title">当前组合优先级</div>
+              <div class="preview-order">{{ strategyPreview }}</div>
+            </div>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="btn" :class="{ 'btn-flash': configResetFlash }" @click="resetConfig" :disabled="savingConfig">重置</button>
+          <button class="btn btn-primary" @click="saveConfig" :disabled="savingConfig">
+            💾 {{ savingConfig ? '保存中...' : '保存配置' }}
+          </button>
+        </div>
+      </div>
+
       <!-- ═══ Prompt TAB ═══ -->
       <div v-show="activeTab === 'prompt'">
         <div v-if="promptSaveError" class="error-message config-error">
@@ -223,6 +268,34 @@
           </button>
         </div>
       </div>
+
+    </div>
+    <!-- 忽略列表编辑模态框 -->
+    <div class="modal-overlay" v-if="showIgnoreModal" @click.self="showIgnoreModal = false">
+      <div class="modal-box">
+        <div class="modal-header">
+          <span class="modal-title">编辑忽略列表</span>
+          <button class="modal-close" @click="showIgnoreModal = false">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="ignore-list-editor">
+            <div class="ignore-item" v-for="(item, idx) in ignoreListItems" :key="idx">
+              <input type="text" v-model="ignoreListItems[idx]" class="ignore-item-input" />
+              <button class="btn-icon" @click="moveIgnoreItem(idx, -1)" :disabled="idx === 0">▲</button>
+              <button class="btn-icon" @click="moveIgnoreItem(idx, 1)" :disabled="idx === ignoreListItems.length - 1">▼</button>
+              <button class="btn-icon btn-icon-danger" @click="removeIgnoreItem(idx)">✕</button>
+            </div>
+            <div v-if="ignoreListItems.length === 0" class="empty-hint">暂无忽略项，点击下方"新增"添加</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn" @click="addIgnoreItem">➕ 新增</button>
+          <div class="modal-footer-right">
+            <button class="btn" @click="showIgnoreModal = false">取消</button>
+            <button class="btn btn-primary" @click="confirmIgnoreList">确认</button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -238,7 +311,7 @@ const initError = ref('')
 const showApiKey = ref(false)
 const activeTab = ref('config')
 
-const config = reactive({ llm: {}, pipeline: {}, media: {}, watchdog: {} })
+const config = reactive({ llm: {}, pipeline: {}, media: {}, watchdog: {}, strategy: {} })
 const prompts = reactive({ system_prompt: '', glossaryStr: '{}' })
 
 // media.extensions: 数组 ↔ 逗号分隔字符串
@@ -279,6 +352,48 @@ const promptSaveSuccess = ref('')
 
 const configResetFlash = ref(false)
 const promptResetFlash = ref(false)
+
+const showIgnoreModal = ref(false)
+const ignoreListItems = ref([])
+
+const strategyPreview = computed(() => {
+  const loc = config.strategy.location_priority
+  const lang = config.strategy.language_priority
+  const labels = { 10: '内置中文', 11: '内置繁体', 12: '内置外语', 20: '外置中文', 21: '外置繁体', 22: '外置外语' }
+  const orders = {
+    'internal-absolute': [10, 11, 12, 20, 21, 22],
+    'internal-chinese': [10, 20, 11, 21, 12, 22],
+    'external-absolute': [20, 21, 22, 10, 11, 12],
+    'external-chinese': [20, 10, 21, 11, 22, 12]
+  }
+  const order = orders[`${loc}-${lang}`] || orders['external-chinese']
+  return order.map(t => labels[t]).join(' → ')
+})
+
+function openIgnoreModal() {
+  ignoreListItems.value = (config.pipeline.ignore_list || '').split(',').map(s => s.trim()).filter(Boolean)
+  showIgnoreModal.value = true
+}
+
+function addIgnoreItem() {
+  ignoreListItems.value.push('')
+}
+
+function removeIgnoreItem(idx) {
+  ignoreListItems.value.splice(idx, 1)
+}
+
+function moveIgnoreItem(idx, direction) {
+  const newIdx = idx + direction
+  if (newIdx < 0 || newIdx >= ignoreListItems.value.length) return
+  const items = ignoreListItems.value
+  ;[items[idx], items[newIdx]] = [items[newIdx], items[idx]]
+}
+
+function confirmIgnoreList() {
+  config.pipeline.ignore_list = ignoreListItems.value.filter(s => s.trim()).join(',')
+  showIgnoreModal.value = false
+}
 
 onMounted(async () => {
   await loadData()
@@ -321,6 +436,7 @@ function resetConfig() {
     Object.assign(config.pipeline, originalConfig.pipeline)
     Object.assign(config.media, { ...originalConfig.media })
     Object.assign(config.watchdog, originalConfig.watchdog)
+    Object.assign(config.strategy, originalConfig.strategy || { location_priority: "external", language_priority: "chinese" })
     langMapStr.value = originalLangMapStr
   }
   configSaveError.value = ''
@@ -457,4 +573,33 @@ async function savePrompts() {
 .btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .btn-flash { animation: flash-green 0.8s ease; }
 @keyframes flash-green { 0% { box-shadow: 0 0 0 0 rgba(24,160,88,0.5); } 50% { box-shadow: 0 0 0 6px rgba(24,160,88,0.2); } 100% { box-shadow: 0 0 0 0 rgba(24,160,88,0); } }
+
+.readonly-input { cursor: pointer; background: #f8f8fa; }
+.readonly-input:hover { border-color: #18a058; }
+
+/* Strategy TAB */
+.strategy-preview { margin-top: 16px; padding: 12px 16px; background: #f8f8fa; border-radius: 6px; border: 1px solid #e8e8ec; }
+.preview-title { font-size: 12px; color: #999; margin-bottom: 6px; }
+.preview-order { font-size: 13px; color: #18a058; font-weight: 500; }
+
+/* Modal */
+.modal-overlay { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.modal-box { background: #fff; border-radius: 10px; width: 90%; max-width: 560px; max-height: 80vh; display: flex; flex-direction: column; box-shadow: 0 8px 32px rgba(0,0,0,0.18); }
+.modal-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; border-bottom: 1px solid #e8e8ec; }
+.modal-title { font-size: 15px; font-weight: 600; color: #333; }
+.modal-close { background: none; border: none; font-size: 22px; cursor: pointer; color: #999; padding: 0 4px; line-height: 1; }
+.modal-close:hover { color: #333; }
+.modal-body { padding: 16px 20px; overflow-y: auto; flex: 1; }
+.modal-footer { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; border-top: 1px solid #e8e8ec; }
+.modal-footer-right { display: flex; gap: 8px; }
+
+.ignore-list-editor { display: flex; flex-direction: column; gap: 8px; }
+.ignore-item { display: flex; align-items: center; gap: 6px; }
+.ignore-item-input { flex: 1; padding: 6px 10px; border: 1px solid #d0d0d6; border-radius: 4px; font-size: 13px; outline: none; }
+.ignore-item-input:focus { border-color: #18a058; }
+.btn-icon { padding: 4px 8px; border: 1px solid #d0d0d6; border-radius: 4px; background: #fff; cursor: pointer; font-size: 12px; line-height: 1; }
+.btn-icon:hover { border-color: #18a058; color: #18a058; }
+.btn-icon:disabled { opacity: 0.3; cursor: not-allowed; }
+.btn-icon-danger:hover { border-color: #d03050; color: #d03050; }
+.empty-hint { text-align: center; color: #bbb; font-size: 13px; padding: 16px; }
 </style>

@@ -37,6 +37,22 @@ def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         # 启用 WAL 模式，支撑 WebUI 并发读写
         conn.execute("PRAGMA journal_mode=WAL")
+        
+        # 检查是否需要执行列重命名迁移
+        cursor = conn.execute("PRAGMA table_info(subtitle_job)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if 'funnel_level' in columns:
+            conn.execute("ALTER TABLE subtitle_job RENAME COLUMN funnel_level TO funnel_type")
+            # 执行数据迁移映射
+            # -1 保持 -1
+            conn.execute("UPDATE subtitle_job SET funnel_type = 22 WHERE funnel_type = 2")
+            conn.execute("UPDATE subtitle_job SET funnel_type = 12 WHERE funnel_type = 3")
+            conn.execute("UPDATE subtitle_job SET funnel_type = 20 WHERE funnel_type = 0 AND original_srt_path IS NOT NULL AND original_srt_path != ''")
+            conn.execute("UPDATE subtitle_job SET funnel_type = 10 WHERE funnel_type = 0 AND (original_srt_path IS NULL OR original_srt_path = '')")
+            conn.execute("UPDATE subtitle_job SET funnel_type = 21 WHERE funnel_type = 1 AND original_srt_path IS NOT NULL AND original_srt_path != ''")
+            conn.execute("UPDATE subtitle_job SET funnel_type = 11 WHERE funnel_type = 1 AND (original_srt_path IS NULL OR original_srt_path = '')")
+            conn.commit()
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS translate_task (
                 id TEXT PRIMARY KEY,
@@ -58,7 +74,7 @@ def init_db():
                 id TEXT PRIMARY KEY,
                 media_path TEXT NOT NULL,
                 status TEXT NOT NULL,
-                funnel_level INTEGER,
+                funnel_type INTEGER,
                 original_srt_path TEXT,
                 output_srt_path TEXT,
                 cleanup_files TEXT,
@@ -214,7 +230,7 @@ def create_job(media_path: str, source: str = "scheduler") -> Optional[str]:
     return job_id
 
 
-def backfill_job(media_path: str, funnel_level: int, output_srt_path: str = None) -> Optional[str]:
+def backfill_job(media_path: str, funnel_type: int, output_srt_path: str = None) -> Optional[str]:
     """回填已存在的字幕文件记录到 subtitle_job"""
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
@@ -232,16 +248,16 @@ def backfill_job(media_path: str, funnel_level: int, output_srt_path: str = None
         conn.execute(
             """
             INSERT INTO subtitle_job (
-                id, media_path, status, funnel_level, original_srt_path, output_srt_path,
+                id, media_path, status, funnel_type, original_srt_path, output_srt_path,
                 source, created_at, updated_at, completed_at
             )
             VALUES (?, ?, 'skipped', ?, ?, ?, 'scheduler', ?, ?, ?)
             """,
-            (job_id, media_path, funnel_level, output_srt_path, output_srt_path, now, now, now)
+            (job_id, media_path, funnel_type, output_srt_path, output_srt_path, now, now, now)
         )
         conn.commit()
         
-    logger.info(f"Backfilled job {job_id} for {media_path} with level {funnel_level}")
+    logger.info(f"Backfilled job {job_id} for {media_path} with type {funnel_type}")
     return job_id
 
 
@@ -284,20 +300,20 @@ def update_job_status(job_id: str, status: str, error: str = None):
     _publish_event("job_status_changed", payload)
 
 
-def update_job_funnel_info(job_id: str, funnel_level: int, original_srt_path: str = None,
+def update_job_funnel_info(job_id: str, funnel_type: int, original_srt_path: str = None,
                            output_srt_path: str = None, cleanup_files: List[str] = None):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """UPDATE subtitle_job
-               SET funnel_level = ?, original_srt_path = ?, output_srt_path = ?,
+               SET funnel_type = ?, original_srt_path = ?, output_srt_path = ?,
                    cleanup_files = ?, updated_at = ?
                WHERE id = ?""",
-            (funnel_level, original_srt_path, output_srt_path,
+            (funnel_type, original_srt_path, output_srt_path,
              json.dumps(cleanup_files) if cleanup_files else None, now, job_id)
         )
         conn.commit()
-    logger.info(f"Job {job_id} funnel info updated: level={funnel_level}")
+    logger.info(f"Job {job_id} funnel info updated: type={funnel_type}")
 
 
 def get_jobs_by_status(status: str) -> List[Dict]:
@@ -443,25 +459,25 @@ def get_stats() -> dict:
         # Calculate funnel_translate_stats (按漏斗级别分组的平均纯翻译时间，且排除负数)
         funnel_stats = {}
         cursor = conn.execute(
-            "SELECT j.funnel_level, AVG(strftime('%s', t.completed_at) - strftime('%s', t.started_at)) as avg_trans "
+            "SELECT j.funnel_type, AVG(strftime('%s', t.completed_at) - strftime('%s', t.started_at)) as avg_trans "
             "FROM subtitle_job j "
             "INNER JOIN translate_task t ON j.translate_task_id = t.id "
             "WHERE t.status = 'done' AND t.completed_at IS NOT NULL AND t.started_at IS NOT NULL "
             "AND (strftime('%s', t.completed_at) - strftime('%s', t.started_at)) >= 0 "
-            "GROUP BY j.funnel_level"
+            "GROUP BY j.funnel_type"
         )
         for row in cursor.fetchall():
-            if row["funnel_level"] is not None and row["avg_trans"] is not None:
-                funnel_stats[str(row["funnel_level"])] = int(row["avg_trans"])
+            if row["funnel_type"] is not None and row["avg_trans"] is not None:
+                funnel_stats[str(row["funnel_type"])] = int(row["avg_trans"])
 
         # 按漏斗级别分组计数(仅统计非终态的活跃任务)
-        level_counts = {}
+        type_counts = {}
         cursor = conn.execute(
-            "SELECT funnel_level, COUNT(*) as count FROM subtitle_job WHERE status NOT IN ('done', 'skipped', 'failed') GROUP BY funnel_level"
+            "SELECT funnel_type, COUNT(*) as count FROM subtitle_job WHERE status NOT IN ('done', 'skipped', 'failed') GROUP BY funnel_type"
         )
         for row in cursor.fetchall():
-            if row["funnel_level"] is not None:
-                level_counts[str(row["funnel_level"])] = row["count"]
+            if row["funnel_type"] is not None:
+                type_counts[str(row["funnel_type"])] = row["count"]
 
         # 5秒节流时钟回拨与负数耗时扫描
         now_sec = time.time()
@@ -502,13 +518,13 @@ def get_stats() -> dict:
             "avg_duration_seconds": avg_duration,
             "total_tokens": total_tokens,
             "funnel_translate_stats": funnel_stats,
-            "level_counts": level_counts,
+            "type_counts": type_counts,
             "has_timing_anomaly": _cached_has_anomaly,
             "anomaly_reason": _cached_anomaly_reason
         }
 
 
-def query_jobs(page: int = 1, page_size: int = 20, status: list = None, funnel_level: int = None, date_from: str = None, date_to: str = None, sort_dir: str = "desc") -> tuple:
+def query_jobs(page: int = 1, page_size: int = 20, status: list = None, funnel_type: int = None, date_from: str = None, date_to: str = None, sort_dir: str = "desc") -> tuple:
     """分页与多条件模糊过滤查询 Job 列表，LEFT JOIN translate_task 获取翻译进度"""
     conditions = []
     params = []
@@ -521,9 +537,9 @@ def query_jobs(page: int = 1, page_size: int = 20, status: list = None, funnel_l
             conditions.append(f"sj.status IN ({placeholders})")
             params.extend(valid_statuses)
 
-    if funnel_level is not None:
-        conditions.append("sj.funnel_level = ?")
-        params.append(funnel_level)
+    if funnel_type is not None:
+        conditions.append("sj.funnel_type = ?")
+        params.append(funnel_type)
 
     if date_from:
         conditions.append("sj.created_at >= ?")

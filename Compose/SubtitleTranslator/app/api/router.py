@@ -96,12 +96,14 @@ async def scan_endpoint():
         config = load_config()
         scan_dir = config["pipeline"]["scan_dir"]
         extensions = config["media"]["extensions"]
+        ignore_list_str = config["pipeline"].get("ignore_list", "")
+        ignore_list = [i.strip() for i in ignore_list_str.split(",") if i.strip()]
 
         if not os.path.isdir(scan_dir):
             raise HTTPException(status_code=400, detail={"error": "DIRECTORY_NOT_FOUND", "message": f"Directory not found: {scan_dir}"})
 
         logger.info(f"Manual scan triggered for {scan_dir}")
-        files = scan_directory(scan_dir, extensions)
+        files = scan_directory(scan_dir, extensions, ignore_list)
 
         enqueued_count = 0
         for file_path in files:
@@ -376,7 +378,7 @@ async def get_jobs_api(
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=1, le=100, description="每页容量"),
     status: Optional[List[str]] = Query(None, description="状态多选"),
-    funnel_level: Optional[int] = Query(None, description="漏斗级别"),
+    funnel_type: Optional[int] = Query(None, description="漏斗类型"),
     date_from: Optional[str] = Query(None, description="起始时间 ISO 格式"),
     date_to: Optional[str] = Query(None, description="结束时间 ISO 格式"),
     sort_dir: str = Query("desc", description="排序方向")
@@ -387,7 +389,7 @@ async def get_jobs_api(
             page=page,
             page_size=page_size,
             status=status,
-            funnel_level=funnel_level,
+            funnel_type=funnel_type,
             date_from=date_from,
             date_to=date_to,
             sort_dir=sort_dir

@@ -280,8 +280,10 @@ const basename = (path) => {
 }
 
 const isEmbedded = (task) => {
-  // Level 3 = 内嵌字幕，或 original_srt_path 包含 .emb.
-  return task.funnel_level === 3 || (task.original_srt_path && task.original_srt_path.includes('.emb.'))
+  if (task.funnel_type !== undefined && task.funnel_type !== null) {
+    return [10, 11, 12].includes(task.funnel_type)
+  }
+  return task.original_srt_path && task.original_srt_path.includes('.emb.')
 }
 
 const isTranslating = (task) => {
@@ -312,7 +314,7 @@ const getStatusLabel = (task) => {
   const map = { done: '完成', skipped: '跳过', failed: '失败', rebuilding: '字幕回写' }
   if (task.status === 'funneling') return '漏斗分流'
   if (task.status === 'extracting') {
-    if (task.funnel_level === 1) return '繁简转换'
+    if (task.funnel_type === 11 || task.funnel_type === 21) return '繁简转换'
     return '文本提取'
   }
   if (task.status === 'translating') {
@@ -378,7 +380,7 @@ const fetchTabData = async () => {
       id: item.id,
       media_path: item.media_path,
       status: item.status,
-      funnel_level: item.funnel_level,
+      funnel_type: item.funnel_type,
       original_srt_path: item.original_srt_path,
       output_srt_path: item.output_srt_path,
       error: item.error,

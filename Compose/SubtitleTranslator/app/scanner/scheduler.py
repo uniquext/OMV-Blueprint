@@ -33,7 +33,9 @@ def job_scan_and_enqueue(worker_pool, extensions: List[str]) -> None:
     scan_dir = config["pipeline"]["scan_dir"]
     logger.info(f"Running scheduled scan in {scan_dir}...")
     try:
-        files = scan_directory(scan_dir, extensions)
+        ignore_list_str = config["pipeline"].get("ignore_list", "")
+        ignore_list = [i.strip() for i in ignore_list_str.split(",") if i.strip()]
+        files = scan_directory(scan_dir, extensions, ignore_list)
         enqueued_count = 0
         for file_path in files:
             # 直接推入 WorkerPool 队列

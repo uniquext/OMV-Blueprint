@@ -22,13 +22,17 @@
           </label>
         </div>
       </div>
-      <select v-model="filterFunnelLevel">
-        <option value="">全部漏斗级别</option>
-        <option value="-1">Level -1 (无可用字幕)</option>
-        <option value="0">Level 0 (已有中文)</option>
-        <option value="1">Level 1 (繁体字幕)</option>
-        <option value="2">Level 2 (外置字幕)</option>
-        <option value="3">Level 3 (内嵌字幕)</option>
+      <select v-model="filterFunnelType">
+        <option value="">全部漏斗类型</option>
+        <option value="-1">[-1] 无可用字幕</option>
+        <option value="1">[01] 回填繁简</option>
+        <option value="2">[02] 回填翻译</option>
+        <option value="10">[10] 内置中文</option>
+        <option value="11">[11] 内置繁体</option>
+        <option value="12">[12] 内置翻译</option>
+        <option value="20">[20] 外置中文</option>
+        <option value="21">[21] 外置繁体</option>
+        <option value="22">[22] 外置翻译</option>
       </select>
       <input type="date" v-model="filterDateFrom" />
       <input type="date" v-model="filterDateTo" />
@@ -42,7 +46,7 @@
             <th style="width:40px"></th>
             <th>媒体文件</th>
             <th>状态</th>
-            <th>漏斗级别</th>
+            <th>漏斗类型</th>
             <th>创建时间</th>
             <th>翻译耗时</th>
             <th>耗时</th>
@@ -59,7 +63,7 @@
               </td>
               <td class="path-cell" :title="task.path">{{ task.path }}</td>
               <td><span class="status-tag" :class="task.status">{{ statusLabel(task.status) }}</span></td>
-              <td><span :class="['level-tag', `level-${task.level}`]">{{ levelLabel(task.level) }}</span></td>
+              <td><span :class="['level-tag', `level-${task.type}`]">{{ typeLabel(task.type) }}</span></td>
               <td>{{ task.created_at }}</td>
               <td>
                 <template v-if="task.translate_duration === null || task.translate_duration === undefined">
@@ -80,7 +84,7 @@
                 <div class="detail-content">
                   <div class="field"><span class="k">Job ID:</span><span class="v">{{ task.id }}</span></div>
                   <div class="field"><span class="k">状态:</span><span class="v"><span class="status-tag" :class="task.status">{{ statusLabel(task.status) }}</span></span></div>
-                  <div class="field" v-if="task.levelDesc"><span class="k">{{ task.status === 'skipped' ? '跳过原因:' : '漏斗级别:' }}</span><span class="v">Level {{ task.level }} — {{ task.levelDesc }}</span></div>
+                  <div class="field" v-if="task.levelDesc"><span class="k">{{ task.status === 'skipped' ? '跳过原因:' : '漏斗类型:' }}</span><span class="v">Type {{ task.type }} — {{ task.levelDesc }}</span></div>
                   <div class="field"><span class="k">任务来源:</span><span class="v">{{ sourceLabel(task.source) }}</span></div>
                   <div class="field"><span class="k">创建时间:</span><span class="v">{{ task.created_at }}</span></div>
                   <div class="field"><span class="k">完成时间:</span><span class="v" :class="{ 'placeholder-text': !task.completed_at }">{{ task.completed_at || '--' }}</span></div>
@@ -235,7 +239,7 @@ const statusOptions = [
 ]
 
 const filterStatusList = ref([])
-const filterFunnelLevel = ref('')
+const filterFunnelType = ref('')
 const filterDateFrom = ref('')
 const filterDateTo = ref('')
 
@@ -295,15 +299,19 @@ function sourceLabel(source) {
   return map[source] || source || '--'
 }
 
-function levelLabel(level) {
+function typeLabel(type) {
   const map = {
-    '-1': 'L-1 无字幕',
-    '0': 'L0 已有中文',
-    '1': 'L1 繁简转换',
-    '2': 'L2 外置翻译',
-    '3': 'L3 内嵌翻译'
+    '-1': '[无可用]',
+    '1': '[回填|繁简]',
+    '2': '[回填|翻译]',
+    '10': '[内置|中文]',
+    '11': '[内置|繁体]',
+    '12': '[内置|外文]',
+    '20': '[外置|中文]',
+    '21': '[外置|繁体]',
+    '22': '[外置|外文]'
   }
-  return map[String(level)] || `Level ${level}`
+  return map[String(type)] || `[Type ${type}]`
 }
 
 // ============ LLM Diagnostics 模态框 ============
@@ -392,7 +400,7 @@ async function fetchJobs() {
       page: currentPage.value,
       page_size: pageSize.value,
       status: statusParam,
-      funnel_level: filterFunnelLevel.value !== '' ? parseInt(filterFunnelLevel.value) : null,
+      funnel_type: filterFunnelType.value !== '' ? parseInt(filterFunnelType.value) : null,
       date_from: filterDateFrom.value ? `${filterDateFrom.value}T00:00:00` : null,
       date_to: filterDateTo.value ? `${filterDateTo.value}T23:59:59` : null
     })
@@ -411,18 +419,22 @@ async function fetchJobs() {
       }
 
       let levelDesc = ''
-      const lvl = item.funnel_level
-      if (lvl === 0) levelDesc = '存在中文字幕（直接跳过）'
-      else if (lvl === 1) levelDesc = '存在繁体中文字幕（仅做繁简转换）'
-      else if (lvl === 2) levelDesc = '外部英/日文字幕翻译（LLM）'
-      else if (lvl === 3) levelDesc = '内嵌英/日文字幕提取并翻译（ffmpeg + LLM）'
-      else if (lvl === -1) levelDesc = '图形字幕、ffprobe 报错或无可用字幕轨道'
+      const type = item.funnel_type
+      if (type === 10) levelDesc = '内置中文轨道（直接跳过）'
+      else if (type === 11) levelDesc = '内置繁体中文轨道（繁简转换）'
+      else if (type === 12) levelDesc = '内置外语轨道（提取并翻译）'
+      else if (type === 20) levelDesc = '外置中文字幕（直接跳过）'
+      else if (type === 21) levelDesc = '外置繁体中文字幕（繁简转换）'
+      else if (type === 22) levelDesc = '外置外语字幕（LLM 翻译）'
+      else if (type === 1) levelDesc = '回填：繁简转换产物'
+      else if (type === 2) levelDesc = '回填：AI 翻译产物'
+      else if (type === -1) levelDesc = '图形字幕、ffprobe 报错或无可用字幕轨道'
 
       return {
         id: item.id,
         path: item.media_path,
         status: item.status,
-        level: lvl !== null && lvl !== undefined ? lvl : '-',
+        type: type !== null && type !== undefined ? type : '-',
         levelDesc,
         source: item.source || 'scheduler',
         created_at: item.created_at ? new Date(item.created_at).toLocaleString() : '-',
@@ -461,7 +473,7 @@ function handleSearch() {
 }
 
 // 筛选条件变化时自动搜索
-watch([filterStatusList, filterFunnelLevel, filterDateFrom, filterDateTo], () => {
+watch([filterStatusList, filterFunnelType, filterDateFrom, filterDateTo], () => {
   handleSearch()
 })
 
@@ -562,10 +574,9 @@ tbody tr:last-child td { border-bottom: none; }
 /* Level 标签 */
 .level-tag { font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 500; }
 .level-tag.level--1 { background: #f5f5f8; color: #999; }
-.level-tag.level-0 { background: #e8f8ef; color: #18a058; }
-.level-tag.level-1 { background: #e8f0fe; color: #2080f0; }
-.level-tag.level-2 { background: #fdf6ec; color: #f0a020; }
-.level-tag.level-3 { background: #faf0fc; color: #a020f0; }
+.level-tag.level-10, .level-tag.level-20, .level-tag.level-0 { background: #e8f8ef; color: #18a058; }
+.level-tag.level-11, .level-tag.level-21, .level-tag.level-1 { background: #e8f0fe; color: #2080f0; }
+.level-tag.level-12, .level-tag.level-22, .level-tag.level-2, .level-tag.level-3 { background: #faf0fc; color: #a020f0; }
 
 /* 内嵌字幕提示 */
 .embed-hint { font-size: 11px; color: #a020f0; font-weight: 500; }
