@@ -121,6 +121,59 @@ async def scan_endpoint():
         _scanning_event.clear()
 
 
+@router.get("/api/browse", status_code=status.HTTP_200_OK)
+async def browse_endpoint(path: Optional[str] = Query(None, description="要浏览的目录路径，默认为 scan_dir")):
+    """浏览目录结构"""
+    config = load_config()
+    scan_dir = os.path.realpath(config["pipeline"]["scan_dir"])
+
+    target_path = os.path.realpath(path) if path else scan_dir
+
+    # 路径安全校验
+    if not target_path.startswith(scan_dir):
+        # 兼容 os.path.commonpath 校验方式
+        try:
+            if os.path.commonpath([target_path, scan_dir]) != scan_dir:
+                raise HTTPException(status_code=400, detail={"error": "PATH_OUT_OF_BOUNDS", "message": "Target path is outside the scan directory"})
+        except ValueError:
+            raise HTTPException(status_code=400, detail={"error": "PATH_OUT_OF_BOUNDS", "message": "Target path is outside the scan directory"})
+    
+    # Python 3.9 commonpath behavior requires both paths to be on same drive (handled by ValueError above)
+    # 额外精确判定：必须是 scan_dir 的子路径或本身
+    if target_path != scan_dir and not target_path.startswith(scan_dir + os.sep):
+        raise HTTPException(status_code=400, detail={"error": "PATH_OUT_OF_BOUNDS", "message": f"Target path '{target_path}' is outside the scan directory '{scan_dir}'"})
+
+    if not os.path.exists(target_path):
+        raise HTTPException(status_code=400, detail={"error": "PATH_NOT_FOUND", "message": "Target path does not exist"})
+
+    if not os.path.isdir(target_path):
+        raise HTTPException(status_code=400, detail={"error": "NOT_A_DIRECTORY", "message": "Target path is not a directory"})
+
+    children = []
+    try:
+        entries = os.listdir(target_path)
+        for entry in entries:
+            # 过滤隐藏目录
+            if entry.startswith("."):
+                continue
+            entry_path = os.path.join(target_path, entry)
+            if os.path.isdir(entry_path):
+                children.append({
+                    "name": entry,
+                    "path": entry_path
+                })
+        # 不区分大小写升序排列
+        children.sort(key=lambda x: x["name"].lower())
+    except Exception as e:
+        logger.error(f"Error browsing directory {target_path}: {e}")
+        raise HTTPException(status_code=500, detail={"error": "BROWSE_ERROR", "message": str(e)})
+
+    return api_success(data={
+        "path": target_path,
+        "children": children
+    })
+
+
 # ============================================================================
 # 配置管理 API
 # ============================================================================

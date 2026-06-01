@@ -150,7 +150,7 @@
               <div class="form-group">
                 <label>扫描忽略列表 (ignore_list)</label>
                 <input type="text" :value="config.pipeline.ignore_list" readonly class="readonly-input" @click="openIgnoreModal" />
-                <div class="hint">点击编辑，目录精确匹配，文件子串匹配。例如: Extras,downloads/seed</div>
+                <div class="hint">点击编辑，仅支持选择 scan_dir 下的目录路径，路径前缀精确匹配</div>
               </div>
             </div>
           </div>
@@ -280,7 +280,14 @@
         <div class="modal-body">
           <div class="ignore-list-editor">
             <div class="ignore-item" v-for="(item, idx) in ignoreListItems" :key="idx">
-              <input type="text" v-model="ignoreListItems[idx]" class="ignore-item-input" />
+              <input 
+                type="text" 
+                :value="ignoreListItems[idx]" 
+                readonly
+                placeholder="点击选择目录..."
+                class="ignore-item-input readonly-input" 
+                @click="openDirectoryPicker(idx)"
+              />
               <button class="btn-icon" @click="moveIgnoreItem(idx, -1)" :disabled="idx === 0">▲</button>
               <button class="btn-icon" @click="moveIgnoreItem(idx, 1)" :disabled="idx === ignoreListItems.length - 1">▼</button>
               <button class="btn-icon btn-icon-danger" @click="removeIgnoreItem(idx)">✕</button>
@@ -297,11 +304,19 @@
         </div>
       </div>
     </div>
+    <!-- 目录选择器模态框 -->
+    <DirectoryPicker 
+      v-if="showDirectoryPicker" 
+      :selected-paths="ignoreListItems"
+      @close="showDirectoryPicker = false"
+      @select="handleDirectorySelect"
+    />
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
+import DirectoryPicker from '../components/DirectoryPicker.vue'
 import { getConfig, putConfig, getPrompts, putPrompts } from '../api/config'
 import { useSSE } from '../composables/useSSE'
 
@@ -355,6 +370,21 @@ const promptResetFlash = ref(false)
 
 const showIgnoreModal = ref(false)
 const ignoreListItems = ref([])
+
+const showDirectoryPicker = ref(false)
+const currentEditingIndex = ref(-1)
+
+function openDirectoryPicker(idx) {
+  currentEditingIndex.value = idx
+  showDirectoryPicker.value = true
+}
+
+function handleDirectorySelect(path) {
+  if (currentEditingIndex.value >= 0 && currentEditingIndex.value < ignoreListItems.value.length) {
+    ignoreListItems.value[currentEditingIndex.value] = path
+  }
+  showDirectoryPicker.value = false
+}
 
 const strategyPreview = computed(() => {
   const loc = config.strategy.location_priority

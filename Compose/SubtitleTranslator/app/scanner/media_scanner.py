@@ -75,26 +75,40 @@ def scan_directory(dir_path: str, extensions: List[str], ignore_list: List[str] 
     media_files = []
     if ignore_list is None:
         ignore_list = []
-    # 过滤掉空字符串，防止匹配一切
-    ignore_list = [ign for ign in ignore_list if ign.strip()]
+        
+    valid_ignore_list = []
+    for ign in ignore_list:
+        ign = ign.strip()
+        if not ign:
+            continue
+        if not ign.startswith('/'):
+            logger.warning(f"Ignoring non-absolute path in ignore_list: {ign}")
+            continue
+        valid_ignore_list.append(ign.rstrip(os.sep))
+    ignore_list = valid_ignore_list
 
     # 统一转换扩展名为小写
     exts_lower = [ext.lower() for ext in extensions]
+
+    def is_ignored(path_to_check: str) -> bool:
+        for ign in ignore_list:
+            if path_to_check == ign or path_to_check.startswith(ign + os.sep):
+                return True
+        return False
 
     for root, dirs, files in os.walk(dir_path):
         # 排除隐藏目录和匹配 ignore_list 的目录
         dirs[:] = [
             d for d in dirs 
             if not d.startswith('.') 
-            and d not in ignore_list 
-            and not any(ign in os.path.join(root, d) for ign in ignore_list)
+            and not is_ignored(os.path.join(root, d))
         ]
 
         for f in files:
             file_path = os.path.join(root, f)
             
-            # 检查文件绝对路径子串匹配 ignore_list
-            if any(ign in file_path for ign in ignore_list):
+            # 检查文件绝对路径前缀匹配 ignore_list
+            if is_ignored(file_path):
                 continue
 
             if is_media_file(f, exts_lower):

@@ -5,7 +5,7 @@ Pydantic 配置校验模型
 extra='ignore' 自动过滤 app_port 等未定义字段。
 """
 from typing import Dict, List
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class LlmConfig(BaseModel):
@@ -78,6 +78,38 @@ class PipelineConfig(BaseModel):
         if not v or not v.strip():
             raise ValueError("must not be empty")
         return v
+
+    @model_validator(mode='after')
+    def _validate_ignore_list(self) -> 'PipelineConfig':
+        if not getattr(self, 'ignore_list', None):
+            return self
+            
+        ignores = [i.strip() for i in self.ignore_list.split(",") if i.strip()]
+        if not ignores:
+            return self
+            
+        import os
+        # Ensure scan_dir is valid before proceeding
+        if not getattr(self, 'scan_dir', None) or not os.path.isdir(self.scan_dir):
+            return self
+            
+        scan_dir_real = os.path.realpath(self.scan_dir)
+        
+        for ign in ignores:
+            if not ign.startswith('/'):
+                raise ValueError(f"ignore_list items must be absolute paths starting with '/': {ign}")
+                
+            ign_real = os.path.realpath(ign)
+            if ign_real != scan_dir_real and not ign_real.startswith(scan_dir_real + os.sep):
+                raise ValueError(f"ignore_list item '{ign}' is outside the scan directory '{self.scan_dir}'")
+                
+            if not os.path.exists(ign_real):
+                raise ValueError(f"ignore_list item '{ign}' does not exist")
+                
+            if not os.path.isdir(ign_real):
+                raise ValueError(f"ignore_list item '{ign}' is not a directory")
+                
+        return self
 
 
 class MediaConfig(BaseModel):
