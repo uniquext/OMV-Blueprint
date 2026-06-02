@@ -1,0 +1,29 @@
+services:
+  audiocleaner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ${AUDIOCLEANER_HOSTNAME}
+    hostname: ${AUDIOCLEANER_HOSTNAME}
+    user: "${PUID}:${PGID}"
+    restart: unless-stopped
+    ports:
+      - "${AUDIOCLEANER_PORT}:9830"
+    environment:
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+      CONFIG_PATH: /app/config/config.json
+      DATA_PATH: /app/data/audiocleaner.db
+      LOG_PATH: /app/logs/audiocleaner.log
+      BACKUP_ROOT: /app/backups
+      WORK_ROOT: /app/work
+      HTTP_ADDR: ":9830"
+    volumes:
+      - ${LOCALTIME_PATH}:/etc/localtime:ro
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./backups:/app/backups
+      - ./test:/app/test
+      - ${RESOURCE}/Media:/media
