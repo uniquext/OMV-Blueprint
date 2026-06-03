@@ -79,3 +79,8 @@ type BackupRecord struct {
 	RestoreSafetyPath string
 	Missing           bool
 }
+
+type TranscodeStats struct {
+	Succeeded int
+	Failed    int
+}

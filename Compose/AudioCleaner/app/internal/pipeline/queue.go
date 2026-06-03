@@ -4,8 +4,20 @@ import "sync"
 
 type Queue struct {
 	mu     sync.Mutex
-	paths  []string
+	jobs   []QueueJob
 	active map[string]struct{}
+}
+
+type JobSource string
+
+const (
+	JobSourceDefault JobSource = ""
+	JobSourceScan    JobSource = "scan"
+)
+
+type QueueJob struct {
+	Path   string
+	Source JobSource
 }
 
 func NewQueue() *Queue {
@@ -15,6 +27,10 @@ func NewQueue() *Queue {
 }
 
 func (q *Queue) Enqueue(path string) bool {
+	return q.EnqueueWithSource(path, JobSourceDefault)
+}
+
+func (q *Queue) EnqueueWithSource(path string, source JobSource) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -22,22 +38,27 @@ func (q *Queue) Enqueue(path string) bool {
 		return false
 	}
 	q.active[path] = struct{}{}
-	q.paths = append(q.paths, path)
+	q.jobs = append(q.jobs, QueueJob{Path: path, Source: source})
 	return true
 }
 
 func (q *Queue) Next() (string, bool) {
+	job, ok := q.NextJob()
+	return job.Path, ok
+}
+
+func (q *Queue) NextJob() (QueueJob, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	if len(q.paths) == 0 {
-		return "", false
+	if len(q.jobs) == 0 {
+		return QueueJob{}, false
 	}
-	path := q.paths[0]
-	copy(q.paths, q.paths[1:])
-	q.paths[len(q.paths)-1] = ""
-	q.paths = q.paths[:len(q.paths)-1]
-	return path, true
+	job := q.jobs[0]
+	copy(q.jobs, q.jobs[1:])
+	q.jobs[len(q.jobs)-1] = QueueJob{}
+	q.jobs = q.jobs[:len(q.jobs)-1]
+	return job, true
 }
 
 func (q *Queue) Done(path string) {
@@ -45,4 +66,19 @@ func (q *Queue) Done(path string) {
 	defer q.mu.Unlock()
 
 	delete(q.active, path)
+}
+
+func (q *Queue) Contains(path string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	_, ok := q.active[path]
+	return ok
+}
+
+func (q *Queue) Len() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	return len(q.jobs)
 }

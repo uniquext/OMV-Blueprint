@@ -8,13 +8,19 @@ services:
     user: "${PUID}:${PGID}"
     restart: unless-stopped
     ports:
-      - "${AUDIOCLEANER_PORT}:9830"
+      - "${AUDIOCLEANER_BIND}:${AUDIOCLEANER_PORT}:9830"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9830/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     environment:
       PUID: ${PUID}
       PGID: ${PGID}
       TZ: ${TZ}
       CONFIG_PATH: /app/config/config.json
-      DATA_PATH: /app/data/audiocleaner.db
+      DB_PATH: /app/data/audiocleaner.db
       LOG_PATH: /app/logs/audiocleaner.log
       BACKUP_ROOT: /app/backups
       WORK_ROOT: /app/work
@@ -26,4 +32,4 @@ services:
       - ./logs:/app/logs
       - ./backups:/app/backups
       - ./test:/app/test
-      - ${RESOURCE}/Media:/media
+      - ${AUDIOCLEANER_MEDIA_PATH:-${RESOURCE}/Media}:/media

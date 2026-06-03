@@ -20,8 +20,8 @@ func BuildFFmpegArgs(input string, output string, probe ProbeData, decision Deci
 			args = append(args, "-c:a:"+audioIndex, "copy")
 		}
 
-		if outputAudioIndex < len(audioStreams) {
-			stream := audioStreams[outputAudioIndex]
+		if plan.InputAudioOrdinal < len(audioStreams) {
+			stream := audioStreams[plan.InputAudioOrdinal]
 			if stream.Tags["language"] != "" {
 				args = append(args, "-metadata:s:a:"+audioIndex, "language="+stream.Tags["language"])
 			}
@@ -37,7 +37,7 @@ func BuildFFmpegArgs(input string, output string, probe ProbeData, decision Deci
 		"-map", "0:t?", "-c:t", "copy",
 	)
 	if includeDataStreams {
-		args = append(args, "-map", "0:d?")
+		args = append(args, "-map", "0:d?", "-c:d", "copy")
 	}
 	args = append(args, "-max_muxing_queue_size", "9999", output)
 

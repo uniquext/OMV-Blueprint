@@ -55,6 +55,12 @@ func (r *Repository) Meta(ctx context.Context, key string) (string, error) {
 
 func (r *Repository) UpsertFile(ctx context.Context, file FileRecord) (FileRecord, error) {
 	now := time.Now().UTC()
+	return upsertFile(ctx, r.db, file, now)
+}
+
+func upsertFile(ctx context.Context, queryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, file FileRecord, now time.Time) (FileRecord, error) {
 	createdAt := file.CreatedAt
 	if createdAt.IsZero() {
 		createdAt = now
@@ -64,7 +70,7 @@ func (r *Repository) UpsertFile(ctx context.Context, file FileRecord) (FileRecor
 		updatedAt = now
 	}
 
-	row := r.db.QueryRowContext(ctx, `
+	row := queryer.QueryRowContext(ctx, `
 INSERT INTO files (
   file_path,
   status,
@@ -115,13 +121,51 @@ func (r *Repository) FileByPath(ctx context.Context, path string) (FileRecord, e
 	return file, nil
 }
 
+func (r *Repository) FileByID(ctx context.Context, id int64) (FileRecord, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT `+fileSelectColumns+` FROM files WHERE id = ?`, id)
+	file, err := scanFile(row)
+	if err != nil {
+		return FileRecord{}, err
+	}
+	return file, nil
+}
+
+func (r *Repository) Files(ctx context.Context) ([]FileRecord, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+fileSelectColumns+` FROM files ORDER BY updated_at DESC, id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanFiles(rows)
+}
+
+func (r *Repository) ProcessingFiles(ctx context.Context) ([]FileRecord, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+fileSelectColumns+` FROM files WHERE status = ? ORDER BY updated_at ASC, id ASC`, string(StatusProcessing))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanFiles(rows)
+}
+
+func (r *Repository) SaveFile(ctx context.Context, file FileRecord) error {
+	_, err := r.UpsertFile(ctx, file)
+	return err
+}
+
 func (r *Repository) AddJobEvent(ctx context.Context, event JobEvent) error {
+	return addJobEvent(ctx, r.db, event, time.Now().UTC())
+}
+
+func addJobEvent(ctx context.Context, execer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, event JobEvent, now time.Time) error {
 	startedAt := event.StartedAt
 	if startedAt.IsZero() {
-		startedAt = time.Now().UTC()
+		startedAt = now
 	}
 
-	_, err := r.db.ExecContext(ctx, `
+	_, err := execer.ExecContext(ctx, `
 INSERT INTO job_events (
   file_id,
   event_type,
@@ -139,6 +183,71 @@ INSERT INTO job_events (
 		return fmt.Errorf("add job event: %w", err)
 	}
 	return nil
+}
+
+func (r *Repository) RecentJobEvents(ctx context.Context, limit int) ([]JobEvent, error) {
+	if limit < 1 {
+		limit = 50
+	}
+	rows, err := r.db.QueryContext(ctx, `
+SELECT id, file_id, event_type, phase, attempt, command, message, error, started_at, finished_at
+FROM job_events
+ORDER BY started_at DESC, id DESC
+LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	events := make([]JobEvent, 0)
+	for rows.Next() {
+		var event JobEvent
+		var phase string
+		var startedAt string
+		var finishedAt string
+		if err := rows.Scan(
+			&event.ID,
+			&event.FileID,
+			&event.EventType,
+			&phase,
+			&event.Attempt,
+			&event.Command,
+			&event.Message,
+			&event.Error,
+			&startedAt,
+			&finishedAt,
+		); err != nil {
+			return nil, err
+		}
+		event.Phase = Phase(phase)
+		var parseErr error
+		event.StartedAt, parseErr = parseTime(startedAt)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse event started_at: %w", parseErr)
+		}
+		event.FinishedAt, parseErr = parseTime(finishedAt)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse event finished_at: %w", parseErr)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+func (r *Repository) TranscodeStats(ctx context.Context) (TranscodeStats, error) {
+	var stats TranscodeStats
+	err := r.db.QueryRowContext(ctx, `
+	SELECT
+	  COALESCE(SUM(CASE WHEN event_type = 'job.qualified' AND message = 'transcoded' THEN 1 ELSE 0 END), 0),
+	  COALESCE(SUM(CASE WHEN event_type = 'job.unqualified' AND message = 'failed' THEN 1 ELSE 0 END), 0)
+	FROM job_events`).Scan(&stats.Succeeded, &stats.Failed)
+	if err != nil {
+		return TranscodeStats{}, fmt.Errorf("query transcode stats: %w", err)
+	}
+	return stats, nil
 }
 
 func (r *Repository) AddBackup(ctx context.Context, backup BackupRecord) error {
@@ -167,6 +276,112 @@ INSERT INTO backups (
 		return fmt.Errorf("add backup: %w", err)
 	}
 	return nil
+}
+
+func (r *Repository) Backups(ctx context.Context) ([]BackupRecord, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+backupSelectColumns+` FROM backups ORDER BY created_at DESC, id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanBackups(rows)
+}
+
+func (r *Repository) BackupByID(ctx context.Context, id int64) (BackupRecord, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT `+backupSelectColumns+` FROM backups WHERE id = ?`, id)
+	return scanBackup(row)
+}
+
+func (r *Repository) ExpiredBackups(ctx context.Context, now time.Time) ([]BackupRecord, error) {
+	rows, err := r.db.QueryContext(ctx, `
+SELECT `+backupSelectColumns+`
+FROM backups
+WHERE expires_at != '' AND expires_at <= ? AND restored_at = ''
+ORDER BY expires_at ASC, id ASC`, formatTime(now))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanBackups(rows)
+}
+
+func (r *Repository) MarkBackupRestored(ctx context.Context, id int64, safetyPath string) error {
+	_, err := r.db.ExecContext(ctx, `
+UPDATE backups
+SET restored_at = ?, restore_safety_path = ?
+WHERE id = ?`, formatTime(time.Now().UTC()), safetyPath, id)
+	if err != nil {
+		return fmt.Errorf("mark backup restored: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) MarkBackupMissing(ctx context.Context, id int64, missing bool) error {
+	_, err := r.db.ExecContext(ctx, `
+UPDATE backups
+SET missing = ?
+WHERE id = ?`, boolInt(missing), id)
+	if err != nil {
+		return fmt.Errorf("mark backup missing: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) RecordRestore(ctx context.Context, backupID int64, safetyPath string, file FileRecord, event JobEvent) (FileRecord, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return FileRecord{}, fmt.Errorf("begin restore transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC()
+	result, err := tx.ExecContext(ctx, `
+	UPDATE backups
+	SET restored_at = ?, restore_safety_path = ?
+	WHERE id = ?`, formatTime(now), safetyPath, backupID)
+	if err != nil {
+		return FileRecord{}, fmt.Errorf("mark backup restored: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return FileRecord{}, fmt.Errorf("check restored backup update: %w", err)
+	}
+	if affected == 0 {
+		return FileRecord{}, fmt.Errorf("mark backup restored: %w", sql.ErrNoRows)
+	}
+
+	persisted, err := upsertFile(ctx, tx, file, now)
+	if err != nil {
+		return FileRecord{}, err
+	}
+	event.FileID = persisted.ID
+	if err := addJobEvent(ctx, tx, event, now); err != nil {
+		return FileRecord{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return FileRecord{}, fmt.Errorf("commit restore transaction: %w", err)
+	}
+	return persisted, nil
+}
+
+func (r *Repository) DeleteBackup(ctx context.Context, id int64) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM backups WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete backup: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) DeleteUnrestoredBackup(ctx context.Context, id int64) (bool, error) {
+	result, err := r.db.ExecContext(ctx, `DELETE FROM backups WHERE id = ? AND restored_at = ''`, id)
+	if err != nil {
+		return false, fmt.Errorf("delete unrestored backup: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("check unrestored backup delete: %w", err)
+	}
+	return affected > 0, nil
 }
 
 func (r *Repository) init(ctx context.Context) error {
@@ -286,6 +501,76 @@ func scanFile(row rowScanner) (FileRecord, error) {
 	return file, nil
 }
 
+func scanFiles(rows *sql.Rows) ([]FileRecord, error) {
+	files := make([]FileRecord, 0)
+	for rows.Next() {
+		file, err := scanFile(rows)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, file)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
+func scanBackup(row rowScanner) (BackupRecord, error) {
+	var backup BackupRecord
+	var createdAt string
+	var expiresAt string
+	var restoredAt string
+	var missing int
+	err := row.Scan(
+		&backup.ID,
+		&backup.FileID,
+		&backup.OriginalPath,
+		&backup.BackupPath,
+		&backup.OriginalSize,
+		&backup.OriginalMTimeNS,
+		&createdAt,
+		&expiresAt,
+		&restoredAt,
+		&backup.RestoreSafetyPath,
+		&missing,
+	)
+	if err != nil {
+		return BackupRecord{}, err
+	}
+
+	var parseErr error
+	backup.CreatedAt, parseErr = parseTime(createdAt)
+	if parseErr != nil {
+		return BackupRecord{}, fmt.Errorf("parse backup created_at: %w", parseErr)
+	}
+	backup.ExpiresAt, parseErr = parseTime(expiresAt)
+	if parseErr != nil {
+		return BackupRecord{}, fmt.Errorf("parse backup expires_at: %w", parseErr)
+	}
+	backup.RestoredAt, parseErr = parseTime(restoredAt)
+	if parseErr != nil {
+		return BackupRecord{}, fmt.Errorf("parse backup restored_at: %w", parseErr)
+	}
+	backup.Missing = missing != 0
+	return backup, nil
+}
+
+func scanBackups(rows *sql.Rows) ([]BackupRecord, error) {
+	backups := make([]BackupRecord, 0)
+	for rows.Next() {
+		backup, err := scanBackup(rows)
+		if err != nil {
+			return nil, err
+		}
+		backups = append(backups, backup)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return backups, nil
+}
+
 func formatTime(t time.Time) string {
 	if t.IsZero() {
 		return ""
@@ -323,6 +608,19 @@ const fileSelectColumns = `
   last_error,
   created_at,
   updated_at`
+
+const backupSelectColumns = `
+  id,
+  file_id,
+  original_path,
+  backup_path,
+  original_size,
+  original_mtime_ns,
+  created_at,
+  expires_at,
+  restored_at,
+  restore_safety_path,
+  missing`
 
 var schemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS system_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);`,

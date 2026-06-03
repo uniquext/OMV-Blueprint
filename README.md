@@ -17,6 +17,7 @@ OMV/
 │   └── template/
 │       └── gpu-template.yml     # NVIDIA GPU 全局复用模板
 ├── Compose/                     # Docker Compose 堆栈定义
+│   ├── AudioCleaner/            # Infuse 音频兼容性清理服务
 │   ├── ClashMeta/               # 代理网关堆栈
 │   │   ├── config/              # mihomo 配置文件
 │   │   └── emergency_bypass.sh  # 代理紧急避险脚本
@@ -83,6 +84,7 @@ OMV/
 | 05-7 | [iperf3 网络带宽测试工具](docs/05-容器与应用服务/Iperf3/说明.md) | ✅ |
 | 05-8 | [AdGuardHome 私有局域网 DNS 服务](docs/05-容器与应用服务/AdGuardHome/说明.md) | ✅ |
 | 05-9 | [Tailscale 极速安全的虚拟内网](docs/05-容器与应用服务/Tailscale/说明.md) | ✅ |
+| 05-10 | [AudioCleaner Infuse 音频兼容性清理](Compose/AudioCleaner/README.md) | ✅ |
 
 ---
 

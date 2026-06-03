@@ -10,10 +10,12 @@ import (
 )
 
 type Watcher struct {
-	watcher *fsnotify.Watcher
-	onPath  func(string)
-	errors  chan error
-	once    sync.Once
+	watcher      *fsnotify.Watcher
+	onPath       func(string)
+	errors       chan error
+	once         sync.Once
+	errorsMu     sync.Mutex
+	errorsClosed bool
 }
 
 func NewWatcher(roots []string, onPath func(string)) (*Watcher, error) {
@@ -40,6 +42,7 @@ func (w *Watcher) Close() error {
 	var err error
 	w.once.Do(func() {
 		err = w.watcher.Close()
+		w.closeErrors()
 	})
 	return err
 }
@@ -49,6 +52,7 @@ func (w *Watcher) Errors() <-chan error {
 }
 
 func (w *Watcher) run() {
+	defer w.closeErrors()
 	for {
 		select {
 		case event, ok := <-w.watcher.Events:
@@ -102,8 +106,22 @@ func (w *Watcher) reportError(err error) {
 	if err == nil {
 		return
 	}
+	w.errorsMu.Lock()
+	defer w.errorsMu.Unlock()
+	if w.errorsClosed {
+		return
+	}
 	select {
 	case w.errors <- err:
 	default:
+	}
+}
+
+func (w *Watcher) closeErrors() {
+	w.errorsMu.Lock()
+	defer w.errorsMu.Unlock()
+	if !w.errorsClosed {
+		close(w.errors)
+		w.errorsClosed = true
 	}
 }

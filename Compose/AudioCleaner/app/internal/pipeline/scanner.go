@@ -2,14 +2,16 @@ package pipeline
 
 import (
 	"io/fs"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 )
 
 type ScanConfig struct {
-	Roots       []string
-	Extensions  []string
-	ExcludeDirs []string
+	Roots           []string
+	Extensions      []string
+	ExcludeDirs     []string
+	ExcludePatterns []string
 }
 
 func ScanRoots(cfg ScanConfig) ([]string, error) {
@@ -34,6 +36,12 @@ func ScanRoots(cfg ScanConfig) ([]string, error) {
 			if _, ok := extensions[strings.ToLower(filepath.Ext(entry.Name()))]; !ok {
 				return nil
 			}
+			if IsPathExcluded(path, cfg.ExcludeDirs, cfg.ExcludePatterns) {
+				return nil
+			}
+			if IsAudioCleanerTempOutputPath(entry.Name()) {
+				return nil
+			}
 			info, err := entry.Info()
 			if err != nil {
 				return err
@@ -49,6 +57,13 @@ func ScanRoots(cfg ScanConfig) ([]string, error) {
 	}
 
 	return paths, nil
+}
+
+func IsPathExcluded(path string, excludeDirs []string, excludePatterns []string) bool {
+	if hasExcludedDir(path, excludeDirs) {
+		return true
+	}
+	return matchesExcludePattern(path, excludePatterns)
 }
 
 func extensionSet(extensions []string) map[string]struct{} {
@@ -76,4 +91,55 @@ func nameSet(names []string) map[string]struct{} {
 		set[name] = struct{}{}
 	}
 	return set
+}
+
+func hasExcludedDir(path string, excludeDirs []string) bool {
+	excluded := nameSet(excludeDirs)
+	if len(excluded) == 0 {
+		return false
+	}
+	for _, part := range strings.FieldsFunc(filepath.Clean(path), func(r rune) bool {
+		return r == filepath.Separator || r == '/'
+	}) {
+		if _, ok := excluded[part]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesExcludePattern(path string, patterns []string) bool {
+	if len(patterns) == 0 {
+		return false
+	}
+	candidates := patternCandidates(path)
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		pattern = filepath.ToSlash(pattern)
+		for _, candidate := range candidates {
+			matched, err := pathpkg.Match(pattern, candidate)
+			if err == nil && matched {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func patternCandidates(path string) []string {
+	cleaned := filepath.ToSlash(filepath.Clean(path))
+	base := pathpkg.Base(cleaned)
+	parts := strings.Split(strings.Trim(cleaned, "/"), "/")
+
+	candidates := []string{base, cleaned}
+	for i := range parts {
+		suffix := strings.Join(parts[i:], "/")
+		if suffix != "" {
+			candidates = append(candidates, suffix)
+		}
+	}
+	return candidates
 }

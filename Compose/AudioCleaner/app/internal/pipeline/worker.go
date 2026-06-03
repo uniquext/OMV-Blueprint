@@ -47,7 +47,7 @@ type WorkerRepository interface {
 }
 
 type WorkerQueue interface {
-	Next() (string, bool)
+	NextJob() (QueueJob, bool)
 	Done(path string)
 }
 
@@ -163,24 +163,39 @@ func (w *Worker) ProcessNext(ctx context.Context) error {
 	if w.queue == nil {
 		return errors.New("worker queue is required")
 	}
-	path, ok := w.queue.Next()
+	job, ok := w.queue.NextJob()
 	if !ok {
 		return nil
 	}
-	defer w.queue.Done(path)
-	return w.ProcessPath(ctx, path)
+	defer w.queue.Done(job.Path)
+	return w.ProcessPathWithSource(ctx, job.Path, job.Source)
 }
 
 func (w *Worker) ProcessPath(ctx context.Context, path string) error {
+	return w.ProcessPathWithSource(ctx, path, JobSourceDefault)
+}
+
+func (w *Worker) ProcessPathWithSource(ctx context.Context, path string, source JobSource) error {
 	if err := w.validateDeps(); err != nil {
 		return err
 	}
 
 	file, err := w.repository.FileByPath(ctx, path)
+	fileMissing := false
 	if errors.Is(err, sql.ErrNoRows) {
+		fileMissing = true
 		file = repository.FileRecord{Path: path}
 	} else if err != nil {
 		return err
+	}
+
+	if !fileMissing && shouldSkipUnchanged(file) && file.Fingerprint != "" {
+		preflightCtx, cancelPreflight := context.WithTimeout(ctx, w.cfg.Pipeline.JobTimeout())
+		unchanged, err := w.fileUnchanged(preflightCtx, file)
+		cancelPreflight()
+		if err == nil && unchanged {
+			return nil
+		}
 	}
 
 	file, err = w.transition(ctx, file, repository.StatusProcessing, repository.PhaseQueued, "")
@@ -191,7 +206,7 @@ func (w *Worker) ProcessPath(ctx context.Context, path string) error {
 	jobCtx, cancel := context.WithTimeout(ctx, w.cfg.Pipeline.JobTimeout())
 	defer cancel()
 
-	latest, err := w.processJob(jobCtx, ctx, file)
+	latest, err := w.processJob(jobCtx, ctx, file, source, fileMissing)
 	if err != nil {
 		var postReplaceErr postReplacePersistenceError
 		if errors.As(err, &postReplaceErr) {
@@ -202,7 +217,39 @@ func (w *Worker) ProcessPath(ctx context.Context, path string) error {
 	return nil
 }
 
-func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, file repository.FileRecord) (repository.FileRecord, error) {
+func shouldSkipUnchanged(file repository.FileRecord) bool {
+	if file.Status == repository.StatusQualified {
+		return true
+	}
+	return file.Status == repository.StatusUnqualified &&
+		(file.UnqualifiedReason == repository.ReasonIgnored || file.UnqualifiedReason == repository.ReasonRestored)
+}
+
+func (w *Worker) fileUnchanged(ctx context.Context, file repository.FileRecord) (bool, error) {
+	stat, err := w.stable.Wait(ctx, file.Path, w.cfg.Pipeline.StatQuietDuration())
+	if err != nil {
+		return false, err
+	}
+	probe, err := w.prober.Probe(ctx, file.Path)
+	if err != nil {
+		if canUseStatOnlyFingerprint(file) {
+			fingerprint := media.Fingerprint(file.Path, stat.Size, stat.MTimeNS, "", "")
+			return fingerprint == file.Fingerprint, nil
+		}
+		return false, err
+	}
+	fingerprint := media.Fingerprint(file.Path, stat.Size, stat.MTimeNS, probe.AudioSignature(), probe.VideoSignature())
+	return fingerprint == file.Fingerprint, nil
+}
+
+func canUseStatOnlyFingerprint(file repository.FileRecord) bool {
+	return file.Status == repository.StatusUnqualified &&
+		(file.UnqualifiedReason == repository.ReasonIgnored || file.UnqualifiedReason == repository.ReasonRestored) &&
+		file.AudioSignature == "" &&
+		file.VideoSignature == ""
+}
+
+func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, file repository.FileRecord, source JobSource, fileMissing bool) (repository.FileRecord, error) {
 	var err error
 	file, err = w.transition(persistCtx, file, repository.StatusProcessing, repository.PhaseChecking, "")
 	if err != nil {
@@ -237,7 +284,7 @@ func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, 
 		return file, err
 	case media.ActionAlreadyCompatible:
 		file.Status = repository.StatusQualified
-		file.QualificationSource = repository.SourceAlreadyCompatible
+		file.QualificationSource = alreadyCompatibleSource(source, fileMissing)
 		file.UnqualifiedReason = ""
 		file.LastError = ""
 		file, err := w.persist(persistCtx, file, "qualified")
@@ -336,16 +383,35 @@ func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, 
 		return file, postReplacePersistenceError{err: err}
 	}
 
+	finalStat, err := w.stat.Stat(file.Path)
+	if err != nil {
+		return file, postReplacePersistenceError{err: fmt.Errorf("stat replaced original file: %w", err)}
+	}
+	finalProbe, err := w.prober.Probe(jobCtx, file.Path)
+	if err != nil {
+		return file, postReplacePersistenceError{err: fmt.Errorf("probe replaced original file: %w", err)}
+	}
+	if err := media.ValidateOutput(originalProbe, finalProbe, decision, media.ValidationRules{
+		IncompatibleCodecs:       w.cfg.Audio.IncompatibleCodecs,
+		DurationToleranceSeconds: w.cfg.Validation.DurationToleranceSec,
+		MaxSizeRatio:             w.cfg.Validation.MaxSizeRatio,
+		MaxSizeIncreaseBytes:     w.cfg.Validation.MaxSizeIncreaseMegabyte * 1024 * 1024,
+		OriginalSize:             originalStat.Size,
+		OutputSize:               finalStat.Size(),
+	}); err != nil {
+		return file, postReplacePersistenceError{err: fmt.Errorf("validate replaced original file: %w", err)}
+	}
+
 	file.Status = repository.StatusQualified
 	file.QualificationSource = repository.SourceTranscoded
 	file.UnqualifiedReason = ""
 	file.LastError = ""
-	file.Size = outputStat.Size()
-	file.MTimeNS = outputStat.ModTime().UnixNano()
-	file.AudioSignature = outputProbe.AudioSignature()
-	file.VideoSignature = outputProbe.VideoSignature()
+	file.Size = finalStat.Size()
+	file.MTimeNS = finalStat.ModTime().UnixNano()
+	file.AudioSignature = finalProbe.AudioSignature()
+	file.VideoSignature = finalProbe.VideoSignature()
 	file.Fingerprint = media.Fingerprint(file.Path, file.Size, file.MTimeNS, file.AudioSignature, file.VideoSignature)
-	file, err = w.persist(persistCtx, file, "qualified")
+	file, err = w.persist(persistCtx, file, "transcoded")
 	if err != nil {
 		return file, postReplacePersistenceError{err: err}
 	}
@@ -416,6 +482,13 @@ func (w *Worker) persist(ctx context.Context, file repository.FileRecord, messag
 	return persisted, nil
 }
 
+func alreadyCompatibleSource(source JobSource, fileMissing bool) repository.QualificationSource {
+	if source == JobSourceScan && fileMissing {
+		return repository.SourceObserved
+	}
+	return repository.SourceAlreadyCompatible
+}
+
 func (w *Worker) validateDeps() error {
 	if w.repository == nil {
 		return errors.New("worker repository is required")
@@ -465,7 +538,14 @@ func (defaultStableChecker) Wait(ctx context.Context, path string, quiet time.Du
 type defaultTempAllocator struct{}
 
 func (defaultTempAllocator) Allocate(path string) (string, error) {
-	temp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".audiocleaner-*.tmp")
+	base := filepath.Base(path)
+	ext := filepath.Ext(base)
+	stem := base[:len(base)-len(ext)]
+	pattern := stem + ".audiocleaner-*"
+	if ext != "" {
+		pattern += ext
+	}
+	temp, err := os.CreateTemp(filepath.Dir(path), pattern)
 	if err != nil {
 		return "", err
 	}
