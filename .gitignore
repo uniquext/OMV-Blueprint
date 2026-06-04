@@ -33,3 +33,11 @@ secrets/
 
 ### Project specific ignores ###
 ext/
+
+### AudioCleaner local runtime and test outputs ###
+Compose/AudioCleaner/config/config.json
+Compose/AudioCleaner/data/
+Compose/AudioCleaner/logs/
+Compose/AudioCleaner/backups/
+Compose/AudioCleaner/work/
+Compose/AudioCleaner/test/reports/

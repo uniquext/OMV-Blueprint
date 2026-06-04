@@ -56,5 +56,11 @@ cancelWorkers:
 	if err := s.db.Close(); err != nil && shutdownErr == nil {
 		shutdownErr = err
 	}
+	if s.logCloser != nil {
+		if err := s.logCloser(); err != nil && shutdownErr == nil {
+			shutdownErr = err
+		}
+		s.logCloser = nil
+	}
 	return shutdownErr
 }

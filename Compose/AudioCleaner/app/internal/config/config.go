@@ -54,7 +54,7 @@ type NotificationsConfig struct {
 func Default() Config {
 	return Config{
 		Media: MediaConfig{
-			Roots:           []string{"/media/movie", "/media/tv"},
+			Roots:           []string{"/media"},
 			Extensions:      []string{".mkv", ".mp4", ".mov", ".m4v", ".ts", ".m2ts"},
 			ExcludeDirs:     []string{"@eaDir", ".stfolder", "#recycle"},
 			ExcludePatterns: []string{},
@@ -126,6 +126,12 @@ func (c Config) Validate() error {
 	return nil
 }
 
+func (c *Config) Normalize() {
+	if len(c.Media.Roots) == 0 {
+		c.Media.Roots = Default().Media.Roots
+	}
+}
+
 func (p PipelineConfig) StatQuietDuration() time.Duration {
 	return time.Duration(p.StatQuietSeconds) * time.Second
 }
@@ -158,6 +164,7 @@ func LoadOrCreate(path string) (Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
 	}
+	cfg.Normalize()
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}

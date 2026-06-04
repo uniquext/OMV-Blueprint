@@ -13,9 +13,9 @@ FROM debian:bookworm-slim
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
-	&& apt-get install -y --no-install-recommends ffmpeg curl ca-certificates tzdata \
-	&& mkdir -p /app/work \
-	&& chmod 1777 /app/work \
+	&& apt-get install -y --no-install-recommends ffmpeg ca-certificates tzdata \
+	&& mkdir -p /app/work /app/logs \
+	&& chmod 1777 /app/work /app/logs \
 	&& ffmpeg -version >/dev/null \
 	&& ffprobe -version >/dev/null \
 	&& rm -rf /var/lib/apt/lists/*

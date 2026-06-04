@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -84,6 +85,10 @@ type WorkerTempAllocator interface {
 	Allocate(path string) (string, error)
 }
 
+type WorkerSourceCopier interface {
+	Copy(originalPath string, outputPath string) (string, error)
+}
+
 type WorkerDeps struct {
 	Config     config.Config
 	Repository WorkerRepository
@@ -96,7 +101,9 @@ type WorkerDeps struct {
 	Stable     WorkerStableChecker
 	Scheduler  WorkerRetryScheduler
 	Temp       WorkerTempAllocator
+	Source     WorkerSourceCopier
 	BackupRoot string
+	WorkRoot   string
 	FFmpegName string
 }
 
@@ -112,7 +119,9 @@ type Worker struct {
 	stable     WorkerStableChecker
 	scheduler  WorkerRetryScheduler
 	temp       WorkerTempAllocator
+	source     WorkerSourceCopier
 	backupRoot string
+	workRoot   string
 	ffmpegName string
 }
 
@@ -135,7 +144,11 @@ func NewWorker(deps WorkerDeps) *Worker {
 	}
 	temp := deps.Temp
 	if temp == nil {
-		temp = defaultTempAllocator{}
+		temp = defaultTempAllocator{workRoot: deps.WorkRoot}
+	}
+	source := deps.Source
+	if source == nil {
+		source = defaultSourceCopier{}
 	}
 	ffmpegName := deps.FFmpegName
 	if ffmpegName == "" {
@@ -154,7 +167,9 @@ func NewWorker(deps WorkerDeps) *Worker {
 		stable:     stable,
 		scheduler:  deps.Scheduler,
 		temp:       temp,
+		source:     source,
 		backupRoot: deps.BackupRoot,
+		workRoot:   deps.WorkRoot,
 		ffmpegName: ffmpegName,
 	}
 }
@@ -221,8 +236,7 @@ func shouldSkipUnchanged(file repository.FileRecord) bool {
 	if file.Status == repository.StatusQualified {
 		return true
 	}
-	return file.Status == repository.StatusUnqualified &&
-		(file.UnqualifiedReason == repository.ReasonIgnored || file.UnqualifiedReason == repository.ReasonRestored)
+	return file.Status == repository.StatusUnqualified
 }
 
 func (w *Worker) fileUnchanged(ctx context.Context, file repository.FileRecord) (bool, error) {
@@ -244,7 +258,6 @@ func (w *Worker) fileUnchanged(ctx context.Context, file repository.FileRecord) 
 
 func canUseStatOnlyFingerprint(file repository.FileRecord) bool {
 	return file.Status == repository.StatusUnqualified &&
-		(file.UnqualifiedReason == repository.ReasonIgnored || file.UnqualifiedReason == repository.ReasonRestored) &&
 		file.AudioSignature == "" &&
 		file.VideoSignature == ""
 }
@@ -260,6 +273,9 @@ func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, 
 	if err != nil {
 		return file, failure(err, reasonForContextOr(repository.ReasonFailed, err))
 	}
+	file.Size = originalStat.Size
+	file.MTimeNS = originalStat.MTimeNS
+	file.Fingerprint = media.Fingerprint(file.Path, file.Size, file.MTimeNS, "", "")
 	originalProbe, err := w.prober.Probe(jobCtx, file.Path)
 	if err != nil {
 		return file, failure(err, reasonForProbeError(err))
@@ -269,8 +285,6 @@ func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, 
 		Extensions:         w.cfg.Media.Extensions,
 		IncompatibleCodecs: w.cfg.Audio.IncompatibleCodecs,
 	})
-	file.Size = originalStat.Size
-	file.MTimeNS = originalStat.MTimeNS
 	file.AudioSignature = originalProbe.AudioSignature()
 	file.VideoSignature = originalProbe.VideoSignature()
 	file.Fingerprint = media.Fingerprint(file.Path, file.Size, file.MTimeNS, file.AudioSignature, file.VideoSignature)
@@ -295,19 +309,28 @@ func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, 
 	if err != nil {
 		return file, failure(err, repository.ReasonFailed)
 	}
+	sourcePath := ""
 	removeOutputOnFailure := true
 	defer func() {
 		if removeOutputOnFailure {
 			_ = os.Remove(outputPath)
 		}
+		if sourcePath != "" {
+			_ = os.Remove(sourcePath)
+		}
+		cleanupEmptyWorkDir(outputPath, w.workRoot)
 	}()
+	sourcePath, err = w.source.Copy(file.Path, outputPath)
+	if err != nil {
+		return file, failure(err, repository.ReasonFailed)
+	}
 
 	file, err = w.transition(persistCtx, file, repository.StatusProcessing, repository.PhaseTranscoding, "")
 	if err != nil {
 		return file, err
 	}
-	primaryArgs := media.BuildFFmpegArgs(file.Path, outputPath, originalProbe, decision, true)
-	fallbackArgs := media.BuildFFmpegArgs(file.Path, outputPath, originalProbe, decision, false)
+	primaryArgs := media.BuildFFmpegArgs(sourcePath, outputPath, originalProbe, decision, true)
+	fallbackArgs := media.BuildFFmpegArgs(sourcePath, outputPath, originalProbe, decision, false)
 	usedFallback, err := runFFmpegWithFallbackReport(jobCtx, w.runner, w.ffmpegName, primaryArgs, fallbackArgs)
 	if err != nil {
 		return file, failure(err, reasonForContextOr(repository.ReasonFailed, err))
@@ -535,26 +558,93 @@ func (defaultStableChecker) Wait(ctx context.Context, path string, quiet time.Du
 	return WaitForStableFile(ctx, path, quiet)
 }
 
-type defaultTempAllocator struct{}
+type defaultTempAllocator struct {
+	workRoot string
+}
 
-func (defaultTempAllocator) Allocate(path string) (string, error) {
+func (a defaultTempAllocator) Allocate(path string) (string, error) {
 	base := filepath.Base(path)
 	ext := filepath.Ext(base)
-	stem := base[:len(base)-len(ext)]
-	pattern := stem + ".audiocleaner-*"
-	if ext != "" {
-		pattern += ext
+	workRoot := a.workRoot
+	if workRoot == "" {
+		workRoot = os.Getenv("WORK_ROOT")
 	}
-	temp, err := os.CreateTemp(filepath.Dir(path), pattern)
+	if workRoot == "" {
+		workRoot = "/app/work"
+	}
+	if err := os.MkdirAll(workRoot, 0o755); err != nil {
+		return "", err
+	}
+	jobDir, err := os.MkdirTemp(workRoot, "job-")
 	if err != nil {
 		return "", err
 	}
-	name := temp.Name()
-	if err := temp.Close(); err != nil {
-		_ = os.Remove(name)
+	return filepath.Join(jobDir, "output"+ext), nil
+}
+
+type defaultSourceCopier struct{}
+
+func (defaultSourceCopier) Copy(originalPath string, outputPath string) (string, error) {
+	ext := filepath.Ext(originalPath)
+	sourcePath := filepath.Join(filepath.Dir(outputPath), "source"+ext)
+	if err := copyFile(originalPath, sourcePath); err != nil {
 		return "", err
 	}
-	return name, nil
+	return sourcePath, nil
+}
+
+func copyFile(src string, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	removeDst := true
+	defer func() {
+		if removeDst {
+			_ = os.Remove(dst)
+		}
+	}()
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	removeDst = false
+	return nil
+}
+
+func cleanupEmptyWorkDir(outputPath string, workRoot string) {
+	if workRoot == "" {
+		workRoot = os.Getenv("WORK_ROOT")
+	}
+	if workRoot == "" {
+		workRoot = "/app/work"
+	}
+	dir := filepath.Dir(outputPath)
+	rel, err := filepath.Rel(workRoot, dir)
+	if err != nil || rel == "." || rel == ".." || containsParentTraversal(rel) {
+		return
+	}
+	_ = os.Remove(dir)
+}
+
+func containsParentTraversal(rel string) bool {
+	return len(rel) > 3 && rel[:3] == "../"
 }
 
 type workerFailure struct {

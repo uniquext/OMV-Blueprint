@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -28,9 +29,11 @@ import (
 
 const (
 	defaultConfigPath = "/app/config/config.json"
-	defaultDBPath     = "/app/data/audiocleaner.sqlite"
+	defaultDBPath     = "/app/data/audiocleaner.db"
 	defaultBackupRoot = "/app/backups"
-	defaultHTTPAddr   = ":8080"
+	defaultHTTPAddr   = ":9830"
+	defaultLogPath    = "/app/logs/audiocleaner.log"
+	defaultWorkRoot   = "/app/work"
 
 	defaultBackupCleanupInterval  = time.Hour
 	startupCriticalRecoveryPrefix = "startup recovered interrupted critical phase "
@@ -48,7 +51,9 @@ type RecoveryRepository interface {
 type Options struct {
 	ConfigPath string
 	DBPath     string
+	LogPath    string
 	BackupRoot string
+	WorkRoot   string
 	HTTPAddr   string
 	Logger     *log.Logger
 
@@ -58,6 +63,7 @@ type Options struct {
 	Restart     func() error
 
 	afterHTTPBind func()
+	logCloser     func() error
 }
 
 type Service struct {
@@ -70,8 +76,10 @@ type Service struct {
 	watcher    *pipeline.Watcher
 	server     *http.Server
 	logger     *log.Logger
+	logCloser  func() error
 
 	backupRoot  string
+	workRoot    string
 	httpAddr    string
 	ffmpegName  string
 	ffprobeName string
@@ -150,12 +158,22 @@ func Run(ctx context.Context, opts Options) error {
 
 func Start(ctx context.Context, opts Options) (*Service, error) {
 	opts = withDefaults(opts)
+	if opts.Logger == nil {
+		logger, closeLogger, err := newFileLogger(opts.LogPath, os.Stderr)
+		if err != nil {
+			return nil, fmt.Errorf("open log file: %w", err)
+		}
+		opts.Logger = logger
+		opts.logCloser = closeLogger
+	}
 	cfg, err := config.LoadOrCreate(opts.ConfigPath)
 	if err != nil {
+		closeOptionsLog(opts)
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 	repo, err := repository.Open(ctx, opts.DBPath)
 	if err != nil {
+		closeOptionsLog(opts)
 		return nil, fmt.Errorf("open repository: %w", err)
 	}
 
@@ -167,7 +185,9 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 		events:                eventbus.New(),
 		queue:                 pipeline.NewQueue(),
 		logger:                opts.Logger,
+		logCloser:             opts.logCloser,
 		backupRoot:            opts.BackupRoot,
+		workRoot:              opts.WorkRoot,
 		httpAddr:              opts.HTTPAddr,
 		ffmpegName:            opts.FFmpegName,
 		ffprobeName:           opts.FFprobeName,
@@ -185,6 +205,7 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 	listener, err := service.prepareHTTPServer()
 	if err != nil {
 		_ = repo.Close()
+		closeOptionsLog(opts)
 		cancelWorker()
 		return nil, fmt.Errorf("start http server: %w", err)
 	}
@@ -194,6 +215,7 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 	if err := RecoverStartup(ctx, repo); err != nil {
 		_ = listener.Close()
 		_ = repo.Close()
+		closeOptionsLog(opts)
 		cancelWorker()
 		return nil, fmt.Errorf("recover startup jobs: %w", err)
 	}
@@ -222,14 +244,17 @@ func withDefaults(opts Options) Options {
 	if opts.DBPath == "" {
 		opts.DBPath = getenv("DB_PATH", getenv("DATA_PATH", defaultDBPath))
 	}
+	if opts.LogPath == "" {
+		opts.LogPath = getenv("LOG_PATH", defaultLogPath)
+	}
 	if opts.BackupRoot == "" {
 		opts.BackupRoot = getenv("BACKUP_ROOT", defaultBackupRoot)
 	}
+	if opts.WorkRoot == "" {
+		opts.WorkRoot = getenv("WORK_ROOT", defaultWorkRoot)
+	}
 	if opts.HTTPAddr == "" {
 		opts.HTTPAddr = getenv("HTTP_ADDR", defaultHTTPAddr)
-	}
-	if opts.Logger == nil {
-		opts.Logger = log.New(os.Stderr, "audiocleaner: ", log.LstdFlags)
 	}
 	if opts.FFmpegName == "" {
 		opts.FFmpegName = getenv("FFMPEG_BIN", "ffmpeg")
@@ -244,6 +269,30 @@ func withDefaults(opts Options) Options {
 		opts.Restart = execSelf
 	}
 	return opts
+}
+
+func newFileLogger(path string, stderr io.Writer) (*log.Logger, func() error, error) {
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	if path == "" {
+		return log.New(stderr, "audiocleaner: ", log.LstdFlags), func() error { return nil }, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, nil, err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, nil, err
+	}
+	writer := io.MultiWriter(stderr, file)
+	return log.New(writer, "audiocleaner: ", log.LstdFlags), file.Close, nil
+}
+
+func closeOptionsLog(opts Options) {
+	if opts.logCloser != nil {
+		_ = opts.logCloser()
+	}
 }
 
 func (s *Service) ScanAll(ctx context.Context) error {
@@ -318,6 +367,7 @@ func (s *Service) startWorkers() {
 			Events:     workerEvents{service: s},
 			Scheduler:  retryScheduler{service: s},
 			BackupRoot: s.backupRoot,
+			WorkRoot:   s.workRoot,
 			FFmpegName: s.ffmpegName,
 		})
 		s.workers.Add(1)
@@ -990,6 +1040,16 @@ func (s *Service) setConfig(cfg config.Config) {
 
 func (s *Service) publishWorkerEvent(event pipeline.WorkerEvent) {
 	s.updateActiveJobPhase(event.File.Path, event.Event.Phase)
+	s.logf(
+		"job event type=%s file_id=%d path=%s status=%s phase=%s message=%s error=%s",
+		event.Event.EventType,
+		event.File.ID,
+		event.File.Path,
+		event.File.Status,
+		event.Event.Phase,
+		event.Event.Message,
+		event.Event.Error,
+	)
 	s.events.Publish(event.Event.EventType, map[string]any{
 		"file_id": event.File.ID,
 		"path":    event.File.Path,
