@@ -139,6 +139,24 @@ func (r *Repository) Files(ctx context.Context) ([]FileRecord, error) {
 	return scanFiles(rows)
 }
 
+func (r *Repository) FilesPage(ctx context.Context, req PageRequest) (PageResult[FileRecord], error) {
+	req = req.Normalize()
+	var total int
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM files`).Scan(&total); err != nil {
+		return PageResult[FileRecord]{}, err
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT `+fileSelectColumns+` FROM files ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`, req.PageSize, req.Offset())
+	if err != nil {
+		return PageResult[FileRecord]{}, err
+	}
+	defer rows.Close()
+	items, err := scanFiles(rows)
+	if err != nil {
+		return PageResult[FileRecord]{}, err
+	}
+	return PageResult[FileRecord]{Items: items, Page: req.Page, PageSize: req.PageSize, Total: total}, nil
+}
+
 func (r *Repository) ProcessingFiles(ctx context.Context) ([]FileRecord, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT `+fileSelectColumns+` FROM files WHERE status = ? ORDER BY updated_at ASC, id ASC`, string(StatusProcessing))
 	if err != nil {
@@ -285,6 +303,24 @@ func (r *Repository) Backups(ctx context.Context) ([]BackupRecord, error) {
 	}
 	defer rows.Close()
 	return scanBackups(rows)
+}
+
+func (r *Repository) BackupsPage(ctx context.Context, req PageRequest) (PageResult[BackupRecord], error) {
+	req = req.Normalize()
+	var total int
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM backups`).Scan(&total); err != nil {
+		return PageResult[BackupRecord]{}, err
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT `+backupSelectColumns+` FROM backups ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, req.PageSize, req.Offset())
+	if err != nil {
+		return PageResult[BackupRecord]{}, err
+	}
+	defer rows.Close()
+	items, err := scanBackups(rows)
+	if err != nil {
+		return PageResult[BackupRecord]{}, err
+	}
+	return PageResult[BackupRecord]{Items: items, Page: req.Page, PageSize: req.PageSize, Total: total}, nil
 }
 
 func (r *Repository) BackupByID(ctx context.Context, id int64) (BackupRecord, error) {

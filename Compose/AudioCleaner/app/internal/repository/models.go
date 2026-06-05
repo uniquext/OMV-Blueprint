@@ -84,3 +84,33 @@ type TranscodeStats struct {
 	Succeeded int
 	Failed    int
 }
+
+type PageRequest struct {
+	Page     int
+	PageSize int
+}
+
+type PageResult[T any] struct {
+	Items    []T `json:"items"`
+	Page     int `json:"page"`
+	PageSize int `json:"page_size"`
+	Total    int `json:"total"`
+}
+
+func (r PageRequest) Normalize() PageRequest {
+	if r.Page < 1 {
+		r.Page = 1
+	}
+	if r.PageSize < 1 {
+		r.PageSize = 20
+	}
+	if r.PageSize > 1000 {
+		r.PageSize = 1000
+	}
+	return r
+}
+
+func (r PageRequest) Offset() int {
+	r = r.Normalize()
+	return (r.Page - 1) * r.PageSize
+}

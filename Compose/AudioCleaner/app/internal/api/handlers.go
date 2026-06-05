@@ -22,6 +22,18 @@ var (
 	ErrConfigWriteInProgress = errors.New("config write already in progress")
 )
 
+type invalidConfigError struct {
+	err error
+}
+
+func (e invalidConfigError) Error() string {
+	return e.err.Error()
+}
+
+func (e invalidConfigError) Unwrap() error {
+	return e.err
+}
+
 const (
 	scanRequestBodyLimit   int64 = 1024
 	configRequestBodyLimit int64 = 1024 * 1024
@@ -47,20 +59,28 @@ type StatusProvider interface {
 }
 
 type JobStore interface {
-	ListJobs(ctx context.Context) (any, error)
+	ListJobs(ctx context.Context, page *repository.PageRequest) (any, error)
 	JobByID(ctx context.Context, id int64) (any, error)
 	RetryJob(ctx context.Context, id int64) error
 	IgnoreJob(ctx context.Context, id int64) error
 }
 
 type BackupStore interface {
-	ListBackups(ctx context.Context) (any, error)
+	ListBackups(ctx context.Context, page *repository.PageRequest) (any, error)
 	RestoreBackup(ctx context.Context, id int64) (any, error)
 	CleanupBackups(ctx context.Context) (any, error)
 }
 
 type LogStore interface {
 	RecentLogs(ctx context.Context) (any, error)
+}
+
+type patchUIConfigRequest struct {
+	Language *string `json:"language"`
+}
+
+type patchBackupConfigRequest struct {
+	RetentionDays *int `json:"retention_days"`
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +101,12 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		writeOK(w, []repository.FileRecord{})
 		return
 	}
-	jobs, err := s.deps.Jobs.ListJobs(r.Context())
+	page, err := parsePageRequest(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	jobs, err := s.deps.Jobs.ListJobs(r.Context(), page)
 	writeDependencyResult(w, jobs, err)
 }
 
@@ -180,6 +205,68 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, cfg)
 }
 
+func (s *Server) handlePatchUIConfig(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+
+	var payload patchUIConfigRequest
+	body := http.MaxBytesReader(w, r.Body, configRequestBodyLimit)
+	if err := json.NewDecoder(body).Decode(&payload); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid config JSON")
+		return
+	}
+	if payload.Language == nil {
+		writeError(w, http.StatusBadRequest, "ui language is required")
+		return
+	}
+	if *payload.Language == "" {
+		writeError(w, http.StatusBadRequest, "ui language must not be empty")
+		return
+	}
+	cfg, err := s.updateConfigBlock(func(cfg *config.Config) error {
+		cfg.UI.Language = *payload.Language
+		return nil
+	})
+	if err != nil {
+		writeDependencyResult(w, nil, err)
+		return
+	}
+	writeOK(w, cfg.UI)
+}
+
+func (s *Server) handlePatchBackupConfig(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+
+	var payload patchBackupConfigRequest
+	body := http.MaxBytesReader(w, r.Body, configRequestBodyLimit)
+	if err := json.NewDecoder(body).Decode(&payload); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid config JSON")
+		return
+	}
+	if payload.RetentionDays == nil {
+		writeError(w, http.StatusBadRequest, "backup retention days is required")
+		return
+	}
+	cfg, err := s.updateConfigBlock(func(cfg *config.Config) error {
+		cfg.Backup.RetentionDays = *payload.RetentionDays
+		return nil
+	})
+	if err != nil {
+		writeDependencyResult(w, nil, err)
+		return
+	}
+	if s.deps.RequestRestart != nil {
+		writeJSON(w, http.StatusOK, Response{
+			Code:    0,
+			Message: "restarting",
+			Data:    map[string]string{"status": "restarting"},
+		})
+		_ = http.NewResponseController(w).Flush()
+		go s.deps.RequestRestart(cfg)
+		return
+	}
+	writeOK(w, cfg.Backup)
+}
+
 func (s *Server) handleRecentLogs(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Logs == nil {
 		writeOK(w, []string{})
@@ -194,7 +281,12 @@ func (s *Server) handleListBackups(w http.ResponseWriter, r *http.Request) {
 		writeOK(w, []repository.BackupRecord{})
 		return
 	}
-	backups, err := s.deps.Backups.ListBackups(r.Context())
+	page, err := parsePageRequest(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	backups, err := s.deps.Backups.ListBackups(r.Context(), page)
 	writeDependencyResult(w, backups, err)
 }
 
@@ -245,6 +337,11 @@ func writeDependencyResult(w http.ResponseWriter, data any, err error) {
 		writeError(w, http.StatusBadRequest, ErrInvalidJobState.Error())
 		return
 	}
+	var invalidConfig invalidConfigError
+	if errors.As(err, &invalidConfig) {
+		writeError(w, http.StatusBadRequest, invalidConfig.Error())
+		return
+	}
 	writeError(w, http.StatusInternalServerError, err.Error())
 }
 
@@ -256,6 +353,33 @@ func parseID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+func parsePageRequest(r *http.Request) (*repository.PageRequest, error) {
+	query := r.URL.Query()
+	hasPage := query.Has("page")
+	hasPageSize := query.Has("page_size")
+	if !hasPage && !hasPageSize {
+		return nil, nil
+	}
+	page := 1
+	pageSize := 20
+	if hasPage {
+		parsed, err := strconv.Atoi(query.Get("page"))
+		if err != nil {
+			return nil, fmt.Errorf("invalid page %q", query.Get("page"))
+		}
+		page = parsed
+	}
+	if hasPageSize {
+		parsed, err := strconv.Atoi(query.Get("page_size"))
+		if err != nil {
+			return nil, fmt.Errorf("invalid page_size %q", query.Get("page_size"))
+		}
+		pageSize = parsed
+	}
+	req := repository.PageRequest{Page: page, PageSize: pageSize}.Normalize()
+	return &req, nil
 }
 
 func scanPayloadAllowed(w http.ResponseWriter, r *http.Request) bool {
@@ -336,4 +460,30 @@ func (s *Server) updateConfig(cfg config.Config) error {
 	}
 	s.deps.Config = cfg
 	return nil
+}
+
+func (s *Server) updateConfigBlock(mutate func(*config.Config) error) (config.Config, error) {
+	if !s.configWriteMu.TryLock() {
+		return config.Config{}, ErrConfigWriteInProgress
+	}
+	defer s.configWriteMu.Unlock()
+
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+
+	cfg := s.deps.Config
+	if err := mutate(&cfg); err != nil {
+		return config.Config{}, err
+	}
+	cfg.Normalize()
+	if err := cfg.Validate(); err != nil {
+		return config.Config{}, invalidConfigError{err: err}
+	}
+	if s.deps.ConfigPath != "" {
+		if err := config.AtomicWriteJSON(s.deps.ConfigPath, cfg); err != nil {
+			return config.Config{}, err
+		}
+	}
+	s.deps.Config = cfg
+	return cfg, nil
 }

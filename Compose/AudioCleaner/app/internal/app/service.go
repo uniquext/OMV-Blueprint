@@ -225,11 +225,15 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 	if err := service.cleanupOrphanTempOutputs(ctx); err != nil {
 		service.logf("startup temp cleanup failed: %v", err)
 	}
-	if err := service.ScanAll(ctx); err != nil {
-		service.logf("startup scan failed: %v", err)
+	if cfg.Scan.StartupScanEnabled {
+		if err := service.ScanAll(ctx); err != nil {
+			service.logf("startup scan failed: %v", err)
+		}
 	}
-	if err := service.startWatcher(); err != nil {
-		service.logf("watcher start failed: %v", err)
+	if cfg.Scan.WatchdogEnabled {
+		if err := service.startWatcher(); err != nil {
+			service.logf("watcher start failed: %v", err)
+		}
 	}
 	service.startBackupCleanup()
 	service.startWorkers()
@@ -599,7 +603,10 @@ func transcodeSuccessRate(stats repository.TranscodeStats) map[string]any {
 	}
 }
 
-func (s *Service) ListJobs(ctx context.Context) (any, error) {
+func (s *Service) ListJobs(ctx context.Context, page *repository.PageRequest) (any, error) {
+	if page != nil {
+		return s.db.FilesPage(ctx, *page)
+	}
 	return s.db.Files(ctx)
 }
 
@@ -694,7 +701,10 @@ func (s *Service) updateCurrentFingerprint(ctx context.Context, file *repository
 	return nil
 }
 
-func (s *Service) ListBackups(ctx context.Context) (any, error) {
+func (s *Service) ListBackups(ctx context.Context, page *repository.PageRequest) (any, error) {
+	if page != nil {
+		return s.db.BackupsPage(ctx, *page)
+	}
 	return s.db.Backups(ctx)
 }
 

@@ -14,6 +14,8 @@ type Config struct {
 	Pipeline      PipelineConfig      `json:"pipeline"`
 	Backup        BackupConfig        `json:"backup"`
 	Validation    ValidationConfig    `json:"validation"`
+	UI            UIConfig            `json:"ui"`
+	Scan          ScanConfig          `json:"scan"`
 	Notifications NotificationsConfig `json:"notifications"`
 }
 
@@ -46,6 +48,15 @@ type ValidationConfig struct {
 	DurationToleranceSec    int     `json:"duration_tolerance_seconds"`
 }
 
+type UIConfig struct {
+	Language string `json:"language"`
+}
+
+type ScanConfig struct {
+	StartupScanEnabled bool `json:"startup_scan_enabled"`
+	WatchdogEnabled    bool `json:"watchdog_enabled"`
+}
+
 type NotificationsConfig struct {
 	Enabled bool     `json:"enabled"`
 	Targets []string `json:"targets"`
@@ -76,6 +87,13 @@ func Default() Config {
 			MaxSizeRatio:            1.1,
 			MaxSizeIncreaseMegabyte: 500,
 			DurationToleranceSec:    2,
+		},
+		UI: UIConfig{
+			Language: "zh-CN",
+		},
+		Scan: ScanConfig{
+			StartupScanEnabled: true,
+			WatchdogEnabled:    true,
 		},
 		Notifications: NotificationsConfig{
 			Enabled: false,
@@ -123,12 +141,21 @@ func (c Config) Validate() error {
 	if c.Validation.DurationToleranceSec < 0 {
 		return errors.New("validation duration tolerance seconds must not be negative")
 	}
+	switch c.UI.Language {
+	case "zh-CN", "en-US":
+	default:
+		return fmt.Errorf("ui language %q is not supported", c.UI.Language)
+	}
 	return nil
 }
 
 func (c *Config) Normalize() {
+	defaults := Default()
 	if len(c.Media.Roots) == 0 {
-		c.Media.Roots = Default().Media.Roots
+		c.Media.Roots = defaults.Media.Roots
+	}
+	if c.UI.Language == "" {
+		c.UI.Language = defaults.UI.Language
 	}
 }
 
