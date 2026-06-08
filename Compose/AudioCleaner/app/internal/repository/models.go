@@ -36,48 +36,48 @@ const (
 )
 
 type FileRecord struct {
-	ID                  int64
-	Path                string
-	Status              Status
-	QualificationSource QualificationSource
-	Phase               Phase
-	UnqualifiedReason   UnqualifiedReason
-	Fingerprint         string
-	Size                int64
-	MTimeNS             int64
-	AudioSignature      string
-	VideoSignature      string
-	Attempts            int
-	LastError           string
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	ID                  int64               `json:"id"`
+	Path                string              `json:"path"`
+	Status              Status              `json:"status"`
+	QualificationSource QualificationSource `json:"qualification_source"`
+	Phase               Phase               `json:"phase"`
+	UnqualifiedReason   UnqualifiedReason   `json:"unqualified_reason"`
+	Fingerprint         string              `json:"fingerprint"`
+	Size                int64               `json:"size"`
+	MTimeNS             int64               `json:"mtime_ns"`
+	AudioSignature      string              `json:"audio_signature"`
+	VideoSignature      string              `json:"video_signature"`
+	Attempts            int                 `json:"attempts"`
+	LastError           string              `json:"last_error"`
+	CreatedAt           time.Time           `json:"created_at"`
+	UpdatedAt           time.Time           `json:"updated_at"`
 }
 
 type JobEvent struct {
-	ID         int64
-	FileID     int64
-	EventType  string
-	Phase      Phase
-	Attempt    int
-	Command    string
-	Message    string
-	Error      string
-	StartedAt  time.Time
-	FinishedAt time.Time
+	ID         int64     `json:"id"`
+	FileID     int64     `json:"file_id"`
+	EventType  string    `json:"event_type"`
+	Phase      Phase     `json:"phase"`
+	Attempt    int       `json:"attempt"`
+	Command    string    `json:"command"`
+	Message    string    `json:"message"`
+	Error      string    `json:"error"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at"`
 }
 
 type BackupRecord struct {
-	ID                int64
-	FileID            int64
-	OriginalPath      string
-	BackupPath        string
-	OriginalSize      int64
-	OriginalMTimeNS   int64
-	CreatedAt         time.Time
-	ExpiresAt         time.Time
-	RestoredAt        time.Time
-	RestoreSafetyPath string
-	Missing           bool
+	ID                int64     `json:"id"`
+	FileID            int64     `json:"file_id"`
+	OriginalPath      string    `json:"original_path"`
+	BackupPath        string    `json:"backup_path"`
+	OriginalSize      int64     `json:"original_size"`
+	OriginalMTimeNS   int64     `json:"original_mtime_ns"`
+	CreatedAt         time.Time `json:"created_at"`
+	ExpiresAt         time.Time `json:"expires_at"`
+	RestoredAt        time.Time `json:"restored_at"`
+	RestoreSafetyPath string    `json:"restore_safety_path"`
+	Missing           bool      `json:"missing"`
 }
 
 type TranscodeStats struct {

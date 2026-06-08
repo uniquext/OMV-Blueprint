@@ -23,6 +23,30 @@ docker exec audiocleaner ffprobe -version
 
 正常 compose 运行时使用 `${RESOURCE}/Media:/media`。本地验证时应调整 `../global.env` 中的 `RESOURCE`，使 `${RESOURCE}/Media` 指向宿主机媒体目录；该目录在容器内始终挂载为 `/media`。
 
+## WebUI
+
+AudioCleaner V1.1 提供 Vue/Vite WebUI，由同一个 Go 服务提供静态文件。默认入口：
+
+```bash
+open http://localhost:9830/
+```
+
+Hash 路由：
+
+- `/#/`：概览；Dashboard 不包含 Scan All。
+- `/#/jobs`：任务、扫描全部、单条重试、单条忽略。
+- `/#/backups`：备份恢复、清理过期备份。
+- `/#/settings`：配置只读展示，允许修改语言和备份保留天数。
+- `/#/logs`：最近日志和 SSE 状态。
+
+`ui.language` 支持 `zh-CN` 和 `en-US`，通过 WebUI 保存到 `/app/config/config.json` 后热生效。
+
+`backup.retention_days` 可通过 WebUI 保存，但当前版本保存后会触发服务重启。
+
+`media.roots` 在 V1.1 WebUI 只读。
+
+Jobs 和 Backups 的路径搜索是前端本地搜索，可能临时请求 `page_size=1000`。
+
 ## 集成验证
 
 在当前目录运行端到端集成测试：

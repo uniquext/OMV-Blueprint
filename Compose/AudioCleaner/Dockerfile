@@ -1,3 +1,14 @@
+FROM node:22-bookworm-slim AS frontend-builder
+
+WORKDIR /src/web
+
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+
+COPY web/index.html web/tsconfig.json web/vite.config.ts ./
+COPY web/src/ ./src/
+RUN npm run build
+
 FROM golang:1.22-bookworm AS builder
 
 WORKDIR /src
@@ -14,12 +25,13 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends ffmpeg ca-certificates tzdata \
-	&& mkdir -p /app/work /app/logs \
+	&& mkdir -p /app/work /app/logs /app/web/dist \
 	&& chmod 1777 /app/work /app/logs \
 	&& ffmpeg -version >/dev/null \
 	&& ffprobe -version >/dev/null \
 	&& rm -rf /var/lib/apt/lists/*
 
+COPY --from=frontend-builder /src/web/dist /app/web/dist
 COPY --from=builder /out/audiocleaner /usr/local/bin/audiocleaner
 
 EXPOSE 9830

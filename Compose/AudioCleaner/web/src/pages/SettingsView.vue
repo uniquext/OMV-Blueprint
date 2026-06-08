@@ -1,0 +1,234 @@
+<script setup lang="ts">
+import { computed, onMounted, ref } from 'vue'
+import { setLanguage, supportedLanguages, t } from '../i18n'
+import { api } from '../lib/api'
+import type { AudioCleanerConfig, SupportedLanguage } from '../lib/types'
+
+const config = ref<AudioCleanerConfig | null>(null)
+const loading = ref(false)
+const error = ref('')
+const languageDraft = ref<SupportedLanguage>('zh-CN')
+const retentionDraft = ref(0)
+const savingLanguage = ref(false)
+const savingRetention = ref(false)
+const languageMessage = ref('')
+const retentionMessage = ref('')
+
+const notificationsState = computed(() => {
+  if (!config.value?.notifications.enabled) {
+    return `${t('settingsReserved')}, ${t('settingsInactive')}`
+  }
+  return `${t('settingsReserved')}, ${t('settingsActive')}`
+})
+
+function joinValue(values: unknown[] | undefined): string {
+  return values && values.length > 0 ? values.join(', ') : t('settingsEmptyValue')
+}
+
+function booleanValue(value: boolean): string {
+  return value ? t('settingsEnabled') : t('settingsDisabled')
+}
+
+async function loadConfig(): Promise<void> {
+  loading.value = true
+  error.value = ''
+  try {
+    const nextConfig = await api.config()
+    config.value = nextConfig
+    languageDraft.value = nextConfig.ui.language
+    retentionDraft.value = nextConfig.backup.retention_days
+  } catch (caught) {
+    error.value = caught instanceof Error ? caught.message : String(caught)
+  } finally {
+    loading.value = false
+  }
+}
+
+async function saveLanguage(): Promise<void> {
+  savingLanguage.value = true
+  languageMessage.value = ''
+  error.value = ''
+  try {
+    const nextUI = await api.patchUI(languageDraft.value)
+    if (config.value) {
+      config.value.ui = nextUI
+    }
+    setLanguage(languageDraft.value)
+    languageMessage.value = t('settingsLanguageSaved')
+  } catch (caught) {
+    error.value = caught instanceof Error ? caught.message : String(caught)
+  } finally {
+    savingLanguage.value = false
+  }
+}
+
+async function saveRetention(): Promise<void> {
+  savingRetention.value = true
+  retentionMessage.value = ''
+  error.value = ''
+  try {
+    const nextBackup = await api.patchBackup(retentionDraft.value)
+    if (config.value) {
+      if ('retention_days' in nextBackup) {
+        config.value.backup = nextBackup
+      } else {
+        config.value.backup.retention_days = retentionDraft.value
+      }
+    }
+    retentionMessage.value =
+      'status' in nextBackup ? `${t('settingsBackupSavedRestarting')} (${nextBackup.status})` : t('settingsBackupSaved')
+  } catch (caught) {
+    error.value = caught instanceof Error ? caught.message : String(caught)
+  } finally {
+    savingRetention.value = false
+  }
+}
+
+onMounted(loadConfig)
+</script>
+
+<template>
+  <div>
+    <div class="page-header">
+      <h1 class="page-title">{{ t('pageSettingsTitle') }}</h1>
+      <div class="actions">
+        <button class="button" type="button" :disabled="loading" @click="loadConfig">{{ t('actionRefresh') }}</button>
+      </div>
+    </div>
+
+    <div v-if="error" class="alert error">
+      <strong>{{ t('settingsErrorLabel') }}</strong>
+      <span>{{ error }}</span>
+    </div>
+
+    <div v-if="loading" class="panel">
+      <div class="panel-body muted">{{ t('settingsLoading') }}</div>
+    </div>
+
+    <div v-if="config" class="settings-grid">
+      <section class="panel">
+        <div class="panel-body">
+          <h2>{{ t('settingsBlockMedia') }}</h2>
+          <p class="muted">{{ t('settingsMediaDescription') }}</p>
+          <dl class="settings-list">
+            <dt>{{ t('settingsMediaRoots') }}</dt>
+            <dd>{{ joinValue(config.media.roots) }}</dd>
+            <dt>{{ t('settingsMediaExtensions') }}</dt>
+            <dd>{{ joinValue(config.media.extensions) }}</dd>
+            <dt>{{ t('settingsMediaExcludeDirs') }}</dt>
+            <dd>{{ joinValue(config.media.exclude_dirs) }}</dd>
+            <dt>{{ t('settingsMediaExcludePatterns') }}</dt>
+            <dd>{{ joinValue(config.media.exclude_patterns) }}</dd>
+          </dl>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-body">
+          <h2>{{ t('settingsBlockAudio') }}</h2>
+          <p class="muted">{{ t('settingsAudioDescription') }}</p>
+          <dl class="settings-list">
+            <dt>{{ t('settingsIncompatibleCodecs') }}</dt>
+            <dd>{{ joinValue(config.audio.incompatible_codecs) }}</dd>
+          </dl>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-body">
+          <h2>{{ t('settingsBlockScan') }}</h2>
+          <p class="muted">{{ t('settingsScanDescription') }}</p>
+          <dl class="settings-list">
+            <dt>{{ t('settingsStartupScan') }}</dt>
+            <dd>{{ booleanValue(config.scan.startup_scan_enabled) }}</dd>
+            <dt>{{ t('settingsWatchdog') }}</dt>
+            <dd>{{ booleanValue(config.scan.watchdog_enabled) }}</dd>
+          </dl>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-body">
+          <h2>{{ t('settingsBlockBackup') }}</h2>
+          <p class="muted">{{ t('settingsBackupDescription') }}</p>
+          <form class="settings-form" @submit.prevent="saveRetention">
+            <label class="field">
+              <span>{{ t('settingsRetentionDays') }}</span>
+              <input name="retention_days" type="number" min="0" v-model.number="retentionDraft" />
+            </label>
+            <div class="row-actions">
+              <button class="button primary" type="submit" :disabled="savingRetention">{{ t('settingsSaveBackup') }}</button>
+              <span v-if="retentionMessage" class="muted">{{ retentionMessage }}</span>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-body">
+          <h2>{{ t('settingsBlockPipeline') }}</h2>
+          <p class="muted">{{ t('settingsPipelineDescription') }}</p>
+          <dl class="settings-list">
+            <dt>{{ t('settingsWorkers') }}</dt>
+            <dd>{{ config.pipeline.workers }}</dd>
+            <dt>{{ t('settingsMaxRetries') }}</dt>
+            <dd>{{ config.pipeline.max_retries }}</dd>
+            <dt>{{ t('settingsRetryDelay') }}</dt>
+            <dd>{{ config.pipeline.retry_delay_seconds }}</dd>
+            <dt>{{ t('settingsStatQuiet') }}</dt>
+            <dd>{{ config.pipeline.stat_quiet_seconds }}</dd>
+            <dt>{{ t('settingsJobTimeout') }}</dt>
+            <dd>{{ config.pipeline.job_timeout_minutes }}</dd>
+          </dl>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-body">
+          <h2>{{ t('settingsBlockValidation') }}</h2>
+          <p class="muted">{{ t('settingsValidationDescription') }}</p>
+          <dl class="settings-list">
+            <dt>{{ t('settingsMaxSizeRatio') }}</dt>
+            <dd>{{ config.validation.max_size_ratio }}</dd>
+            <dt>{{ t('settingsMaxSizeIncrease') }}</dt>
+            <dd>{{ config.validation.max_size_increase_mb }}</dd>
+            <dt>{{ t('settingsDurationTolerance') }}</dt>
+            <dd>{{ config.validation.duration_tolerance_seconds }}</dd>
+          </dl>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-body">
+          <h2>{{ t('settingsBlockUI') }}</h2>
+          <p class="muted">{{ t('settingsUIDescription') }}</p>
+          <form class="settings-form" @submit.prevent="saveLanguage">
+            <label class="field">
+              <span>{{ t('settingsLanguage') }}</span>
+              <select name="language" v-model="languageDraft">
+                <option v-for="language in supportedLanguages" :key="language" :value="language">{{ language }}</option>
+              </select>
+            </label>
+            <div class="row-actions">
+              <button class="button primary" type="submit" :disabled="savingLanguage">{{ t('settingsSaveUI') }}</button>
+              <span v-if="languageMessage" class="muted">{{ languageMessage }}</span>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-body">
+          <h2>{{ t('settingsBlockNotifications') }}</h2>
+          <p class="muted">{{ t('settingsNotificationsDescription') }}</p>
+          <dl class="settings-list">
+            <dt>{{ t('settingsState') }}</dt>
+            <dd>{{ notificationsState }}</dd>
+            <dt>{{ t('settingsTargets') }}</dt>
+            <dd>{{ joinValue(config.notifications.targets) }}</dd>
+          </dl>
+        </div>
+      </section>
+    </div>
+  </div>
+</template>

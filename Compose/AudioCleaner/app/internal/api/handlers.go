@@ -42,6 +42,7 @@ const (
 type Deps struct {
 	Config     config.Config
 	ConfigPath string
+	WebDir     string
 	Events     *eventbus.Bus
 	EventBus   *eventbus.Bus
 

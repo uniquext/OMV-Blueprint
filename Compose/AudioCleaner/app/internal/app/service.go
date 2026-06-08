@@ -34,6 +34,7 @@ const (
 	defaultHTTPAddr   = ":9830"
 	defaultLogPath    = "/app/logs/audiocleaner.log"
 	defaultWorkRoot   = "/app/work"
+	defaultWebDir     = "/app/web/dist"
 
 	defaultBackupCleanupInterval  = time.Hour
 	startupCriticalRecoveryPrefix = "startup recovered interrupted critical phase "
@@ -54,6 +55,7 @@ type Options struct {
 	LogPath    string
 	BackupRoot string
 	WorkRoot   string
+	WebDir     string
 	HTTPAddr   string
 	Logger     *log.Logger
 
@@ -80,6 +82,7 @@ type Service struct {
 
 	backupRoot  string
 	workRoot    string
+	webDir      string
 	httpAddr    string
 	ffmpegName  string
 	ffprobeName string
@@ -188,6 +191,7 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 		logCloser:             opts.logCloser,
 		backupRoot:            opts.BackupRoot,
 		workRoot:              opts.WorkRoot,
+		webDir:                opts.WebDir,
 		httpAddr:              opts.HTTPAddr,
 		ffmpegName:            opts.FFmpegName,
 		ffprobeName:           opts.FFprobeName,
@@ -256,6 +260,9 @@ func withDefaults(opts Options) Options {
 	}
 	if opts.WorkRoot == "" {
 		opts.WorkRoot = getenv("WORK_ROOT", defaultWorkRoot)
+	}
+	if opts.WebDir == "" {
+		opts.WebDir = getenv("WEB_DIR", defaultWebDir)
 	}
 	if opts.HTTPAddr == "" {
 		opts.HTTPAddr = getenv("HTTP_ADDR", defaultHTTPAddr)
@@ -433,6 +440,7 @@ func (s *Service) prepareHTTPServer() (net.Listener, error) {
 	server := api.NewServer(api.Deps{
 		Config:         s.cfg,
 		ConfigPath:     s.configPath,
+		WebDir:         s.webDir,
 		Events:         s.events,
 		ScanAll:        s.ScanAll,
 		RequestRestart: s.RequestRestart,

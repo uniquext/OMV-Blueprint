@@ -34,6 +34,7 @@ func (s *Server) routes() http.Handler {
 	})
 
 	r.Get("/", s.handleRoot)
+	r.Handle("/assets/*", s.handleAssets())
 	r.Get("/api/health", s.handleHealth)
 	r.Get("/api/status", s.handleStatus)
 	r.Get("/api/jobs", s.handleListJobs)

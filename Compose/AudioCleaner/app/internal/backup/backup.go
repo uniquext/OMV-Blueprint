@@ -25,7 +25,7 @@ type RestoreRequest struct {
 }
 
 type RestoreResult struct {
-	SafetyPath string
+	SafetyPath string `json:"safety_path"`
 }
 
 var (
