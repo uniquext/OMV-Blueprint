@@ -18,6 +18,7 @@ import {
   jobStatusKey,
   type JobFilter
 } from '../lib/jobs'
+import { jobStatusTone, semanticBadgeClass } from '../lib/semantic'
 import type { JobRecord } from '../lib/types'
 
 const jobs = ref<JobRecord[]>([])
@@ -162,6 +163,10 @@ function jobStatusDisplay(job: JobRecord): string {
   return jobStatusLabel(jobStatusKey(job) ?? jobStatus(job))
 }
 
+function jobStatusBadgeClass(job: JobRecord): string {
+  return semanticBadgeClass(jobStatusTone(jobStatusKey(job) ?? jobStatus(job)))
+}
+
 function jobReasonLabel(job: JobRecord): string {
   const reason = jobReason(job)
   if (!reason) {
@@ -249,13 +254,15 @@ onMounted(loadJobs)
             <td colspan="7" class="muted">{{ t('jobsNoData') }}</td>
           </tr>
           <tr v-for="job in jobs" :key="jobID(job)">
-            <td class="path-cell">{{ jobPath(job) }}</td>
-            <td>{{ jobStatusDisplay(job) }}</td>
-            <td>{{ jobReasonLabel(job) }}</td>
-            <td>{{ jobSourceLabel(job) }}</td>
-            <td>{{ job.attempts }}</td>
-            <td>{{ job.updated_at || t('jobsEmptyValue') }}</td>
-            <td>
+            <td class="path-cell" :title="jobPath(job)">{{ jobPath(job) }}</td>
+            <td class="status-cell">
+              <span :class="jobStatusBadgeClass(job)">{{ jobStatusDisplay(job) }}</span>
+            </td>
+            <td class="reason-cell">{{ jobReasonLabel(job) }}</td>
+            <td class="source-cell">{{ jobSourceLabel(job) }}</td>
+            <td class="attempts-cell">{{ job.attempts }}</td>
+            <td class="date-cell">{{ job.updated_at || t('jobsEmptyValue') }}</td>
+            <td class="actions-cell">
               <div class="row-actions">
                 <button class="button" type="button" :disabled="loading" @click="retryJob(jobID(job))">
                   {{ t('jobsRetry') }}

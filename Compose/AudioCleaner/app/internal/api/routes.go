@@ -46,6 +46,7 @@ func (s *Server) routes() http.Handler {
 	r.Put("/api/config", s.handlePutConfig)
 	r.Patch("/api/config/ui", s.handlePatchUIConfig)
 	r.Patch("/api/config/backup", s.handlePatchBackupConfig)
+	r.Get("/api/logs", s.handleRuntimeLogs)
 	r.Get("/api/logs/recent", s.handleRecentLogs)
 	r.Get("/api/backups", s.handleListBackups)
 	r.Post("/api/backups/{id}/restore", s.handleRestoreBackup)

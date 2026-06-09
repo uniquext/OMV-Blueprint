@@ -1,9 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { eventStreamState } from '../composables/useEventStream'
-import { eventStreamStatusLabel, jobEventTypeLabel, jobPhaseLabel, t } from '../i18n'
+import { eventStreamStatusLabel, t } from '../i18n'
 import { api } from '../lib/api'
-import type { JobEventRecord } from '../lib/types'
 
 const emptyValue = computed(() => t('logsNoValue'))
 const lastEventAt = computed(() => eventStreamState.lastEventAt ?? emptyValue.value)
@@ -11,7 +10,10 @@ const lastSnapshotID = computed(() => eventStreamState.lastSnapshotID?.toString(
 const refreshModeLabel = computed(() =>
   eventStreamState.refreshMode === 'partial' ? t('refreshModePartial') : t('refreshModeFull')
 )
-const logs = ref<JobEventRecord[]>([])
+const logContent = ref('')
+const logLineCount = ref(100)
+const loadedLogLines = ref(0)
+const hasRuntimeLogs = computed(() => logContent.value.trim().length > 0)
 const loading = ref(false)
 const error = ref('')
 
@@ -19,10 +21,13 @@ async function loadLogs(): Promise<void> {
   loading.value = true
   error.value = ''
   try {
-    logs.value = await api.logs()
+    const result = await api.runtimeLogs(logLineCount.value)
+    logContent.value = result.content || ''
+    loadedLogLines.value = result.lines || 0
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : String(caught)
-    logs.value = []
+    logContent.value = ''
+    loadedLogLines.value = 0
   } finally {
     loading.value = false
   }
@@ -72,35 +77,24 @@ onMounted(loadLogs)
     </div>
 
     <div class="panel logs-panel">
-      <div class="panel-body">
-        <h2>{{ t('logsRecentTitle') }}</h2>
+      <div class="logs-toolbar">
+        <h2>{{ t('logsRuntimeTitle') }} <span class="muted">({{ loadedLogLines }} {{ t('logsLines') }})</span></h2>
+        <div class="logs-toolbar__actions">
+          <label class="field field--inline">
+            <span>{{ t('logsLineCount') }}</span>
+            <select v-model.number="logLineCount" :disabled="loading" @change="loadLogs">
+              <option :value="50">50 {{ t('logsLines') }}</option>
+              <option :value="100">100 {{ t('logsLines') }}</option>
+              <option :value="200">200 {{ t('logsLines') }}</option>
+              <option :value="500">500 {{ t('logsLines') }}</option>
+            </select>
+          </label>
+          <button class="button" type="button" :disabled="loading" @click="loadLogs">{{ t('actionRefresh') }}</button>
+        </div>
       </div>
       <div v-if="loading" class="panel-body muted">{{ t('logsLoading') }}</div>
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th>{{ t('logsColumnTime') }}</th>
-            <th>{{ t('logsColumnType') }}</th>
-            <th>{{ t('logsColumnPhase') }}</th>
-            <th>{{ t('logsColumnCommand') }}</th>
-            <th>{{ t('logsColumnMessage') }}</th>
-            <th>{{ t('logsColumnError') }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-if="!loading && logs.length === 0">
-            <td colspan="6" class="muted">{{ t('logsNoRecent') }}</td>
-          </tr>
-          <tr v-for="log in logs" :key="log.id">
-            <td>{{ log.finished_at || log.started_at || emptyValue }}</td>
-            <td>{{ log.event_type ? jobEventTypeLabel(log.event_type) : emptyValue }}</td>
-            <td>{{ log.phase ? jobPhaseLabel(log.phase) : emptyValue }}</td>
-            <td class="path-cell">{{ log.command || emptyValue }}</td>
-            <td class="path-cell">{{ log.message || emptyValue }}</td>
-            <td class="path-cell">{{ log.error || emptyValue }}</td>
-          </tr>
-        </tbody>
-      </table>
+      <pre v-if="hasRuntimeLogs" class="runtime-log-viewer">{{ logContent }}</pre>
+      <div v-else-if="!loading" class="runtime-log-viewer runtime-log-viewer--empty">{{ t('logsNoRecent') }}</div>
     </div>
   </div>
 </template>

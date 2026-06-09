@@ -16,6 +16,7 @@ import {
   loadAllBackupPages,
   type BackupFilter
 } from '../lib/backups'
+import { backupStateTone, semanticBadgeClass } from '../lib/semantic'
 import type { BackupRecord } from '../lib/types'
 
 const backups = ref<BackupRecord[]>([])
@@ -163,6 +164,10 @@ function backupStateDisplay(record: BackupRecord): string {
   return backupStateLabel(backupState(record))
 }
 
+function backupStateBadgeClass(record: BackupRecord): string {
+  return semanticBadgeClass(backupStateTone(backupState(record)))
+}
+
 function emptyValue(value: string): string {
   return value || t('backupsEmptyValue')
 }
@@ -243,14 +248,16 @@ onMounted(loadBackups)
             <td colspan="8" class="muted">{{ t('backupsNoData') }}</td>
           </tr>
           <tr v-for="backup in backups" :key="backupID(backup)">
-            <td class="path-cell">{{ backupPath(backup) }}</td>
-            <td class="path-cell">{{ backup.backup_path }}</td>
-            <td>{{ backupStateDisplay(backup) }}</td>
-            <td>{{ emptyValue(backup.created_at) }}</td>
-            <td>{{ emptyValue(backupExpiresAt(backup)) }}</td>
-            <td>{{ emptyValue(backupRestoredAt(backup)) }}</td>
-            <td>{{ backupMissing(backup) ? t('backupsYes') : t('backupsNo') }}</td>
-            <td>
+            <td class="path-cell" :title="backupPath(backup)">{{ backupPath(backup) }}</td>
+            <td class="path-cell" :title="backup.backup_path">{{ backup.backup_path }}</td>
+            <td class="status-cell">
+              <span :class="backupStateBadgeClass(backup)">{{ backupStateDisplay(backup) }}</span>
+            </td>
+            <td class="date-cell">{{ emptyValue(backup.created_at) }}</td>
+            <td class="date-cell">{{ emptyValue(backupExpiresAt(backup)) }}</td>
+            <td class="date-cell">{{ emptyValue(backupRestoredAt(backup)) }}</td>
+            <td class="missing-cell">{{ backupMissing(backup) ? t('backupsYes') : t('backupsNo') }}</td>
+            <td class="actions-cell">
               <div class="row-actions">
                 <button class="button" type="button" :disabled="busy" @click="askRestore(backup)">
                   {{ t('backupsRestore') }}

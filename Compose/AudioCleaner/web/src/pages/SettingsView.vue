@@ -105,8 +105,8 @@ onMounted(loadConfig)
       <div class="panel-body muted">{{ t('settingsLoading') }}</div>
     </div>
 
-    <div v-if="config" class="settings-grid">
-      <section class="panel">
+    <div v-if="config" class="settings-grid settings-grid--compact settings-grid--masonry">
+      <section class="panel settings-panel">
         <div class="panel-body">
           <h2>{{ t('settingsBlockMedia') }}</h2>
           <p class="muted">{{ t('settingsMediaDescription') }}</p>
@@ -123,7 +123,7 @@ onMounted(loadConfig)
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel settings-panel">
         <div class="panel-body">
           <h2>{{ t('settingsBlockAudio') }}</h2>
           <p class="muted">{{ t('settingsAudioDescription') }}</p>
@@ -134,7 +134,7 @@ onMounted(loadConfig)
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel settings-panel">
         <div class="panel-body">
           <h2>{{ t('settingsBlockScan') }}</h2>
           <p class="muted">{{ t('settingsScanDescription') }}</p>
@@ -147,7 +147,7 @@ onMounted(loadConfig)
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel settings-panel">
         <div class="panel-body">
           <h2>{{ t('settingsBlockBackup') }}</h2>
           <p class="muted">{{ t('settingsBackupDescription') }}</p>
@@ -164,7 +164,7 @@ onMounted(loadConfig)
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel settings-panel">
         <div class="panel-body">
           <h2>{{ t('settingsBlockPipeline') }}</h2>
           <p class="muted">{{ t('settingsPipelineDescription') }}</p>
@@ -183,7 +183,7 @@ onMounted(loadConfig)
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel settings-panel">
         <div class="panel-body">
           <h2>{{ t('settingsBlockValidation') }}</h2>
           <p class="muted">{{ t('settingsValidationDescription') }}</p>
@@ -198,7 +198,7 @@ onMounted(loadConfig)
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel settings-panel">
         <div class="panel-body">
           <h2>{{ t('settingsBlockUI') }}</h2>
           <p class="muted">{{ t('settingsUIDescription') }}</p>
@@ -217,7 +217,7 @@ onMounted(loadConfig)
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel settings-panel">
         <div class="panel-body">
           <h2>{{ t('settingsBlockNotifications') }}</h2>
           <p class="muted">{{ t('settingsNotificationsDescription') }}</p>

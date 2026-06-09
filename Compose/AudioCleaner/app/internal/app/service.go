@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"errors"
@@ -79,6 +80,7 @@ type Service struct {
 	server     *http.Server
 	logger     *log.Logger
 	logCloser  func() error
+	logPath    string
 
 	backupRoot  string
 	workRoot    string
@@ -189,6 +191,7 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 		queue:                 pipeline.NewQueue(),
 		logger:                opts.Logger,
 		logCloser:             opts.logCloser,
+		logPath:               opts.LogPath,
 		backupRoot:            opts.BackupRoot,
 		workRoot:              opts.WorkRoot,
 		webDir:                opts.WebDir,
@@ -448,6 +451,7 @@ func (s *Service) prepareHTTPServer() (net.Listener, error) {
 		Jobs:           s,
 		Backups:        s,
 		Logs:           s,
+		RuntimeLogs:    s,
 	})
 	s.server = &http.Server{
 		Addr:              s.httpAddr,
@@ -889,6 +893,14 @@ func (s *Service) RecentLogs(ctx context.Context) (any, error) {
 	return s.db.RecentJobEvents(ctx, 50)
 }
 
+func (s *Service) RuntimeLogs(ctx context.Context, lines int) (any, error) {
+	content, count, err := tailLogFile(ctx, s.logPath, lines)
+	if err != nil {
+		return nil, err
+	}
+	return api.RuntimeLogResult{Content: content, Lines: count}, nil
+}
+
 func (s *Service) enqueue(path string) bool {
 	return s.enqueueWithSource(path, pipeline.JobSourceDefault)
 }
@@ -1201,6 +1213,42 @@ func (p ffprobeProber) Probe(ctx context.Context, path string) (media.ProbeData,
 
 func execSelf() error {
 	return syscall.Exec(os.Args[0], os.Args, os.Environ())
+}
+
+func tailLogFile(ctx context.Context, path string, lineLimit int) (string, int, error) {
+	if lineLimit < 1 {
+		lineLimit = 100
+	}
+	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", 0, nil
+	}
+	if err != nil {
+		return "", 0, err
+	}
+	defer file.Close()
+
+	lines := make([]string, 0, lineLimit)
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return "", 0, err
+		}
+		line := scanner.Text()
+		if len(lines) == lineLimit {
+			copy(lines, lines[1:])
+			lines[lineLimit-1] = line
+			continue
+		}
+		lines = append(lines, line)
+	}
+	if err := scanner.Err(); err != nil {
+		return "", 0, err
+	}
+	if len(lines) == 0 {
+		return "", 0, nil
+	}
+	return strings.Join(lines, "\n") + "\n", len(lines), nil
 }
 
 func getenv(key string, fallback string) string {

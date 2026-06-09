@@ -74,54 +74,38 @@ onMounted(loadDashboard)
       <div class="panel-body muted">{{ t('dashboardLoading') }}</div>
     </div>
 
-    <div v-if="status" class="dashboard-grid">
-      <section class="panel">
-        <div class="panel-body">
-          <h2>{{ t('dashboardServiceStatus') }}</h2>
-          <p class="metric-value">{{ serviceStatusLabel(status.status) }}</p>
-        </div>
+    <div v-if="status" class="dashboard-overview">
+      <section class="dashboard-metric dashboard-metric--service panel">
+        <span class="dashboard-metric__label">{{ t('dashboardServiceStatus') }}</span>
+        <strong class="dashboard-metric__value">{{ serviceStatusLabel(status.status) }}</strong>
       </section>
-      <section class="panel">
-        <div class="panel-body">
-          <h2>{{ t('dashboardQualified') }}</h2>
-          <p class="metric-value">{{ qualifiedCount }}</p>
-        </div>
+      <section class="dashboard-metric dashboard-metric--qualified panel">
+        <span class="dashboard-metric__label">{{ t('dashboardQualified') }}</span>
+        <strong class="dashboard-metric__value">{{ qualifiedCount }}</strong>
       </section>
-      <section class="panel">
-        <div class="panel-body">
-          <h2>{{ t('dashboardUnqualified') }}</h2>
-          <p class="metric-value">{{ unqualifiedCount }}</p>
-        </div>
+      <section class="dashboard-metric dashboard-metric--unqualified panel">
+        <span class="dashboard-metric__label">{{ t('dashboardUnqualified') }}</span>
+        <strong class="dashboard-metric__value">{{ unqualifiedCount }}</strong>
       </section>
-      <section class="panel">
-        <div class="panel-body">
-          <h2>{{ t('dashboardProcessing') }}</h2>
-          <p class="metric-value">{{ processingCount }}</p>
-        </div>
+      <section class="dashboard-metric dashboard-metric--processing panel">
+        <span class="dashboard-metric__label">{{ t('dashboardProcessing') }}</span>
+        <strong class="dashboard-metric__value">{{ processingCount }}</strong>
       </section>
-      <section class="panel">
-        <div class="panel-body">
-          <h2>{{ t('dashboardQueueCount') }}</h2>
-          <p class="metric-value">{{ status.queue_count }}</p>
-        </div>
+      <section class="dashboard-metric dashboard-metric--queue panel">
+        <span class="dashboard-metric__label">{{ t('dashboardQueueCount') }}</span>
+        <strong class="dashboard-metric__value">{{ status.queue_count }}</strong>
       </section>
-      <section class="panel">
-        <div class="panel-body">
-          <h2>{{ t('dashboardWorkerCount') }}</h2>
-          <p class="metric-value">{{ status.workers }}</p>
-        </div>
+      <section class="dashboard-metric dashboard-metric--workers panel">
+        <span class="dashboard-metric__label">{{ t('dashboardWorkerCount') }}</span>
+        <strong class="dashboard-metric__value">{{ status.workers }}</strong>
       </section>
-      <section class="panel">
-        <div class="panel-body">
-          <h2>{{ t('dashboardBackupUsage') }}</h2>
-          <p class="metric-value">{{ formatBytes(status.backup_usage_bytes) }}</p>
-        </div>
+      <section class="dashboard-metric dashboard-metric--backup panel">
+        <span class="dashboard-metric__label">{{ t('dashboardBackupUsage') }}</span>
+        <strong class="dashboard-metric__value">{{ formatBytes(status.backup_usage_bytes) }}</strong>
       </section>
-      <section class="panel">
-        <div class="panel-body">
-          <h2>{{ t('dashboardSuccessRate') }}</h2>
-          <p class="metric-value">{{ successRate }}</p>
-        </div>
+      <section class="dashboard-metric dashboard-metric--success panel">
+        <span class="dashboard-metric__label">{{ t('dashboardSuccessRate') }}</span>
+        <strong class="dashboard-metric__value">{{ successRate }}</strong>
       </section>
     </div>
 
@@ -153,10 +137,10 @@ onMounted(loadDashboard)
                 <td colspan="4" class="muted">{{ t('dashboardNoFailures') }}</td>
               </tr>
               <tr v-for="job in status.recent_failed" :key="job.id">
-                <td class="path-cell">{{ job.path }}</td>
-                <td>{{ job.phase ? jobPhaseLabel(job.phase) : t('dashboardEmptyValue') }}</td>
-                <td>{{ job.last_error || t('dashboardEmptyValue') }}</td>
-                <td>{{ job.updated_at || t('dashboardEmptyValue') }}</td>
+                <td class="path-cell" :title="job.path">{{ job.path }}</td>
+                <td class="status-cell">{{ job.phase ? jobPhaseLabel(job.phase) : t('dashboardEmptyValue') }}</td>
+                <td class="path-cell" :title="job.last_error || t('dashboardEmptyValue')">{{ job.last_error || t('dashboardEmptyValue') }}</td>
+                <td class="date-cell">{{ job.updated_at || t('dashboardEmptyValue') }}</td>
               </tr>
             </tbody>
           </table>

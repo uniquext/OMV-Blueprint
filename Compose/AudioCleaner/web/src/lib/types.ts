@@ -131,6 +131,11 @@ export interface JobEventRecord {
   finished_at: string
 }
 
+export interface RuntimeLogResponse {
+  content: string
+  lines: number
+}
+
 export interface BackupRecord {
   id: number
   file_id: number

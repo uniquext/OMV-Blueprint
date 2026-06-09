@@ -16,6 +16,13 @@ type CompatBackup = Partial<BackupRecord> & {
   Missing?: boolean
 }
 
+function normalizeOptionalTime(value: string | undefined): string {
+  if (!value || value.startsWith('0001-01-01T00:00:00')) {
+    return ''
+  }
+  return value
+}
+
 export function backupID(record: CompatBackup): number {
   return record.id ?? record.ID ?? 0
 }
@@ -25,11 +32,11 @@ export function backupPath(record: CompatBackup): string {
 }
 
 export function backupRestoredAt(record: CompatBackup): string {
-  return record.restored_at ?? record.RestoredAt ?? ''
+  return normalizeOptionalTime(record.restored_at ?? record.RestoredAt)
 }
 
 export function backupExpiresAt(record: CompatBackup): string {
-  return record.expires_at ?? record.ExpiresAt ?? ''
+  return normalizeOptionalTime(record.expires_at ?? record.ExpiresAt)
 }
 
 export function backupMissing(record: CompatBackup): boolean {

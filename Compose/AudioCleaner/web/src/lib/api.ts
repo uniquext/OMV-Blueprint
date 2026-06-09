@@ -10,6 +10,7 @@ import type {
   PageRequest,
   PageResult,
   RestoreResult,
+  RuntimeLogResponse,
   ScanResponse,
   ServiceStatus,
   SupportedLanguage,
@@ -88,6 +89,7 @@ export const api = {
   config: () => request<AudioCleanerConfig>('/api/config'),
   status: () => request<ServiceStatus>('/api/status'),
   logs: async () => unwrapItems(await request<CollectionResponse<JobEventRecord>>('/api/logs/recent')),
+  runtimeLogs: (lines = 100) => request<RuntimeLogResponse>(`/api/logs?lines=${encodeURIComponent(String(lines))}`),
   jobs: async (page?: PageRequest) => unwrapItems(await request<CollectionResponse<JobRecord>>(withPage('/api/jobs', page))),
   jobsPage: async (page?: PageRequest) =>
     unwrapPage(await request<CollectionResponse<JobRecord>>(withPage('/api/jobs', page)), page),

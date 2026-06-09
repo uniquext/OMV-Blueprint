@@ -53,6 +53,7 @@ type Deps struct {
 	Jobs    JobStore
 	Backups BackupStore
 	Logs    LogStore
+	RuntimeLogs RuntimeLogStore
 }
 
 type StatusProvider interface {
@@ -74,6 +75,15 @@ type BackupStore interface {
 
 type LogStore interface {
 	RecentLogs(ctx context.Context) (any, error)
+}
+
+type RuntimeLogStore interface {
+	RuntimeLogs(ctx context.Context, lines int) (any, error)
+}
+
+type RuntimeLogResult struct {
+	Content string `json:"content"`
+	Lines   int    `json:"lines"`
 }
 
 type patchUIConfigRequest struct {
@@ -277,6 +287,20 @@ func (s *Server) handleRecentLogs(w http.ResponseWriter, r *http.Request) {
 	writeDependencyResult(w, logs, err)
 }
 
+func (s *Server) handleRuntimeLogs(w http.ResponseWriter, r *http.Request) {
+	if s.deps.RuntimeLogs == nil {
+		writeOK(w, RuntimeLogResult{})
+		return
+	}
+	lines, err := parseRuntimeLogLines(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	logs, err := s.deps.RuntimeLogs.RuntimeLogs(r.Context(), lines)
+	writeDependencyResult(w, logs, err)
+}
+
 func (s *Server) handleListBackups(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Backups == nil {
 		writeOK(w, []repository.BackupRecord{})
@@ -381,6 +405,21 @@ func parsePageRequest(r *http.Request) (*repository.PageRequest, error) {
 	}
 	req := repository.PageRequest{Page: page, PageSize: pageSize}.Normalize()
 	return &req, nil
+}
+
+func parseRuntimeLogLines(r *http.Request) (int, error) {
+	value := r.URL.Query().Get("lines")
+	if value == "" {
+		return 100, nil
+	}
+	lines, err := strconv.Atoi(value)
+	if err != nil || lines < 1 {
+		return 0, fmt.Errorf("invalid lines %q", value)
+	}
+	if lines > 2000 {
+		lines = 2000
+	}
+	return lines, nil
 }
 
 func scanPayloadAllowed(w http.ResponseWriter, r *http.Request) bool {
