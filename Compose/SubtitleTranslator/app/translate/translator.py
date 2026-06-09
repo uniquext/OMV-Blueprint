@@ -5,7 +5,7 @@ import time
 import json
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
-from .prompt_loader import load_system_prompt, load_glossary
+from .prompt_loader import load_system_prompt, load_mt_system_prompt, load_glossary
 from core import db
 from .rate_limiter import rate_limiter
 import logging
@@ -151,6 +151,9 @@ def call_llm(system_prompt: str, user_prompt: str, glossary: Dict, model_type: s
         "temperature": temperature
     }
 
+    if model_type == "chat":
+        payload["response_format"] = {"type": "json_object"}
+
     with httpx.Client(timeout=float(_get_config()["llm"]["timeout"])) as client:
         rate_limiter.pre_request_check()
         response = client.post(_get_config()["llm"]["api_url"], headers=headers, json=payload)
@@ -165,53 +168,70 @@ def call_llm(system_prompt: str, user_prompt: str, glossary: Dict, model_type: s
         return data["choices"][0]["message"]["content"], total_tokens
 
 
-def parse_response(response_text: str, expected_ids: List[int]) -> List[TranslatedLine]:
+def parse_response(response_text: str, expected_ids: List[int], model_type: str = "chat") -> List[TranslatedLine]:
     """
-    Lenient parser: compatible with various LLM output formats.
-
-    Uses lenient regex `^ID:\\s*(\\d+)\\s*\\|\\s*(.+)$` to capture all content after the pipe symbol,
-    no longer requiring tag keywords (original/translated/Translation, etc.).
-
-    Parsing strategy: filter by ID range first (discard noise from translated context lines or MT model
-    results that include pre-context translation), then validate line count and continuity.
+    Parses response from LLM: uses JSON parsing for chat models, and lenient regex for MT models.
     """
-    results = []
-    discarded = 0
-    # Lenient regex: captures all content after the pipe symbol
-    pattern = re.compile(r"^ID:\s*(\d+)\s*\|\s*(.+)$")
+    if model_type == "mt":
+        results = []
+        discarded = 0
+        pattern = re.compile(r"^ID:\s*(\d+)\s*\|\s*(.+)$")
+        expected_id_set = set(expected_ids)
+        for line in response_text.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            match = pattern.match(line)
+            if match:
+                line_id = int(match.group(1))
+                translated_text = match.group(2).strip()
+                if line_id in expected_id_set:
+                    results.append(TranslatedLine(id=line_id, text=translated_text))
+                else:
+                    discarded += 1
 
-    expected_id_set = set(expected_ids)
+        if discarded > 0:
+            logger.warning(
+                f"LLM returned {len(results) + discarded} lines matching ID pattern, "
+                f"but only {len(results)} within expected IDs {expected_ids}. "
+                f"Discarded {discarded} out-of-range lines."
+            )
 
-    for line in response_text.strip().split("\n"):
-        line = line.strip()
-        if not line:
-            continue
+        if len(results) != len(expected_ids):
+            raise ValueError(f"Line count validation failed. Expected {len(expected_ids)} lines, got {len(results)} lines.")
 
-        match = pattern.match(line)
-        if match:
-            line_id = int(match.group(1))
-            translated_text = match.group(2).strip()
-            # Only keep lines within the current batch ID range, discard context noise
-            if line_id in expected_id_set:
-                results.append(TranslatedLine(id=line_id, text=translated_text))
+        for i, tl in enumerate(results):
+            if tl.id != expected_ids[i]:
+                raise ValueError(f"ID continuity validation failed. Expected ID {expected_ids[i]}, got {tl.id}.")
+
+        return results
+    else:
+        try:
+            text = response_text.strip()
+            start_idx = text.find('{')
+            end_idx = text.rfind('}')
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                json_str = text[start_idx:end_idx+1]
+                parsed_json = json.loads(json_str)
             else:
-                discarded += 1
+                raise ValueError("No JSON object found in response.")
+        except Exception as e:
+            raise ValueError(f"Failed to parse LLM response as JSON: {e}")
 
-    if discarded > 0:
-        logger.warning(
-            f"LLM returned {len(results) + discarded} lines matching ID pattern, "
-            f"but only {len(results)} within expected IDs {expected_ids}. "
-            f"Discarded {discarded} out-of-range lines."
-        )
+        results = []
+        missing_ids = []
+        
+        for line_id in expected_ids:
+            str_id = str(line_id)
+            if str_id in parsed_json:
+                results.append(TranslatedLine(id=line_id, text=str(parsed_json[str_id]).strip()))
+            else:
+                missing_ids.append(line_id)
+                
+        if missing_ids:
+            raise ValueError(f"Line count validation failed. Missing translations for IDs: {missing_ids}. Expected {len(expected_ids)} lines.")
 
-    if len(results) != len(expected_ids):
-        raise ValueError(f"Line count validation failed. Expected {len(expected_ids)} lines, got {len(results)} lines.")
-
-    for i, tl in enumerate(results):
-        if tl.id != expected_ids[i]:
-            raise ValueError(f"ID continuity validation failed. Expected ID {expected_ids[i]}, got {tl.id}.")
-
-    return results
+        return results
 
 def _build_output_with_line_map(tmp_path: str, out_path: str, line_map: List[Optional[int]]):
     """
@@ -354,7 +374,11 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
         batches = create_batches(lines)
         total_batches = len(batches)
 
-        system_prompt = load_system_prompt()
+        model_type = _get_config()["llm"]["model_type"]
+        if model_type == "mt":
+            system_prompt = load_mt_system_prompt()
+        else:
+            system_prompt = load_system_prompt()
         glossary = load_glossary()
 
         tmp_path = file_path + ".tmp"
@@ -367,7 +391,6 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
 
         with open(tmp_path, "w" if start_batch_idx == 1 else "a", encoding="utf-8") as tmp_file:
             for batch in batches[start_batch_idx - 1:]:
-                model_type = _get_config()["llm"]["model_type"]
                 # Build user_prompt based on model type
                 if model_type == "mt":
                     # MT model: pre-context and translation content tiled in plain text, no instruction words
@@ -407,7 +430,7 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
                         logger.debug(f"LLM response text:\n{response_text}")
 
                         try:
-                            translation_results = parse_response(response_text, expected_ids)
+                            translation_results = parse_response(response_text, expected_ids, model_type=model_type)
                         except ValueError as ve:
                             logger.error(f"Validation failed during parsing.\n=== User Prompt ===\n{user_prompt}\n=== LLM Response ===\n{response_text}\n===================")
                             validation_failures += 1

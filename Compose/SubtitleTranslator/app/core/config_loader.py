@@ -182,6 +182,19 @@ DEFAULT_SYSTEM_PROMPT = """你是一个专业的字幕翻译助手。
 绝对禁止合并或拆分原文行数，必须严格保持 1 对 1 翻译。
 请保持翻译的自然、流畅，并符合中文母语使用者的习惯。
 如果遇到专有名词，请参考提供的术语表。
+保持输出格式为严格的 JSON。JSON 的键（Key）必须是输入文本中的数字 ID（字符串格式），值（Value）必须是翻译后的文本。
+例如：
+{
+  "161": "翻译后的文本",
+  "162": "翻译后的文本"
+}
+"""
+
+DEFAULT_MT_SYSTEM_PROMPT = """你是一个专业的字幕翻译助手。
+你的任务是将输入的字幕文本翻译成简体中文。
+绝对禁止合并或拆分原文行数，必须严格保持 1 对 1 翻译。
+请保持翻译的自然、流畅，并符合中文母语使用者的习惯。
+如果遇到专有名词，请参考提供的术语表。
 保持输出格式与输入一致：ID: n | 翻译后的文本
 """
 
@@ -201,6 +214,11 @@ def _ensure_prompts(config: Dict):
     if not os.path.exists(sys_prompt_path):
         logger.info(f"Generating default system prompt at {sys_prompt_path}")
         atomic_write_text(sys_prompt_path, DEFAULT_SYSTEM_PROMPT)
+
+    mt_prompt_path = os.path.join(PROMPTS_DIR, "system_prompt_mt.txt")
+    if not os.path.exists(mt_prompt_path):
+        logger.info(f"Generating default MT system prompt at {mt_prompt_path}")
+        atomic_write_text(mt_prompt_path, DEFAULT_MT_SYSTEM_PROMPT)
 
     glossary_path = os.path.join(PROMPTS_DIR, "glossary.json")
     if not os.path.exists(glossary_path):
