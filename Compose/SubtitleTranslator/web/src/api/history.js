@@ -13,8 +13,8 @@ export async function getJobs(params = {}) {
     queryParts.push(`status=${encodeURIComponent(params.status)}`)
   }
 
-  if (params.funnel_level !== undefined && params.funnel_level !== null && params.funnel_level !== '') {
-    queryParts.push(`funnel_level=${params.funnel_level}`)
+  if (params.funnel_type !== undefined && params.funnel_type !== null && params.funnel_type !== '') {
+    queryParts.push(`funnel_type=${params.funnel_type}`)
   }
   if (params.date_from) {
     queryParts.push(`date_from=${encodeURIComponent(params.date_from)}`)
@@ -40,5 +40,12 @@ export async function getLogs(lines = 200) {
 
 export async function getTaskErrors(taskId) {
   const response = await fetch(`/api/tasks/${taskId}/errors`)
+  return handleResponse(response)
+}
+
+export async function retryTask(taskId) {
+  const response = await fetch(`/api/tasks/${taskId}/retry`, {
+    method: 'POST'
+  })
   return handleResponse(response)
 }

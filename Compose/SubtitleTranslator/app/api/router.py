@@ -564,3 +564,39 @@ async def sse_events(request: Request):
             _event_bus.unsubscribe(queue)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router.post("/api/tasks/{task_id}/retry", status_code=status.HTTP_200_OK)
+async def retry_task_endpoint(task_id: str):
+    """手动重试带有跳过批次的失败任务"""
+    from core import db
+    
+    task = db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail={"error": "TASK_NOT_FOUND", "message": f"Task {task_id} not found"})
+        
+    skipped = db.get_task_skipped_batches(task_id)
+    if not skipped:
+        raise HTTPException(status_code=400, detail={"error": "NO_SKIPPED_BATCHES", "message": f"Task {task_id} has no skipped batches to retry"})
+        
+    try:
+        db.reset_task_for_retry(task_id)
+        
+        # Update associated job status
+        job = db.get_job_by_translate_task(task_id)
+        if job:
+            db.update_job_status(job["id"], "translating")
+            if _event_bus:
+                _event_bus.publish({
+                    "type": "job_updated",
+                    "payload": {
+                        "job_id": job["id"],
+                        "status": "translating"
+                    }
+                })
+            
+        logger.info(f"Task {task_id} manually queued for precise retry")
+        return api_success(message=f"Task {task_id} queued for retry")
+    except Exception as e:
+        logger.error(f"Error queuing task for retry: {e}")
+        return api_error(code=500, message=str(e))

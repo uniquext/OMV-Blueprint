@@ -7,7 +7,7 @@ from typing import Dict, Optional, List
 
 from core import db
 from subtitle.srt_handler import rebuild_srt_with_translation
-from translate.translator import translate_file, compute_resume_batch_idx
+from translate.translator import translate_file, compute_resume_batch_idx, retry_skipped_batches
 from core.config_loader import load_config, is_llm_configured
 
 logger = logging.getLogger(__name__)
@@ -75,16 +75,66 @@ def process_task(task_id: str):
         db.update_job_status(job_id, "failed", error=updated_task.get("error", "Translation failed"))
         logger.warning(f"Job {job_id}: Marked failed (translate error)")
     elif updated_task["status"] == "done":
+        skipped = db.get_task_skipped_batches(task_id)
+        is_draft = len(skipped) > 0
         try:
-            rebuild_srt(job)
-            cleanup_intermediate_files(job)
+            rebuild_srt(job, draft=is_draft)
+            if not is_draft:
+                cleanup_intermediate_files(job)
             db.update_job_status(job_id, "done")
-            logger.info(f"Job {job_id}: Pipeline complete")
+            logger.info(f"Job {job_id}: Pipeline complete (draft={is_draft})")
         except Exception as e:
             logger.error(f"Rebuild failed for job {job_id}: {e}")
             db.update_job_status(job_id, "failed", error=str(e))
     else:
         logger.error(f"Unexpected task status after translate_file: {updated_task['status']}")
+
+
+def process_retry_task(task_id: str):
+    """
+    处理重试任务
+    """
+    task = db.get_task(task_id)
+    if not task:
+        return
+        
+    file_path = task["file_path"]
+    skipped_batches = db.get_task_skipped_batches(task_id)
+    
+    try:
+        retry_skipped_batches(task_id, file_path, skipped_batches)
+    except Exception as e:
+        logger.error(f"retry_skipped_batches failed for task {task_id}: {e}")
+        db.fail_task(task_id, str(e))
+
+    updated_task = db.get_task(task_id)
+    if updated_task is None:
+        return
+        
+    job = db.get_job_by_translate_task(task_id)
+    if job is None:
+        return
+        
+    job_id = job["id"]
+    if updated_task["status"] == "failed":
+        db.update_job_status(job_id, "failed", error=updated_task.get("error", "Translation failed"))
+    elif updated_task["status"] == "done":
+        skipped = db.get_task_skipped_batches(task_id)
+        is_draft = len(skipped) > 0
+        try:
+            rebuild_srt(job, draft=is_draft)
+            if not is_draft:
+                cleanup_intermediate_files(job)
+                draft_srt_path = os.path.join(os.path.dirname(job["media_path"]), f"{Path(job['media_path']).stem}.zh.draft.srt")
+                if os.path.exists(draft_srt_path):
+                    os.remove(draft_srt_path)
+            db.update_job_status(job_id, "done")
+            logger.info(f"Job {job_id}: Retry Pipeline complete (draft={is_draft})")
+        except Exception as e:
+            logger.error(f"Rebuild failed for job {job_id}: {e}")
+            db.update_job_status(job_id, "failed", error=str(e))
+    else:
+        logger.error(f"Unexpected task status after retry: {updated_task['status']}")
 
 
 def consumer_loop():
@@ -102,17 +152,25 @@ def consumer_loop():
             continue
 
         task_id = task["id"]
-        process_task(task_id)
+        skipped = db.get_task_skipped_batches(task_id)
+        if skipped and task.get("total_batches", 0) > 0 and task.get("current_batch") == task.get("total_batches"):
+            process_retry_task(task_id)
+        else:
+            process_task(task_id)
 
 
-def rebuild_srt(job: Dict):
+def rebuild_srt(job: Dict, draft: bool = False):
     job_id = job["id"]
     media_path = job["media_path"]
     media_stem = Path(media_path).stem
     media_dir = os.path.dirname(media_path)
 
     original_srt_path = job.get("original_srt_path")
-    output_srt_path = job.get("output_srt_path") or os.path.join(media_dir, f"{media_stem}.zh.ai.srt")
+    output_srt_path = job.get("output_srt_path")
+    if output_srt_path and draft:
+        output_srt_path = output_srt_path.replace('.ai.srt', '.draft.srt').replace('.opencc.srt', '.draft.srt')
+    if not output_srt_path:
+        output_srt_path = os.path.join(media_dir, f"{media_stem}.zh.{'draft' if draft else 'ai'}.srt")
 
     translate_task_id = job.get("translate_task_id")
     if not translate_task_id:

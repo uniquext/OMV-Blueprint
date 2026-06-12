@@ -41,7 +41,10 @@ def scan_external_subtitles(media_path: str) -> Dict[str, str]:
 
                 # 支持通配符前缀匹配，包括专属字幕及外部中文字幕
                 if (filename.startswith(f"{media_stem}.zh.") or filename.startswith(f"{media_stem}.zh-")) and filename.endswith(".srt"):
-                    result["zh"] = os.path.join(search_dir, filename)
+                    if filename == f"{media_stem}.zh.draft.srt":
+                        result["draft"] = os.path.join(search_dir, filename)
+                    else:
+                        result["zh"] = os.path.join(search_dir, filename)
                     continue
 
                 if not filename.startswith(media_stem + "."):
@@ -68,6 +71,9 @@ def scan_external_subtitles(media_path: str) -> Dict[str, str]:
 
 def evaluate_media(media_path: str) -> Dict:
     external = scan_external_subtitles(media_path)
+    if "draft" in external:
+        logger.info(f"Evaluated {media_path}: Found draft, returning Type 22 (draft)")
+        return {"funnel_type": 22, "srt_path": external["draft"], "language": "draft"}
 
     config = load_config()
     lang_map_override = config["media"]["lang_map_override"]
@@ -193,6 +199,32 @@ def execute_funnel_action(job_id: str, media_path: str, funnel_result: Dict) -> 
     if funnel_type == 22:
         srt_path = funnel_result["srt_path"]
         lang = funnel_result["language"]
+        
+        if lang == "draft":
+            prev_job = db.get_previous_job_with_task(media_path, job_id)
+            task_id = prev_job["translate_task_id"] if prev_job else None
+            task = db.get_task(task_id) if task_id else None
+            skipped = db.get_task_skipped_batches(task_id) if task_id else []
+            
+            if task and skipped:
+                db.update_job_funnel_info(job_id, funnel_type=22, original_srt_path=srt_path, output_srt_path=output_zh_srt)
+                db.link_task_to_job(job_id, task_id)
+                db.reset_task_for_retry(task_id)
+                logger.info(f"Job {job_id}: Found .draft.srt, queued existing task {task_id} for precise retry")
+                return
+            else:
+                txt_path = os.path.join(media_dir, f"{media_stem}.draft.txt")
+                zh_txt_path = os.path.join(media_dir, f"{media_stem}.zh.txt")
+                cleanup = [txt_path, zh_txt_path]
+                db.update_job_funnel_info(job_id, funnel_type=22, original_srt_path=srt_path, output_srt_path=output_zh_srt, cleanup_files=cleanup)
+                extract_text_from_srt(srt_path, txt_path)
+                new_task_id = db.create_translate_task_for_job(job_id, txt_path)
+                if new_task_id:
+                    logger.info(f"Job {job_id}: Found .draft.srt but no valid DB record, starting new translate task {new_task_id} (中译中)")
+                else:
+                    logger.warning(f"Job {job_id}: Draft extract done, but task deduped")
+                return
+
         txt_path = os.path.join(media_dir, f"{media_stem}.{lang}.txt")
         zh_txt_path = os.path.join(media_dir, f"{media_stem}.zh.txt")
         cleanup = [txt_path, zh_txt_path]

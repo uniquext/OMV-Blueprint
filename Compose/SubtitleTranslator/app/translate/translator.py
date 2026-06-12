@@ -389,8 +389,20 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
                 logger.warning(f"Task {task_id}: Cannot resume (truncate result={result}), resetting to batch 1")
                 start_batch_idx = 1
 
+        failed_batches = []
+        prev_batch_failed = False
+
         with open(tmp_path, "w" if start_batch_idx == 1 else "a", encoding="utf-8") as tmp_file:
             for batch in batches[start_batch_idx - 1:]:
+                if prev_batch_failed:
+                    batch = Batch(
+                        batch_idx=batch.batch_idx,
+                        lines=batch.lines,
+                        context_before=[],
+                        start_id=batch.start_id,
+                        end_id=batch.end_id
+                    )
+
                 # Build user_prompt based on model type
                 if model_type == "mt":
                     # MT model: pre-context and translation content tiled in plain text, no instruction words
@@ -438,7 +450,7 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
                         break
                     except Exception as e:
                         if attempt >= max_retries:
-                            # 重试耗尽，写入错误诊断快照后再抛出异常
+                            # 重试耗尽，写入错误诊断快照后再跳过
                             _save_error_snapshot(
                                 task_id=task_id,
                                 batch_idx=batch.batch_idx,
@@ -448,15 +460,29 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
                                 user_prompt=user_prompt,
                                 llm_response=response_text
                             )
-                            raise e
+                            logger.warning(
+                                f"Task {task_id}: Batch {batch.batch_idx} failed after {max_retries} retries, "
+                                f"filling original text and skipping"
+                            )
+                            failed_batches.append(batch.batch_idx)
+                            translation_results = []
+                            break
                         sleep_time = 5 * (2 ** attempt)
                         logger.warning(f"LLM Error: {e}, retrying in {sleep_time}s...")
                         time.sleep(sleep_time)
 
 
-                # Atomic append: write to .tmp in batch units (format ID: n | text)
-                for result in translation_results:
-                    tmp_file.write(f"ID: {result.id} | {result.text}\n")
+                if not translation_results and batch.batch_idx in failed_batches:
+                    line_id = batch.start_id
+                    for line in batch.lines:
+                        tmp_file.write(f"ID: {line_id} | {line}\n")
+                        line_id += 1
+                    prev_batch_failed = True
+                else:
+                    for result in translation_results:
+                        tmp_file.write(f"ID: {result.id} | {result.text}\n")
+                    prev_batch_failed = False
+                
                 tmp_file.flush()
                 os.fsync(tmp_file.fileno())
 
@@ -480,10 +506,153 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
         # Clean up .tmp intermediate file
         os.remove(tmp_path)
 
-        db.complete_task(task_id, task_tokens)
-        logger.info(f"Task {task_id} completed: {out_path} (Tokens used: {task_tokens})")
+        db.complete_task(task_id, task_tokens, skipped_batches=failed_batches if failed_batches else None)
+        if failed_batches:
+            logger.warning(
+                f"Task {task_id} completed with {len(failed_batches)} skipped batches: {failed_batches}"
+            )
+        else:
+            logger.info(f"Task {task_id} completed: {out_path} (Tokens used: {task_tokens})")
 
     except Exception as e:
         db.fail_task(task_id, str(e))
-        logger.error(f"Task {task_id} failed with error: {e}", exc_info=True)
-        raise e
+        logger.error(f"Task {task_id} failed with error: {e}")
+
+
+def retry_skipped_batches(task_id: str, file_path: str, skipped_batches: list):
+    """
+    精准重试失败的批次。
+    读取原始 .txt 文件，只对 skipped_batches 中的批次调 LLM。
+    成功则更新 .zh.txt 中对应行，失败则保留原文。
+    """
+    task_tokens = 0
+    lines, line_map = preprocess(file_path)
+    if not lines:
+        return
+        
+    batches = create_batches(lines)
+    
+    out_path = file_path.replace(".txt", ".zh.txt")
+    if file_path.endswith(".en.txt"):
+        out_path = file_path.replace(".en.txt", ".zh.txt")
+    elif file_path.endswith(".ja.txt"):
+        out_path = file_path.replace(".ja.txt", ".zh.txt")
+        
+    if not os.path.exists(out_path):
+        logger.error(f"Cannot retry task {task_id}: {out_path} not found")
+        return
+
+    with open(out_path, "r", encoding="utf-8") as f:
+        zh_lines = f.read().splitlines()
+        
+    model_type = _get_config()["llm"]["model_type"]
+    if model_type == "mt":
+        system_prompt = load_mt_system_prompt()
+    else:
+        system_prompt = load_system_prompt()
+    glossary = load_glossary()
+    
+    still_failed = []
+    
+    for batch_idx in skipped_batches:
+        if batch_idx > len(batches):
+            continue
+            
+        batch = batches[batch_idx - 1]
+        
+        prev_idx = batch_idx - 1
+        if prev_idx > 0:
+            if prev_idx in skipped_batches:
+                batch = Batch(
+                    batch_idx=batch.batch_idx,
+                    lines=batch.lines,
+                    context_before=[],
+                    start_id=batch.start_id,
+                    end_id=batch.end_id
+                )
+            else:
+                prev_batch = batches[prev_idx - 1]
+                try:
+                    orig_start = line_map.index(prev_batch.start_id)
+                    orig_end = line_map.index(prev_batch.end_id)
+                    translated_context = [l for l in zh_lines[orig_start:orig_end+1] if l.strip()]
+                    batch = Batch(
+                        batch_idx=batch.batch_idx,
+                        lines=batch.lines,
+                        context_before=translated_context,
+                        start_id=batch.start_id,
+                        end_id=batch.end_id
+                    )
+                except ValueError:
+                    pass
+        if model_type == "mt":
+            all_lines = batch.context_before + batch.lines
+            user_prompt = "\n".join(all_lines)
+        else:
+            user_prompt = ""
+            if batch.context_before:
+                user_prompt += "前文上下文（仅供参考，不要翻译）：\n" + "\n".join(batch.context_before) + "\n\n"
+            user_prompt += "需要翻译的内容：\n" + "\n".join(batch.lines)
+            
+        expected_ids = list(range(batch.start_id, batch.end_id + 1))
+        translation_results = []
+        max_retries = _get_config()["llm"]["max_retries"]
+        base_temperature = _get_config()["llm"]["temperature"]
+        validation_failures = 0
+        response_text = None
+        
+        for attempt in range(max_retries + 1):
+            current_temperature = max(0.1, base_temperature - 0.1 * validation_failures)
+            try:
+                response_text, tokens = call_llm(system_prompt, user_prompt, glossary, model_type=model_type, temperature=current_temperature)
+                task_tokens += tokens
+                translation_results = parse_response(response_text, expected_ids, model_type=model_type)
+                break
+            except ValueError as e:
+                if attempt >= max_retries:
+                    _save_error_snapshot(
+                        task_id=task_id,
+                        batch_idx=batch.batch_idx,
+                        error_reason=str(e),
+                        system_prompt=system_prompt,
+                        glossary=glossary,
+                        user_prompt=user_prompt,
+                        llm_response=response_text
+                    )
+                    still_failed.append(batch.batch_idx)
+                    break
+                validation_failures += 1
+                time.sleep(5 * (2 ** attempt))
+            except Exception as e:
+                if attempt >= max_retries:
+                    _save_error_snapshot(
+                        task_id=task_id,
+                        batch_idx=batch.batch_idx,
+                        error_reason=str(e),
+                        system_prompt=system_prompt,
+                        glossary=glossary,
+                        user_prompt=user_prompt,
+                        llm_response=response_text
+                    )
+                    still_failed.append(batch.batch_idx)
+                    break
+                time.sleep(5 * (2 ** attempt))
+                
+        if translation_results:
+            for result in translation_results:
+                try:
+                    orig_idx = line_map.index(result.id)
+                    if orig_idx < len(zh_lines):
+                        zh_lines[orig_idx] = result.text
+                except ValueError:
+                    pass
+                    
+    with open(out_path, "w", encoding="utf-8") as f:
+        for line in zh_lines:
+            f.write(line + "\n")
+            
+    db.complete_task(task_id, task_tokens, skipped_batches=still_failed if still_failed else None)
+    if still_failed:
+        logger.warning(f"Task {task_id} retry completed with {len(still_failed)} still skipped batches: {still_failed}")
+    else:
+        logger.info(f"Task {task_id} retry completed successfully: {out_path}")

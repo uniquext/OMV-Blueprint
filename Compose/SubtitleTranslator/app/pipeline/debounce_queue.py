@@ -139,14 +139,17 @@ class FunnelWorkerPool:
         execute_funnel_action(job_id, media_path, funnel_result)
 
     def shutdown(self, wait: bool = True, timeout: float = 10) -> None:
-        if wait:
-            try:
-                self._queue.join()
-            except Exception:
-                pass
-
         self._running = False
-        self._executor.shutdown(wait=wait)
+        
+        if wait:
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                with self._active_lock:
+                    if self._active_count == 0:
+                        break
+                time.sleep(0.1)
+
+        self._executor.shutdown(wait=False, cancel_futures=True)
         logger.info("FunnelWorkerPool shutdown")
 
     def snapshot(self) -> Dict:

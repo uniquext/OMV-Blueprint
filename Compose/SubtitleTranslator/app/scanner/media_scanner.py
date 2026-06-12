@@ -116,12 +116,15 @@ def scan_directory(dir_path: str, extensions: List[str], ignore_list: List[str] 
                 # 检查是否已经存在 AI 或 OpenCC 的字幕，原生 .zh.srt 将交由漏斗评估 (Type 20)
                 media_stem = os.path.splitext(f)[0]
                 has_zh = False
+                has_draft = False
                 zh_subtitle_filename = None
                 for filename in files:
                     if filename.startswith(f"{media_stem}.") and (filename.endswith(".zh.ai.srt") or filename.endswith(".zh.opencc.srt")):
                         has_zh = True
                         zh_subtitle_filename = filename
                         break
+                    if filename == f"{media_stem}.zh.draft.srt":
+                        has_draft = True
                 
                 if has_zh:
                     logger.debug(f"Skipping {f}, already has .ai.srt or .opencc.srt subtitle")
@@ -132,6 +135,9 @@ def scan_directory(dir_path: str, extensions: List[str], ignore_list: List[str] 
                         db.backfill_job(file_path, funnel_type, output_srt_path)
                     continue
                 
+                if has_draft:
+                    logger.info(f"Scanner found draft for {f}, enqueueing to pipeline for precise evaluation.")
+
                 media_files.append(file_path)
 
     return media_files

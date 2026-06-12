@@ -39,6 +39,13 @@ def init_db():
         conn.execute("PRAGMA journal_mode=WAL")
         
         # 检查是否需要执行列重命名迁移
+        cursor = conn.execute("PRAGMA table_info(translate_task)")
+        task_columns = [row[1] for row in cursor.fetchall()]
+        if task_columns and 'skipped_batches' not in task_columns:
+            conn.execute("ALTER TABLE translate_task ADD COLUMN skipped_batches TEXT")
+            conn.commit()
+        
+        # 检查是否需要执行列重命名迁移
         cursor = conn.execute("PRAGMA table_info(subtitle_job)")
         columns = [row[1] for row in cursor.fetchall()]
         if 'funnel_level' in columns:
@@ -66,7 +73,8 @@ def init_db():
                 error TEXT,
                 completed_at TEXT,
                 started_at TEXT,
-                tokens INTEGER DEFAULT 0
+                tokens INTEGER DEFAULT 0,
+                skipped_batches TEXT
             )
         """)
         conn.execute("""
@@ -164,13 +172,14 @@ def update_progress(task_id: str, current_batch: int, total_batches: int, progre
     })
 
 
-def complete_task(task_id: str, tokens: int = 0):
+def complete_task(task_id: str, tokens: int = 0, skipped_batches: list = None):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    skipped_json = json.dumps(skipped_batches) if skipped_batches else None
     with sqlite3.connect(DB_PATH) as conn:
         # done 是终态，同步设置 completed_at
         conn.execute(
-            "UPDATE translate_task SET status = 'done', completed_at = ?, updated_at = ?, tokens = ? WHERE id = ?",
-            (now, now, tokens, task_id)
+            "UPDATE translate_task SET status = 'done', completed_at = ?, updated_at = ?, tokens = ?, skipped_batches = ? WHERE id = ?",
+            (now, now, tokens, skipped_json, task_id)
         )
         conn.commit()
 
@@ -195,6 +204,32 @@ def reset_task_to_queued(task_id: str):
         )
         conn.commit()
     logger.info(f"Task {task_id} reset to queued for recovery")
+
+
+def get_task_skipped_batches(task_id: str) -> list:
+    """获取任务的跳过批次列表，返回空列表表示完整翻译"""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute("SELECT skipped_batches FROM translate_task WHERE id = ?", (task_id,))
+        row = cursor.fetchone()
+        if not row or not row['skipped_batches']:
+            return []
+        try:
+            return json.loads(row['skipped_batches'])
+        except json.JSONDecodeError:
+            return []
+
+
+def reset_task_for_retry(task_id: str):
+    """清除完成时间并设置为queued，用于精准重试"""
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE translate_task SET status = 'queued', updated_at = ?, completed_at = NULL, started_at = NULL WHERE id = ?",
+            (now, task_id)
+        )
+        conn.commit()
+    logger.info(f"Task {task_id} reset to queued for precise retry")
 
 
 def create_job(media_path: str, source: str = "scheduler") -> Optional[str]:
@@ -351,6 +386,28 @@ def get_job_by_media_path(media_path: str) -> Optional[Dict]:
         if not row:
             return None
         return dict(row)
+
+
+def get_previous_job_with_task(media_path: str, current_job_id: str) -> Optional[Dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(
+            "SELECT * FROM subtitle_job WHERE media_path = ? AND id != ? AND translate_task_id IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+            (media_path, current_job_id)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        return dict(row)
+
+
+def link_task_to_job(job_id: str, task_id: str):
+    now_iso = datetime.datetime.utcnow().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE subtitle_job SET status = 'translating', translate_task_id = ?, updated_at = ? WHERE id = ?",
+            (task_id, now_iso, job_id)
+        )
 
 
 def get_job_by_translate_task(translate_task_id: str) -> Optional[Dict]:
@@ -561,6 +618,7 @@ def query_jobs(page: int = 1, page_size: int = 20, status: list = None, funnel_t
         f"tt.current_batch, "
         f"tt.total_batches, "
         f"tt.progress as task_progress, "
+        f"tt.skipped_batches, "
         f"CASE WHEN tt.completed_at IS NOT NULL AND tt.started_at IS NOT NULL "
         f"  THEN strftime('%s', tt.completed_at) - strftime('%s', tt.started_at) "
         f"  ELSE NULL END as translate_duration "

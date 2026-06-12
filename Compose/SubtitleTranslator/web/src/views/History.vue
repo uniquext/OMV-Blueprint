@@ -107,6 +107,13 @@
                       @click="task.status === 'failed' && task.translate_task_id && openDiagnostics(task.translate_task_id)"
                     >{{ task.error }}</span>
                   </div>
+                  <div class="field full-width" v-if="task.skipped_batches && task.skipped_batches.length > 0">
+                    <span class="k">跳过批次:</span>
+                    <span class="v" style="display:flex;align-items:center;gap:12px;">
+                      <span class="skipped-batches-text" style="color:#d03050;font-weight:500;">[{{ task.skipped_batches.join(', ') }}]</span>
+                      <button class="btn retry-btn" style="padding:2px 8px;font-size:11px;" @click="retrySkippedBatches(task.translate_task_id)">重试跳过批次</button>
+                    </span>
+                  </div>
                 </div>
               </td>
             </tr>
@@ -214,7 +221,10 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
-import { getJobs, getJobsStats, getLogs, getTaskErrors } from '../api/history'
+import { createDiscreteApi } from 'naive-ui'
+import { getJobs, getJobsStats, getLogs, getTaskErrors, retryTask } from '../api/history'
+
+const { message } = createDiscreteApi(['message'])
 
 const stats = reactive({
   done: 0,
@@ -430,6 +440,13 @@ async function fetchJobs() {
       else if (type === 2) levelDesc = '回填：AI 翻译产物'
       else if (type === -1) levelDesc = '图形字幕、ffprobe 报错或无可用字幕轨道'
 
+      let skipped_batches = []
+      if (item.skipped_batches) {
+        try {
+          skipped_batches = JSON.parse(item.skipped_batches)
+        } catch (e) {}
+      }
+
       return {
         id: item.id,
         path: item.media_path,
@@ -444,6 +461,7 @@ async function fetchJobs() {
         error: item.error,
         translate_task_id: item.translate_task_id,
         translate_duration: item.translate_duration,
+        skipped_batches,
         duration
       }
     })
@@ -464,6 +482,17 @@ async function fetchLogsData() {
     logContent.value = data.content || ''
   } catch (err) {
     console.error('Failed to fetch logs:', err)
+  }
+}
+
+async function retrySkippedBatches(taskId) {
+  if (!confirm('确定要重试该任务中跳过的批次吗？')) return
+  try {
+    await retryTask(taskId)
+    message.success('已成功加入重试队列')
+    fetchJobs()
+  } catch (err) {
+    message.error('重试失败: ' + err.message)
   }
 }
 
