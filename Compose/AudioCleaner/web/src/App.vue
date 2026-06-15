@@ -9,6 +9,7 @@ const eventStream = useEventStream()
 const navigation = computed(() => [
   { to: '/', label: t('navDashboard') },
   { to: '/jobs', label: t('navJobs') },
+  { to: '/history', label: t('navHistory') },
   { to: '/backups', label: t('navBackups') },
   { to: '/settings', label: t('navSettings') },
   { to: '/logs', label: t('navLogs') }

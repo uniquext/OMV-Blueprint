@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { jobPhaseLabel, serviceStatusLabel, t } from '../i18n'
+import { serviceStatusLabel, t } from '../i18n'
 import { api } from '../lib/api'
+import { jobFailureCause, jobFailureCauseLabelKey } from '../lib/jobs'
 import type { AudioCleanerConfig, ServiceStatus } from '../lib/types'
 
 const status = ref<ServiceStatus | null>(null)
@@ -9,8 +10,9 @@ const config = ref<AudioCleanerConfig | null>(null)
 const loading = ref(false)
 const error = ref('')
 
-const qualifiedCount = computed(() => status.value?.counts.qualified ?? 0)
-const unqualifiedCount = computed(() => status.value?.counts.unqualified ?? 0)
+const compatibleCount = computed(() => status.value?.counts.compatible ?? 0)
+const processedCount = computed(() => status.value?.counts.processed ?? 0)
+const failedCount = computed(() => status.value?.counts.failed ?? 0)
 const processingCount = computed(() => status.value?.counts.processing ?? status.value?.current_processing.length ?? 0)
 const mediaRoots = computed(() => config.value?.media.roots ?? status.value?.media_roots ?? [])
 const successRate = computed(() => {
@@ -37,6 +39,15 @@ function formatBytes(bytes: number | undefined): string {
     unit += 1
   }
   return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`
+}
+
+function failureCauseLabel(job: { failure_cause: string }): string {
+  const cause = jobFailureCause(job)
+  if (!cause) {
+    return '/'
+  }
+  const key = jobFailureCauseLabelKey(cause)
+  return key ? t(key) : cause
 }
 
 async function loadDashboard(): Promise<void> {
@@ -79,13 +90,17 @@ onMounted(loadDashboard)
         <span class="dashboard-metric__label">{{ t('dashboardServiceStatus') }}</span>
         <strong class="dashboard-metric__value">{{ serviceStatusLabel(status.status) }}</strong>
       </section>
-      <section class="dashboard-metric dashboard-metric--qualified panel">
-        <span class="dashboard-metric__label">{{ t('dashboardQualified') }}</span>
-        <strong class="dashboard-metric__value">{{ qualifiedCount }}</strong>
+      <section class="dashboard-metric dashboard-metric--compatible panel">
+        <span class="dashboard-metric__label">{{ t('dashboardCompatible') }}</span>
+        <strong class="dashboard-metric__value">{{ compatibleCount }}</strong>
       </section>
-      <section class="dashboard-metric dashboard-metric--unqualified panel">
-        <span class="dashboard-metric__label">{{ t('dashboardUnqualified') }}</span>
-        <strong class="dashboard-metric__value">{{ unqualifiedCount }}</strong>
+      <section class="dashboard-metric dashboard-metric--processed panel">
+        <span class="dashboard-metric__label">{{ t('dashboardProcessed') }}</span>
+        <strong class="dashboard-metric__value">{{ processedCount }}</strong>
+      </section>
+      <section class="dashboard-metric dashboard-metric--failed panel">
+        <span class="dashboard-metric__label">{{ t('dashboardFailed') }}</span>
+        <strong class="dashboard-metric__value">{{ failedCount }}</strong>
       </section>
       <section class="dashboard-metric dashboard-metric--processing panel">
         <span class="dashboard-metric__label">{{ t('dashboardProcessing') }}</span>
@@ -127,7 +142,7 @@ onMounted(loadDashboard)
             <thead>
               <tr>
                 <th>{{ t('dashboardPath') }}</th>
-                <th>{{ t('dashboardPhase') }}</th>
+                <th>{{ t('jobsColumnReason') }}</th>
                 <th>{{ t('dashboardError') }}</th>
                 <th>{{ t('tableUpdated') }}</th>
               </tr>
@@ -138,7 +153,7 @@ onMounted(loadDashboard)
               </tr>
               <tr v-for="job in status.recent_failed" :key="job.id">
                 <td class="path-cell" :title="job.path">{{ job.path }}</td>
-                <td class="status-cell">{{ job.phase ? jobPhaseLabel(job.phase) : t('dashboardEmptyValue') }}</td>
+                <td class="status-cell">{{ failureCauseLabel(job) }}</td>
                 <td class="path-cell" :title="job.last_error || t('dashboardEmptyValue')">{{ job.last_error || t('dashboardEmptyValue') }}</td>
                 <td class="date-cell">{{ job.updated_at || t('dashboardEmptyValue') }}</td>
               </tr>

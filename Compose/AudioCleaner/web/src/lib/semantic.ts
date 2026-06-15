@@ -8,9 +8,10 @@ export function semanticBadgeClass(tone: SemanticTone): string {
 
 export function jobStatusTone(status: string): SemanticTone {
   switch (status) {
-    case 'qualified':
+    case 'compatible':
+    case 'processed':
       return 'success'
-    case 'unqualified':
+    case 'failed':
       return 'danger'
     case 'processing':
       return 'info'
@@ -40,8 +41,9 @@ export function backupStateTone(state: string): SemanticTone {
 
 export function jobPhaseTone(phase: JobPhase | string): SemanticTone {
   switch (phase) {
+    case 'pending':
+      return 'muted'
     case 'queued':
-    case 'deferred':
     case 'retry_wait':
       return 'warning'
     case 'checking':
@@ -51,31 +53,6 @@ export function jobPhaseTone(phase: JobPhase | string): SemanticTone {
       return 'info'
     case 'backing_up':
       return 'backup'
-    default:
-      return 'muted'
-  }
-}
-
-export function eventTypeTone(eventType: string): SemanticTone {
-  switch (eventType) {
-    case 'job.qualified':
-      return 'success'
-    case 'job.unqualified':
-    case 'service.restart_failed':
-      return 'danger'
-    case 'job.restored':
-      return 'restored'
-    case 'job.queued':
-      return 'warning'
-    case 'job.backing_up':
-      return 'backup'
-    case 'job.checking':
-    case 'job.transcoding':
-    case 'job.verifying':
-    case 'job.replacing':
-    case 'job.ffmpeg_data_stream_fallback':
-    case 'service.restarting':
-      return 'info'
     default:
       return 'muted'
   }

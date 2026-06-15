@@ -113,7 +113,7 @@ type Service struct {
 
 type activeJob struct {
 	cancel context.CancelFunc
-	phase  repository.Phase
+	phase  repository.PipelinePhase
 }
 
 type workerJob struct {
@@ -129,16 +129,17 @@ func RecoverStartup(ctx context.Context, repo RecoveryRepository) error {
 		return err
 	}
 	for _, file := range files {
-		if isCriticalPhase(file.Phase) {
-			file.Status = repository.StatusUnqualified
-			file.Phase = repository.PhaseDeferred
-			file.UnqualifiedReason = repository.ReasonFailed
-			file.LastError = fmt.Sprintf("%s%s; manual review required", startupCriticalRecoveryPrefix, file.Phase)
+		if isCriticalPhase(file.PipelinePhase) {
+			interruptedPhase := file.PipelinePhase
+			file.Status = repository.StatusFailed
+			file.PipelinePhase = repository.PipelinePhasePending
+			file.FailureCause = repository.CauseFailed
+			file.LastError = fmt.Sprintf("%s%s; manual review required", startupCriticalRecoveryPrefix, interruptedPhase)
 		} else {
 			file.Status = repository.StatusProcessing
-			file.Phase = repository.PhaseQueued
+			file.PipelinePhase = repository.PipelinePhaseQueued
 			file.LastError = ""
-			file.UnqualifiedReason = ""
+			file.FailureCause = ""
 		}
 		if err := repo.SaveFile(ctx, file); err != nil {
 			return err
@@ -344,16 +345,16 @@ func (s *Service) shouldSkipStartupRecoveredCritical(ctx context.Context, path s
 	if err != nil {
 		return false, err
 	}
-	return file.Status == repository.StatusUnqualified &&
-		file.Phase == repository.PhaseDeferred &&
-		file.UnqualifiedReason == repository.ReasonFailed &&
+	return file.Status == repository.StatusFailed &&
+		file.PipelinePhase == repository.PipelinePhasePending &&
+		file.FailureCause == repository.CauseFailed &&
 		strings.HasPrefix(file.LastError, startupCriticalRecoveryPrefix), nil
 }
 
 func (s *Service) startWatcher() error {
 	watcher, err := pipeline.NewWatcher(s.cfg.Media.Roots, func(path string) {
 		if s.isCandidatePath(path) {
-			s.enqueue(path)
+			s.enqueueWithSource(path, pipeline.JobSourceWatchdog)
 		}
 	})
 	if err != nil {
@@ -542,16 +543,17 @@ func (s *Service) Status(ctx context.Context) (any, error) {
 		return nil, err
 	}
 	counts := map[string]int{
-		string(repository.StatusQualified):   0,
-		string(repository.StatusProcessing):  0,
-		string(repository.StatusUnqualified): 0,
+		string(repository.StatusCompatible): 0,
+		string(repository.StatusProcessing): 0,
+		string(repository.StatusProcessed):  0,
+		string(repository.StatusFailed):     0,
+		string(repository.StatusRestored):   0,
+		string(repository.StatusIgnored):    0,
 	}
 	recentFailed := make([]repository.FileRecord, 0)
 	for _, file := range files {
 		counts[string(file.Status)]++
-		if file.Status == repository.StatusUnqualified &&
-			file.UnqualifiedReason != repository.ReasonIgnored &&
-			file.UnqualifiedReason != repository.ReasonRestored &&
+		if file.Status == repository.StatusFailed &&
 			file.LastError != "" &&
 			len(recentFailed) < 5 {
 			recentFailed = append(recentFailed, file)
@@ -638,7 +640,7 @@ func (s *Service) RetryJob(ctx context.Context, id int64) error {
 	if file.Status == repository.StatusProcessing {
 		return api.ErrProcessing
 	}
-	if file.Status != repository.StatusUnqualified {
+	if file.Status != repository.StatusFailed {
 		return api.ErrInvalidJobState
 	}
 	s.workerIntakeMu.Lock()
@@ -647,8 +649,8 @@ func (s *Service) RetryJob(ctx context.Context, id int64) error {
 		return api.ErrProcessing
 	}
 	file.Status = repository.StatusProcessing
-	file.Phase = repository.PhaseQueued
-	file.UnqualifiedReason = ""
+	file.PipelinePhase = repository.PipelinePhaseQueued
+	file.FailureCause = ""
 	file.LastError = ""
 	if err := s.db.SaveFile(ctx, file); err != nil {
 		return err
@@ -665,7 +667,7 @@ func (s *Service) IgnoreJob(ctx context.Context, id int64) error {
 	if file.Status == repository.StatusProcessing {
 		return api.ErrProcessing
 	}
-	if file.Status != repository.StatusUnqualified {
+	if file.Status != repository.StatusFailed {
 		return api.ErrInvalidJobState
 	}
 	if s.isProcessingPath(file.Path) || s.isPathMutating(file.Path) {
@@ -674,9 +676,8 @@ func (s *Service) IgnoreJob(ctx context.Context, id int64) error {
 	if err := s.updateCurrentFingerprint(ctx, &file); err != nil {
 		return err
 	}
-	file.Status = repository.StatusUnqualified
-	file.Phase = repository.PhaseDeferred
-	file.UnqualifiedReason = repository.ReasonIgnored
+	file.Status = repository.StatusIgnored
+	file.PipelinePhase = repository.PipelinePhasePending
 	file.LastError = ""
 	return s.db.SaveFile(ctx, file)
 }
@@ -969,7 +970,6 @@ func (s *Service) isPathMutating(path string) bool {
 }
 
 func (s *Service) persistRestoredFile(backupID int64, safetyPath string, file repository.FileRecord) error {
-	cfg := s.config()
 	info, statErr := os.Stat(file.Path)
 	prober := s.prober
 	if prober == nil {
@@ -979,8 +979,10 @@ func (s *Service) persistRestoredFile(backupID int64, safetyPath string, file re
 	probe, probeErr := prober.Probe(probeCtx, file.Path)
 	cancelProbe()
 
-	file.QualificationSource = repository.SourceRestored
-	file.Phase = ""
+	file.PipelinePhase = repository.PipelinePhasePending
+	if file.DiscoverySource == "" {
+		file.DiscoverySource = repository.DiscoveryManual
+	}
 	file.Attempts = 0
 	if statErr == nil {
 		file.Size = info.Size()
@@ -991,37 +993,27 @@ func (s *Service) persistRestoredFile(backupID int64, safetyPath string, file re
 	file.Fingerprint = media.Fingerprint(file.Path, file.Size, file.MTimeNS, file.AudioSignature, file.VideoSignature)
 
 	if statErr != nil {
-		file.Status = repository.StatusUnqualified
-		file.UnqualifiedReason = repository.ReasonRestored
+		file.Status = repository.StatusFailed
+		file.FailureCause = repository.CauseRestoreStatError
+		file.PipelinePhase = repository.PipelinePhasePending
 		file.LastError = fmt.Sprintf("stat restored file: %v", statErr)
 	} else if probeErr != nil {
-		file.Status = repository.StatusUnqualified
-		file.UnqualifiedReason = repository.ReasonRestored
+		file.Status = repository.StatusFailed
+		file.FailureCause = repository.CauseRestoreProbeError
+		file.PipelinePhase = repository.PipelinePhasePending
 		file.LastError = fmt.Sprintf("probe restored file: %v", probeErr)
 	} else {
-		decision := media.Decide(file.Path, probe, media.DecisionConfig{
-			Extensions:         cfg.Media.Extensions,
-			IncompatibleCodecs: cfg.Audio.IncompatibleCodecs,
-		})
-		switch decision.Action {
-		case media.ActionAlreadyCompatible:
-			file.Status = repository.StatusQualified
-			file.UnqualifiedReason = ""
-			file.LastError = ""
-		case media.ActionUnsupported:
-			file.Status = repository.StatusUnqualified
-			file.UnqualifiedReason = repository.ReasonRestored
-			file.LastError = decision.Reason
-		default:
-			file.Status = repository.StatusUnqualified
-			file.UnqualifiedReason = repository.ReasonRestored
-			file.LastError = "restored file still requires audio transcoding"
-		}
+		file.Status = repository.StatusRestored
+		file.FailureCause = ""
+		file.PipelinePhase = repository.PipelinePhasePending
+		file.LastError = ""
 	}
 
 	event := repository.JobEvent{
-		EventType: "job.restored",
-		Phase:     file.Phase,
+		EventKind: repository.EventKindOperation,
+		EventCode: repository.EventCodeRestore,
+		Status:    file.Status,
+		Outcome:   repository.OutcomeRestored,
 		Message:   "restored",
 		Error:     file.LastError,
 	}
@@ -1071,20 +1063,25 @@ func (s *Service) setConfig(cfg config.Config) {
 func (s *Service) publishWorkerEvent(event pipeline.WorkerEvent) {
 	s.updateActiveJobPhase(event.File.Path, event.Event.Phase)
 	s.logf(
-		"job event type=%s file_id=%d path=%s status=%s phase=%s message=%s error=%s",
-		event.Event.EventType,
+		"job event kind=%s code=%s file_id=%d path=%s status=%s phase=%s outcome=%s message=%s error=%s",
+		event.Event.EventKind,
+		event.Event.EventCode,
 		event.File.ID,
 		event.File.Path,
 		event.File.Status,
 		event.Event.Phase,
+		event.Event.Outcome,
 		event.Event.Message,
 		event.Event.Error,
 	)
-	s.events.Publish(event.Event.EventType, map[string]any{
+	s.events.Publish(string(event.Event.EventCode), map[string]any{
 		"file_id": event.File.ID,
 		"path":    event.File.Path,
 		"status":  event.File.Status,
 		"phase":   event.Event.Phase,
+		"kind":    event.Event.EventKind,
+		"code":    event.Event.EventCode,
+		"outcome": event.Event.Outcome,
 		"message": event.Event.Message,
 		"error":   event.Event.Error,
 	})
@@ -1100,10 +1097,10 @@ func (s *Service) trackActiveJob(path string, cancel context.CancelFunc) {
 	if s.activeJobs == nil {
 		s.activeJobs = make(map[string]activeJob)
 	}
-	s.activeJobs[path] = activeJob{cancel: cancel, phase: repository.PhaseQueued}
+	s.activeJobs[path] = activeJob{cancel: cancel}
 }
 
-func (s *Service) updateActiveJobPhase(path string, phase repository.Phase) {
+func (s *Service) updateActiveJobPhase(path string, phase repository.PipelinePhase) {
 	s.activeMu.Lock()
 	defer s.activeMu.Unlock()
 	job, ok := s.activeJobs[path]
@@ -1163,8 +1160,8 @@ func (s *Service) hasCriticalActiveJob() bool {
 	return false
 }
 
-func isCriticalPhase(phase repository.Phase) bool {
-	return phase == repository.PhaseBackingUp || phase == repository.PhaseReplacing
+func isCriticalPhase(phase repository.PipelinePhase) bool {
+	return phase == repository.PipelinePhaseBackingUp || phase == repository.PipelinePhaseReplacing
 }
 
 func (s *Service) logf(format string, args ...any) {

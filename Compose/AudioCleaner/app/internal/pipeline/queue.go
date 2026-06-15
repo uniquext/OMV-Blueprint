@@ -11,8 +11,10 @@ type Queue struct {
 type JobSource string
 
 const (
-	JobSourceDefault JobSource = ""
-	JobSourceScan    JobSource = "scan"
+	JobSourceDefault  JobSource = ""
+	JobSourceScan     JobSource = "scan"
+	JobSourceWatchdog JobSource = "watchdog"
+	JobSourceManual   JobSource = "manual"
 )
 
 type QueueJob struct {

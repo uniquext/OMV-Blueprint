@@ -1,7 +1,7 @@
 import type { JobRecord } from './types'
 import type { PageResult } from './types'
 
-export type JobFilter = 'all' | 'processing' | 'qualified' | 'unqualified' | 'ignored' | 'restored'
+export type JobFilter = 'all' | 'compatible' | 'processing' | 'processed' | 'failed' | 'restored' | 'ignored'
 
 export interface JobsRequestPlan {
   page: number
@@ -13,8 +13,9 @@ type CompatJob = Partial<JobRecord> & {
   ID?: number
   Path?: string
   Status?: string
-  QualificationSource?: string
-  UnqualifiedReason?: string
+  DiscoverySource?: string
+  FailureCause?: string
+  PipelinePhase?: string
 }
 
 export function jobID(job: CompatJob): number {
@@ -29,56 +30,68 @@ export function jobStatus(job: CompatJob): string {
   return job.status ?? job.Status ?? ''
 }
 
-export function jobReason(job: CompatJob): string {
-  return job.unqualified_reason ?? job.UnqualifiedReason ?? ''
+export function jobDiscoverySource(job: CompatJob): string {
+  return job.discovery_source ?? job.DiscoverySource ?? ''
 }
 
-export function jobSource(job: CompatJob): string {
-  return job.qualification_source ?? job.QualificationSource ?? ''
+export function jobFailureCause(job: CompatJob): string {
+  return job.failure_cause ?? job.FailureCause ?? ''
 }
 
-export function jobStatusKey(job: CompatJob): Exclude<JobFilter, 'all'> | null {
-  if (jobReason(job) === 'ignored') {
-    return 'ignored'
-  }
-  if (jobReason(job) === 'restored' || jobSource(job) === 'restored') {
-    return 'restored'
-  }
+export function jobPipelinePhase(job: CompatJob): string {
+  return job.pipeline_phase ?? job.PipelinePhase ?? ''
+}
 
+export function jobFilterKey(job: CompatJob): Exclude<JobFilter, 'all'> | null {
   const status = jobStatus(job)
-  if (status === 'qualified' || status === 'unqualified' || status === 'processing') {
+  if (
+    status === 'compatible' ||
+    status === 'processing' ||
+    status === 'processed' ||
+    status === 'failed' ||
+    status === 'restored' ||
+    status === 'ignored'
+  ) {
     return status
   }
   return null
 }
 
-export function jobReasonLabelKey(reason: string): string | null {
+export function jobFailureCauseLabelKey(cause: string): string | null {
   const keys: Record<string, string> = {
-    failed: 'jobReasonFailed',
-    unsupported: 'jobReasonUnsupported',
-    ffprobe_error: 'jobReasonFfprobeError',
-    verification_failed: 'jobReasonVerificationFailed',
-    timeout: 'jobReasonTimeout',
-    ignored: 'jobReasonIgnored',
-    restored: 'jobReasonRestored'
+    failed: 'jobFailureCauseFailed',
+    unsupported: 'jobFailureCauseUnsupported',
+    ffprobe_error: 'jobFailureCauseFfprobeError',
+    verification_failed: 'jobFailureCauseVerificationFailed',
+    timeout: 'jobFailureCauseTimeout',
+    restore_stat_error: 'jobFailureCauseRestoreStatError',
+    restore_probe_error: 'jobFailureCauseRestoreProbeError',
+    restored_requires_transcoding: 'jobFailureCauseRestoredRequiresTranscoding'
   }
-  return keys[reason] ?? null
+  return keys[cause] ?? null
 }
 
-export function jobSourceLabelKey(source: string): string | null {
+export function jobDiscoverySourceLabelKey(source: string): string | null {
   const keys: Record<string, string> = {
-    transcoded: 'jobSourceTranscoded',
-    already_compatible: 'jobSourceAlreadyCompatible',
-    observed: 'jobSourceObserved',
-    restored: 'jobSourceRestored'
+    scan: 'jobDiscoverySourceScan',
+    watchdog: 'jobDiscoverySourceWatchdog',
+    manual: 'jobDiscoverySourceManual'
   }
   return keys[source] ?? null
+}
+
+export function jobDiscoverySourceDisplay(source: string, translate: (key: string) => string): string {
+  if (!source) {
+    return ''
+  }
+  const key = jobDiscoverySourceLabelKey(source)
+  return key ? translate(key) : source
 }
 
 export function filterJobs<T extends CompatJob>(jobs: T[], filter: JobFilter, keyword: string): T[] {
   const normalizedKeyword = keyword.trim().toLowerCase()
   return jobs.filter((job) => {
-    const matchesFilter = filter === 'all' || jobStatusKey(job) === filter
+    const matchesFilter = filter === 'all' || jobFilterKey(job) === filter
     const matchesKeyword = !normalizedKeyword || jobPath(job).toLowerCase().includes(normalizedKeyword)
     return matchesFilter && matchesKeyword
   })

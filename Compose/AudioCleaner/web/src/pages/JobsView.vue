@@ -6,16 +6,16 @@ import { jobStatusLabel, t } from '../i18n'
 import { api } from '../lib/api'
 import {
   filterJobs,
+  jobDiscoverySource,
+  jobDiscoverySourceDisplay,
+  jobFilterKey,
   jobID,
   jobPath,
-  jobReason,
-  jobReasonLabelKey,
   jobsRequestPlan,
   jobStatus,
+  jobFailureCause,
+  jobFailureCauseLabelKey,
   loadAllJobPages,
-  jobSource,
-  jobSourceLabelKey,
-  jobStatusKey,
   type JobFilter
 } from '../lib/jobs'
 import { jobStatusTone, semanticBadgeClass } from '../lib/semantic'
@@ -34,7 +34,7 @@ const selectedJob = ref<JobRecord | null>(null)
 let loadSequence = 0
 let loadScheduled = false
 
-const filters: JobFilter[] = ['all', 'processing', 'qualified', 'unqualified', 'ignored', 'restored']
+const filters: JobFilter[] = ['all', 'compatible', 'processing', 'processed', 'failed', 'restored', 'ignored']
 const confirmOpen = computed(() => confirmAction.value !== null)
 const confirmTitle = computed(() => (confirmAction.value === 'scan' ? t('jobsConfirmScanTitle') : t('jobsConfirmIgnoreTitle')))
 const confirmMessage = computed(() => {
@@ -160,29 +160,27 @@ function updatePageSize(value: number): void {
 }
 
 function jobStatusDisplay(job: JobRecord): string {
-  return jobStatusLabel(jobStatusKey(job) ?? jobStatus(job))
+  return jobStatusLabel(jobFilterKey(job) ?? jobStatus(job))
 }
 
 function jobStatusBadgeClass(job: JobRecord): string {
-  return semanticBadgeClass(jobStatusTone(jobStatusKey(job) ?? jobStatus(job)))
+  return semanticBadgeClass(jobStatusTone(jobFilterKey(job) ?? jobStatus(job)))
 }
 
-function jobReasonLabel(job: JobRecord): string {
-  const reason = jobReason(job)
-  if (!reason) {
+function labelOrRaw(value: string, key: string | null): string {
+  if (!value) {
     return t('jobsEmptyValue')
   }
-  const key = jobReasonLabelKey(reason)
-  return key ? t(key) : reason
+  return key ? t(key) : value
 }
 
-function jobSourceLabel(job: JobRecord): string {
-  const source = jobSource(job)
-  if (!source) {
-    return t('jobsEmptyValue')
-  }
-  const key = jobSourceLabelKey(source)
-  return key ? t(key) : source
+function jobFailureCauseLabel(job: JobRecord): string {
+  const cause = jobFailureCause(job)
+  return labelOrRaw(cause, jobFailureCauseLabelKey(cause))
+}
+
+function jobDiscoverySourceLabel(job: JobRecord): string {
+  return jobDiscoverySourceDisplay(jobDiscoverySource(job), t)
 }
 
 watch(page, scheduleLoad)
@@ -251,15 +249,15 @@ onMounted(loadJobs)
         </thead>
         <tbody>
           <tr v-if="!loading && jobs.length === 0">
-            <td colspan="7" class="muted">{{ t('jobsNoData') }}</td>
+            <td colspan="8" class="muted">{{ t('jobsNoData') }}</td>
           </tr>
           <tr v-for="job in jobs" :key="jobID(job)">
             <td class="path-cell" :title="jobPath(job)">{{ jobPath(job) }}</td>
             <td class="status-cell">
               <span :class="jobStatusBadgeClass(job)">{{ jobStatusDisplay(job) }}</span>
             </td>
-            <td class="reason-cell">{{ jobReasonLabel(job) }}</td>
-            <td class="source-cell">{{ jobSourceLabel(job) }}</td>
+            <td class="reason-cell">{{ jobFailureCauseLabel(job) }}</td>
+            <td class="source-cell">{{ jobDiscoverySourceLabel(job) }}</td>
             <td class="attempts-cell">{{ job.attempts }}</td>
             <td class="date-cell">{{ job.updated_at || t('jobsEmptyValue') }}</td>
             <td class="actions-cell">

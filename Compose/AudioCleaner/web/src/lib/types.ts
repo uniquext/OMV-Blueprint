@@ -78,35 +78,54 @@ export interface NotificationsConfig {
   targets: string[]
 }
 
-export type JobStatus = 'qualified' | 'processing' | 'unqualified' | string
-export type QualificationSource = 'transcoded' | 'already_compatible' | 'observed' | 'restored' | string
-export type JobPhase =
+export type JobStatus = 'compatible' | 'processing' | 'processed' | 'failed' | 'restored' | 'ignored' | string
+export type DiscoverySource = 'scan' | 'watchdog' | 'manual' | string
+export type PipelinePhase =
+  | 'pending'
+  | 'queued'
+  | 'retry_wait'
+  | 'checking'
+  | 'transcoding'
+  | 'verifying'
+  | 'backing_up'
+  | 'replacing'
+  | string
+export type FailureCause =
+  | 'failed'
+  | 'unsupported'
+  | 'ffprobe_error'
+  | 'verification_failed'
+  | 'timeout'
+  | 'restore_stat_error'
+  | 'restore_probe_error'
+  | 'restored_requires_transcoding'
+  | string
+export type EventKind = 'phase_transition' | 'status_change' | 'operation' | 'diagnostic' | string
+export type EventCode =
   | 'queued'
   | 'checking'
   | 'transcoding'
   | 'verifying'
   | 'backing_up'
   | 'replacing'
-  | 'deferred'
   | 'retry_wait'
-  | string
-export type UnqualifiedReason =
+  | 'compatible'
+  | 'processed'
   | 'failed'
-  | 'unsupported'
-  | 'ffprobe_error'
-  | 'verification_failed'
-  | 'timeout'
   | 'ignored'
-  | 'restored'
+  | 'restore'
+  | 'ffmpeg_data_stream_fallback'
   | string
+export type EventOutcome = 'transcoded' | 'failed' | 'unsupported' | 'restored' | string
+export type JobPhase = PipelinePhase
 
 export interface JobRecord {
   id: number
   path: string
   status: JobStatus
-  qualification_source: QualificationSource
-  phase: JobPhase
-  unqualified_reason: UnqualifiedReason
+  discovery_source: DiscoverySource
+  failure_cause: FailureCause
+  pipeline_phase: PipelinePhase
   fingerprint: string
   size: number
   mtime_ns: number
@@ -121,8 +140,11 @@ export interface JobRecord {
 export interface JobEventRecord {
   id: number
   file_id: number
-  event_type: string
-  phase: JobPhase
+  event_kind: EventKind
+  event_code: EventCode
+  phase: PipelinePhase
+  status: JobStatus
+  outcome: EventOutcome
   attempt: number
   command: string
   message: string
@@ -165,7 +187,7 @@ export interface ServiceStatus {
 
 export interface CurrentProcessing {
   path: string
-  phase: JobPhase
+  phase: PipelinePhase
 }
 
 export interface TranscodeSuccessRate {

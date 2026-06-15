@@ -17,10 +17,7 @@ type CompatBackup = Partial<BackupRecord> & {
 }
 
 function normalizeOptionalTime(value: string | undefined): string {
-  if (!value || value.startsWith('0001-01-01T00:00:00')) {
-    return ''
-  }
-  return value
+  return value ?? ''
 }
 
 export function backupID(record: CompatBackup): number {

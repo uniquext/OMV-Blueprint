@@ -69,14 +69,17 @@ func upsertFile(ctx context.Context, queryer interface {
 	if updatedAt.IsZero() {
 		updatedAt = now
 	}
+	if file.PipelinePhase == "" {
+		file.PipelinePhase = PipelinePhasePending
+	}
 
 	row := queryer.QueryRowContext(ctx, `
 INSERT INTO files (
   file_path,
   status,
-  qualification_source,
-  phase,
-  unqualified_reason,
+  discovery_source,
+  failure_cause,
+  pipeline_phase,
   fingerprint,
   size,
   mtime_ns,
@@ -89,9 +92,9 @@ INSERT INTO files (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(file_path) DO UPDATE SET
   status = excluded.status,
-  qualification_source = excluded.qualification_source,
-  phase = excluded.phase,
-  unqualified_reason = excluded.unqualified_reason,
+  discovery_source = excluded.discovery_source,
+  failure_cause = excluded.failure_cause,
+  pipeline_phase = excluded.pipeline_phase,
   fingerprint = excluded.fingerprint,
   size = excluded.size,
   mtime_ns = excluded.mtime_ns,
@@ -100,8 +103,9 @@ ON CONFLICT(file_path) DO UPDATE SET
   attempts = excluded.attempts,
   last_error = excluded.last_error,
   updated_at = ?
-RETURNING `+fileSelectColumns, file.Path, string(file.Status), string(file.QualificationSource), string(file.Phase),
-		string(file.UnqualifiedReason), file.Fingerprint, file.Size, file.MTimeNS, file.AudioSignature,
+RETURNING `+fileSelectColumns, file.Path, string(file.Status),
+		string(file.DiscoverySource), string(file.FailureCause), string(file.PipelinePhase),
+		file.Fingerprint, file.Size, file.MTimeNS, file.AudioSignature,
 		file.VideoSignature, file.Attempts, file.LastError, formatTime(createdAt), formatTime(updatedAt),
 		formatTime(now))
 
@@ -186,16 +190,20 @@ func addJobEvent(ctx context.Context, execer interface {
 	_, err := execer.ExecContext(ctx, `
 INSERT INTO job_events (
   file_id,
-  event_type,
+  event_kind,
+  event_code,
   phase,
+  status,
+  outcome,
   attempt,
   command,
   message,
   error,
   started_at,
   finished_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		event.FileID, event.EventType, string(event.Phase), event.Attempt, event.Command,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		event.FileID, string(event.EventKind), string(event.EventCode), string(event.Phase),
+		string(event.Status), string(event.Outcome), event.Attempt, event.Command,
 		event.Message, event.Error, formatTime(startedAt), formatTime(event.FinishedAt))
 	if err != nil {
 		return fmt.Errorf("add job event: %w", err)
@@ -208,7 +216,7 @@ func (r *Repository) RecentJobEvents(ctx context.Context, limit int) ([]JobEvent
 		limit = 50
 	}
 	rows, err := r.db.QueryContext(ctx, `
-SELECT id, file_id, event_type, phase, attempt, command, message, error, started_at, finished_at
+SELECT id, file_id, event_kind, event_code, phase, status, outcome, attempt, command, message, error, started_at, finished_at
 FROM job_events
 ORDER BY started_at DESC, id DESC
 LIMIT ?`, limit)
@@ -220,14 +228,21 @@ LIMIT ?`, limit)
 	events := make([]JobEvent, 0)
 	for rows.Next() {
 		var event JobEvent
+		var eventKind string
+		var eventCode string
 		var phase string
+		var status string
+		var outcome string
 		var startedAt string
 		var finishedAt string
 		if err := rows.Scan(
 			&event.ID,
 			&event.FileID,
-			&event.EventType,
+			&eventKind,
+			&eventCode,
 			&phase,
+			&status,
+			&outcome,
 			&event.Attempt,
 			&event.Command,
 			&event.Message,
@@ -237,7 +252,11 @@ LIMIT ?`, limit)
 		); err != nil {
 			return nil, err
 		}
-		event.Phase = Phase(phase)
+		event.EventKind = EventKind(eventKind)
+		event.EventCode = EventCode(eventCode)
+		event.Phase = PipelinePhase(phase)
+		event.Status = Status(status)
+		event.Outcome = EventOutcome(outcome)
 		var parseErr error
 		event.StartedAt, parseErr = parseTime(startedAt)
 		if parseErr != nil {
@@ -259,8 +278,8 @@ func (r *Repository) TranscodeStats(ctx context.Context) (TranscodeStats, error)
 	var stats TranscodeStats
 	err := r.db.QueryRowContext(ctx, `
 	SELECT
-	  COALESCE(SUM(CASE WHEN event_type = 'job.qualified' AND message = 'transcoded' THEN 1 ELSE 0 END), 0),
-	  COALESCE(SUM(CASE WHEN event_type = 'job.unqualified' AND message = 'failed' THEN 1 ELSE 0 END), 0)
+	  COALESCE(SUM(CASE WHEN outcome = 'transcoded' THEN 1 ELSE 0 END), 0),
+	  COALESCE(SUM(CASE WHEN outcome = 'failed' THEN 1 ELSE 0 END), 0)
 	FROM job_events`).Scan(&stats.Succeeded, &stats.Failed)
 	if err != nil {
 		return TranscodeStats{}, fmt.Errorf("query transcode stats: %w", err)
@@ -493,9 +512,9 @@ type rowScanner interface {
 func scanFile(row rowScanner) (FileRecord, error) {
 	var file FileRecord
 	var status string
-	var qualificationSource string
-	var phase string
-	var unqualifiedReason string
+	var discoverySource string
+	var failureCause string
+	var pipelinePhase string
 	var createdAt string
 	var updatedAt string
 
@@ -503,9 +522,9 @@ func scanFile(row rowScanner) (FileRecord, error) {
 		&file.ID,
 		&file.Path,
 		&status,
-		&qualificationSource,
-		&phase,
-		&unqualifiedReason,
+		&discoverySource,
+		&failureCause,
+		&pipelinePhase,
 		&file.Fingerprint,
 		&file.Size,
 		&file.MTimeNS,
@@ -530,9 +549,9 @@ func scanFile(row rowScanner) (FileRecord, error) {
 		return FileRecord{}, fmt.Errorf("parse file updated_at: %w", parseErr)
 	}
 	file.Status = Status(status)
-	file.QualificationSource = QualificationSource(qualificationSource)
-	file.Phase = Phase(phase)
-	file.UnqualifiedReason = UnqualifiedReason(unqualifiedReason)
+	file.DiscoverySource = DiscoverySource(discoverySource)
+	file.FailureCause = FailureCause(failureCause)
+	file.PipelinePhase = PipelinePhase(pipelinePhase)
 
 	return file, nil
 }
@@ -632,9 +651,9 @@ const fileSelectColumns = `
   id,
   file_path,
   status,
-  qualification_source,
-  phase,
-  unqualified_reason,
+  discovery_source,
+  failure_cause,
+  pipeline_phase,
   fingerprint,
   size,
   mtime_ns,
@@ -664,9 +683,9 @@ var schemaStatements = []string{
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   file_path TEXT NOT NULL UNIQUE,
   status TEXT NOT NULL,
-  qualification_source TEXT NOT NULL DEFAULT '',
-  phase TEXT NOT NULL DEFAULT '',
-  unqualified_reason TEXT NOT NULL DEFAULT '',
+  discovery_source TEXT NOT NULL DEFAULT '',
+  failure_cause TEXT NOT NULL DEFAULT '',
+  pipeline_phase TEXT NOT NULL DEFAULT 'pending',
   fingerprint TEXT NOT NULL DEFAULT '',
   size INTEGER NOT NULL DEFAULT 0,
   mtime_ns INTEGER NOT NULL DEFAULT 0,
@@ -680,8 +699,11 @@ var schemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS job_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   file_id INTEGER NOT NULL,
-  event_type TEXT NOT NULL,
+  event_kind TEXT NOT NULL DEFAULT '',
+  event_code TEXT NOT NULL DEFAULT '',
   phase TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT '',
+  outcome TEXT NOT NULL DEFAULT '',
   attempt INTEGER NOT NULL DEFAULT 0,
   command TEXT NOT NULL DEFAULT '',
   message TEXT NOT NULL DEFAULT '',

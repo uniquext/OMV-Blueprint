@@ -421,13 +421,14 @@ textarea {
 }
 
 .dashboard-metric--service,
-.dashboard-metric--qualified,
+.dashboard-metric--compatible,
+.dashboard-metric--processed,
 .dashboard-metric--success {
   --metric-color: #258a5d;
   --metric-bg: #eef8f2;
 }
 
-.dashboard-metric--unqualified {
+.dashboard-metric--failed {
   --metric-color: #c0392b;
   --metric-bg: #fff4f2;
 }
@@ -540,19 +541,143 @@ textarea {
   max-height: 420px;
   overflow: auto;
   border-radius: 0 0 7px 7px;
-  background: #1f2530;
-  color: #d8dee9;
+  background: #1e1e2e;
+  color: #cdd6f4;
   padding: 14px;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-family: "SF Mono", "SFMono-Regular", "Fira Code", Consolas, "Liberation Mono", monospace;
   font-size: 12px;
-  line-height: 1.65;
+  line-height: 1.7;
+}
+
+.runtime-log-line {
+  display: flex;
+  gap: 8px;
+  color: #cdd6f4;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.runtime-log-line__timestamp {
+  flex: 0 0 auto;
+  color: #6c7086;
+}
+
+.runtime-log-line__level {
+  flex: 0 0 auto;
+  font-weight: 700;
+}
+
+.runtime-log-line__level--debug {
+  color: #94e2d5;
+}
+
+.runtime-log-line__level--info {
+  color: #89b4fa;
+}
+
+.runtime-log-line__level--warn {
+  color: #f9e2af;
+}
+
+.runtime-log-line__level--error {
+  color: #f38ba8;
+}
+
+.runtime-log-line__message {
+  min-width: 0;
+  color: #cdd6f4;
 }
 
 .runtime-log-viewer--empty {
   color: #9aa7b4;
   text-align: center;
+}
+
+.history-table {
+  table-layout: auto;
+}
+
+.history-expand-cell {
+  width: 40px;
+}
+
+.history-expand-button {
+  min-width: 30px;
+  min-height: 24px;
+  padding: 2px 6px;
+  font-family: "SF Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
+.history-detail-row td {
+  background: #f8fafc;
+  padding: 12px 16px;
+}
+
+.history-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 8px 24px;
+}
+
+.history-detail-field {
+  display: grid;
+  grid-template-columns: minmax(112px, 148px) minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  min-width: 0;
+}
+
+.history-detail-field--wide {
+  grid-column: 1 / -1;
+}
+
+.history-detail-key {
+  color: #687886;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.history-detail-value {
+  min-width: 0;
+  color: #24313c;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.history-error-link {
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: #c0392b;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+  text-decoration: underline dotted;
+  overflow-wrap: anywhere;
+}
+
+.history-error-link:hover {
+  color: #9f2f24;
+}
+
+.log-error-dialog {
+  width: min(780px, calc(100vw - 32px));
+}
+
+.log-error-dialog__message {
+  max-height: min(52vh, 420px);
+  margin: 0;
+  overflow: auto;
+  border-radius: 6px;
+  background: #1e1e2e;
+  color: #cdd6f4;
+  padding: 12px;
+  font-family: "SF Mono", "SFMono-Regular", "Fira Code", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .data-pager {
@@ -621,7 +746,7 @@ textarea {
   }
 
   .nav-list {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
   }
 
   .nav-link {

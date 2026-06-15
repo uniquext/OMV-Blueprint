@@ -213,7 +213,8 @@ func (w *Worker) ProcessPathWithSource(ctx context.Context, path string, source 
 		}
 	}
 
-	file, err = w.transition(ctx, file, repository.StatusProcessing, repository.PhaseQueued, "")
+	file.DiscoverySource = discoverySourceForJob(source, file.DiscoverySource)
+	file, err = w.transitionPhase(ctx, file, repository.PipelinePhaseQueued, "")
 	if err != nil {
 		return err
 	}
@@ -233,10 +234,13 @@ func (w *Worker) ProcessPathWithSource(ctx context.Context, path string, source 
 }
 
 func shouldSkipUnchanged(file repository.FileRecord) bool {
-	if file.Status == repository.StatusQualified {
+	if file.Status == repository.StatusCompatible ||
+		file.Status == repository.StatusProcessed ||
+		file.Status == repository.StatusRestored ||
+		file.Status == repository.StatusIgnored {
 		return true
 	}
-	return file.Status == repository.StatusUnqualified
+	return file.Status == repository.StatusFailed
 }
 
 func (w *Worker) fileUnchanged(ctx context.Context, file repository.FileRecord) (bool, error) {
@@ -257,21 +261,23 @@ func (w *Worker) fileUnchanged(ctx context.Context, file repository.FileRecord) 
 }
 
 func canUseStatOnlyFingerprint(file repository.FileRecord) bool {
-	return file.Status == repository.StatusUnqualified &&
+	return (file.Status == repository.StatusFailed ||
+		file.Status == repository.StatusIgnored ||
+		file.Status == repository.StatusRestored) &&
 		file.AudioSignature == "" &&
 		file.VideoSignature == ""
 }
 
 func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, file repository.FileRecord, source JobSource, fileMissing bool) (repository.FileRecord, error) {
 	var err error
-	file, err = w.transition(persistCtx, file, repository.StatusProcessing, repository.PhaseChecking, "")
+	file, err = w.transitionPhase(persistCtx, file, repository.PipelinePhaseChecking, "")
 	if err != nil {
 		return file, err
 	}
 
 	originalStat, err := w.stable.Wait(jobCtx, file.Path, w.cfg.Pipeline.StatQuietDuration())
 	if err != nil {
-		return file, failure(err, reasonForContextOr(repository.ReasonFailed, err))
+		return file, failure(err, causeForContextOr(repository.CauseFailed, err))
 	}
 	file.Size = originalStat.Size
 	file.MTimeNS = originalStat.MTimeNS
@@ -291,23 +297,24 @@ func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, 
 
 	switch decision.Action {
 	case media.ActionUnsupported:
-		file.Status = repository.StatusUnqualified
-		file.UnqualifiedReason = repository.ReasonUnsupported
+		file.Status = repository.StatusFailed
+		file.FailureCause = repository.CauseUnsupported
+		file.PipelinePhase = repository.PipelinePhasePending
 		file.LastError = decision.Reason
 		file, err := w.persist(persistCtx, file, "unsupported")
 		return file, err
 	case media.ActionAlreadyCompatible:
-		file.Status = repository.StatusQualified
-		file.QualificationSource = alreadyCompatibleSource(source, fileMissing)
-		file.UnqualifiedReason = ""
+		file.Status = repository.StatusCompatible
+		file.FailureCause = ""
+		file.PipelinePhase = repository.PipelinePhasePending
 		file.LastError = ""
-		file, err := w.persist(persistCtx, file, "qualified")
+		file, err := w.persist(persistCtx, file, "compatible")
 		return file, err
 	}
 
 	outputPath, err := w.temp.Allocate(file.Path)
 	if err != nil {
-		return file, failure(err, repository.ReasonFailed)
+		return file, failure(err, repository.CauseFailed)
 	}
 	sourcePath := ""
 	removeOutputOnFailure := true
@@ -322,10 +329,10 @@ func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, 
 	}()
 	sourcePath, err = w.source.Copy(file.Path, outputPath)
 	if err != nil {
-		return file, failure(err, repository.ReasonFailed)
+		return file, failure(err, repository.CauseFailed)
 	}
 
-	file, err = w.transition(persistCtx, file, repository.StatusProcessing, repository.PhaseTranscoding, "")
+	file, err = w.transitionPhase(persistCtx, file, repository.PipelinePhaseTranscoding, "")
 	if err != nil {
 		return file, err
 	}
@@ -333,29 +340,31 @@ func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, 
 	fallbackArgs := media.BuildFFmpegArgs(sourcePath, outputPath, originalProbe, decision, false)
 	usedFallback, err := runFFmpegWithFallbackReport(jobCtx, w.runner, w.ffmpegName, primaryArgs, fallbackArgs)
 	if err != nil {
-		return file, failure(err, reasonForContextOr(repository.ReasonFailed, err))
+		return file, failure(err, causeForContextOr(repository.CauseFailed, err))
 	}
 	if usedFallback {
 		_ = w.repository.AddJobEvent(persistCtx, repository.JobEvent{
 			FileID:    file.ID,
-			EventType: "job.ffmpeg_data_stream_fallback",
-			Phase:     repository.PhaseTranscoding,
+			EventKind: repository.EventKindDiagnostic,
+			EventCode: repository.EventCodeFfmpegDataStreamFallback,
+			Phase:     repository.PipelinePhaseTranscoding,
+			Status:    file.Status,
 			Attempt:   currentAttempt(file),
 			Message:   "ffmpeg fallback without data streams succeeded",
 		})
 	}
 
-	file, err = w.transition(persistCtx, file, repository.StatusProcessing, repository.PhaseVerifying, "")
+	file, err = w.transitionPhase(persistCtx, file, repository.PipelinePhaseVerifying, "")
 	if err != nil {
 		return file, err
 	}
 	outputStat, err := w.stat.Stat(outputPath)
 	if err != nil {
-		return file, failure(err, repository.ReasonVerificationFailed)
+		return file, failure(err, repository.CauseVerificationFailed)
 	}
 	outputProbe, err := w.prober.Probe(jobCtx, outputPath)
 	if err != nil {
-		return file, failure(err, reasonForContextOr(repository.ReasonFFProbeError, err))
+		return file, failure(err, causeForContextOr(repository.CauseFFProbeError, err))
 	}
 	if err := media.ValidateOutput(originalProbe, outputProbe, decision, media.ValidationRules{
 		IncompatibleCodecs:       w.cfg.Audio.IncompatibleCodecs,
@@ -365,12 +374,12 @@ func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, 
 		OriginalSize:             originalStat.Size,
 		OutputSize:               outputStat.Size(),
 	}); err != nil {
-		return file, failure(err, repository.ReasonVerificationFailed)
+		return file, failure(err, repository.CauseVerificationFailed)
 	}
 
 	currentOriginalStat, err := w.stat.Stat(file.Path)
 	if err != nil {
-		return file, failure(fmt.Errorf("stat original file before replace: %w", err), repository.ReasonFailed)
+		return file, failure(fmt.Errorf("stat original file before replace: %w", err), repository.CauseFailed)
 	}
 	if currentOriginalStat.Size() != originalStat.Size || currentOriginalStat.ModTime().UnixNano() != originalStat.MTimeNS {
 		return file, failure(fmt.Errorf(
@@ -379,20 +388,20 @@ func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, 
 			originalStat.MTimeNS,
 			currentOriginalStat.Size(),
 			currentOriginalStat.ModTime().UnixNano(),
-		), repository.ReasonFailed)
+		), repository.CauseFailed)
 	}
 
-	file, err = w.transition(persistCtx, file, repository.StatusProcessing, repository.PhaseBackingUp, "")
+	file, err = w.transitionPhase(persistCtx, file, repository.PipelinePhaseBackingUp, "")
 	if err != nil {
 		return file, err
 	}
-	file, err = w.transition(persistCtx, file, repository.StatusProcessing, repository.PhaseReplacing, "")
+	file, err = w.transitionPhase(persistCtx, file, repository.PipelinePhaseReplacing, "")
 	if err != nil {
 		return file, err
 	}
 	replace, err := w.backup.Replace(jobCtx, file.Path, outputPath, w.backupRoot, retentionDuration(w.cfg.Backup.RetentionDays))
 	if err != nil {
-		return file, failure(err, reasonForContextOr(repository.ReasonFailed, err))
+		return file, failure(err, causeForContextOr(repository.CauseFailed, err))
 	}
 	removeOutputOnFailure = false
 	if err := w.repository.AddBackup(persistCtx, repository.BackupRecord{
@@ -425,9 +434,9 @@ func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, 
 		return file, postReplacePersistenceError{err: fmt.Errorf("validate replaced original file: %w", err)}
 	}
 
-	file.Status = repository.StatusQualified
-	file.QualificationSource = repository.SourceTranscoded
-	file.UnqualifiedReason = ""
+	file.Status = repository.StatusProcessed
+	file.FailureCause = ""
+	file.PipelinePhase = repository.PipelinePhasePending
 	file.LastError = ""
 	file.Size = finalStat.Size()
 	file.MTimeNS = finalStat.ModTime().UnixNano()
@@ -444,32 +453,32 @@ func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, 
 func (w *Worker) recordFailure(ctx context.Context, file repository.FileRecord, err error) error {
 	file.Attempts++
 	file.LastError = err.Error()
-	file.QualificationSource = ""
 
-	reason := reasonForFailure(err)
+	cause := causeForFailure(err)
 	if file.Attempts <= w.cfg.Pipeline.MaxRetries {
 		file.Status = repository.StatusProcessing
-		file.Phase = repository.PhaseRetryWait
-		file.UnqualifiedReason = ""
+		file.PipelinePhase = repository.PipelinePhaseRetryWait
+		file.FailureCause = ""
 	} else {
-		file.Status = repository.StatusUnqualified
-		file.UnqualifiedReason = reason
+		file.Status = repository.StatusFailed
+		file.PipelinePhase = repository.PipelinePhasePending
+		file.FailureCause = cause
 	}
 
 	persisted, persistErr := w.persist(ctx, file, "failed")
 	if persistErr != nil {
 		return fmt.Errorf("%w; record failure: %v", err, persistErr)
 	}
-	if persisted.Status == repository.StatusProcessing && persisted.Phase == repository.PhaseRetryWait && w.scheduler != nil {
+	if persisted.Status == repository.StatusProcessing && persisted.PipelinePhase == repository.PipelinePhaseRetryWait && w.scheduler != nil {
 		w.scheduler.Schedule(persisted.Path, w.cfg.Pipeline.RetryDelay())
 	}
 	return err
 }
 
-func (w *Worker) transition(ctx context.Context, file repository.FileRecord, status repository.Status, phase repository.Phase, message string) (repository.FileRecord, error) {
-	file.Status = status
-	file.Phase = phase
-	file.UnqualifiedReason = ""
+func (w *Worker) transitionPhase(ctx context.Context, file repository.FileRecord, phase repository.PipelinePhase, message string) (repository.FileRecord, error) {
+	file.Status = repository.StatusProcessing
+	file.PipelinePhase = phase
+	file.FailureCause = ""
 	file.LastError = ""
 	return w.persist(ctx, file, message)
 }
@@ -480,20 +489,7 @@ func (w *Worker) persist(ctx context.Context, file repository.FileRecord, messag
 		return file, err
 	}
 
-	eventType := "job." + string(persisted.Phase)
-	if persisted.Status == repository.StatusQualified {
-		eventType = "job.qualified"
-	} else if persisted.Status == repository.StatusUnqualified {
-		eventType = "job.unqualified"
-	}
-	event := repository.JobEvent{
-		FileID:    persisted.ID,
-		EventType: eventType,
-		Phase:     persisted.Phase,
-		Attempt:   eventAttempt(persisted, message),
-		Message:   message,
-		Error:     persisted.LastError,
-	}
+	event := eventForPersist(persisted, message)
 	if err := w.repository.AddJobEvent(ctx, event); err != nil {
 		return persisted, nil
 	}
@@ -505,11 +501,93 @@ func (w *Worker) persist(ctx context.Context, file repository.FileRecord, messag
 	return persisted, nil
 }
 
-func alreadyCompatibleSource(source JobSource, fileMissing bool) repository.QualificationSource {
-	if source == JobSourceScan && fileMissing {
-		return repository.SourceObserved
+func eventForPersist(file repository.FileRecord, message string) repository.JobEvent {
+	event := repository.JobEvent{
+		FileID:  file.ID,
+		Status:  file.Status,
+		Message: message,
+		Error:   file.LastError,
 	}
-	return repository.SourceAlreadyCompatible
+	switch {
+	case file.Status == repository.StatusCompatible:
+		event.EventKind = repository.EventKindStatusChange
+		event.EventCode = repository.EventCodeCompatible
+	case file.Status == repository.StatusProcessed:
+		event.EventKind = repository.EventKindStatusChange
+		event.EventCode = repository.EventCodeProcessed
+		event.Outcome = repository.OutcomeTranscoded
+	case file.Status == repository.StatusRestored:
+		event.EventKind = repository.EventKindStatusChange
+		event.EventCode = repository.EventCodeRestore
+		event.Outcome = repository.OutcomeRestored
+	case file.Status == repository.StatusIgnored:
+		event.EventKind = repository.EventKindStatusChange
+		event.EventCode = repository.EventCodeIgnored
+	case file.Status == repository.StatusFailed:
+		event.EventKind = repository.EventKindStatusChange
+		event.EventCode = repository.EventCodeFailed
+		event.Outcome = outcomeForCause(file.FailureCause)
+		event.Phase = file.PipelinePhase
+	case file.PipelinePhase != repository.PipelinePhasePending:
+		event.EventKind = repository.EventKindPhaseTransition
+		event.EventCode = eventCodeForPipelinePhase(file.PipelinePhase)
+		event.Phase = file.PipelinePhase
+	}
+	event.Attempt = eventAttempt(file, event)
+	return event
+}
+
+func eventCodeForPipelinePhase(phase repository.PipelinePhase) repository.EventCode {
+	switch phase {
+	case repository.PipelinePhaseQueued:
+		return repository.EventCodeQueued
+	case repository.PipelinePhaseRetryWait:
+		return repository.EventCodeRetryWait
+	case repository.PipelinePhaseChecking:
+		return repository.EventCodeChecking
+	case repository.PipelinePhaseTranscoding:
+		return repository.EventCodeTranscoding
+	case repository.PipelinePhaseVerifying:
+		return repository.EventCodeVerifying
+	case repository.PipelinePhaseBackingUp:
+		return repository.EventCodeBackingUp
+	case repository.PipelinePhaseReplacing:
+		return repository.EventCodeReplacing
+	default:
+		return repository.EventCode(phase)
+	}
+}
+
+func outcomeForCause(cause repository.FailureCause) repository.EventOutcome {
+	switch cause {
+	case repository.CauseUnsupported:
+		return repository.OutcomeUnsupported
+	case "":
+		return ""
+	default:
+		return repository.OutcomeFailed
+	}
+}
+
+func discoverySourceForJob(source JobSource, current repository.DiscoverySource) repository.DiscoverySource {
+	switch source {
+	case JobSourceScan:
+		return repository.DiscoveryScan
+	case JobSourceWatchdog:
+		return repository.DiscoveryWatchdog
+	case JobSourceManual:
+		return repository.DiscoveryManual
+	case JobSourceDefault:
+		if current != "" {
+			return current
+		}
+		return repository.DiscoveryManual
+	default:
+		if current != "" {
+			return current
+		}
+		return repository.DiscoveryManual
+	}
 }
 
 func (w *Worker) validateDeps() error {
@@ -648,12 +726,12 @@ func containsParentTraversal(rel string) bool {
 }
 
 type workerFailure struct {
-	err    error
-	reason repository.UnqualifiedReason
+	err   error
+	cause repository.FailureCause
 }
 
-func failure(err error, reason repository.UnqualifiedReason) error {
-	return workerFailure{err: err, reason: reason}
+func failure(err error, cause repository.FailureCause) error {
+	return workerFailure{err: err, cause: cause}
 }
 
 func (w workerFailure) Error() string {
@@ -664,21 +742,21 @@ func (w workerFailure) Unwrap() error {
 	return w.err
 }
 
-func reasonForFailure(err error) repository.UnqualifiedReason {
+func causeForFailure(err error) repository.FailureCause {
 	var workerErr workerFailure
 	if errors.As(err, &workerErr) {
-		return workerErr.reason
+		return workerErr.cause
 	}
-	return reasonForContextOr(repository.ReasonFailed, err)
+	return causeForContextOr(repository.CauseFailed, err)
 }
 
-func reasonForProbeError(err error) repository.UnqualifiedReason {
-	return reasonForContextOr(repository.ReasonFFProbeError, err)
+func reasonForProbeError(err error) repository.FailureCause {
+	return causeForContextOr(repository.CauseFFProbeError, err)
 }
 
-func reasonForContextOr(fallback repository.UnqualifiedReason, err error) repository.UnqualifiedReason {
+func causeForContextOr(fallback repository.FailureCause, err error) repository.FailureCause {
 	if errors.Is(err, context.DeadlineExceeded) {
-		return repository.ReasonTimeout
+		return repository.CauseTimeout
 	}
 	return fallback
 }
@@ -699,8 +777,8 @@ func currentAttempt(file repository.FileRecord) int {
 	return file.Attempts + 1
 }
 
-func eventAttempt(file repository.FileRecord, message string) int {
-	if message == "failed" {
+func eventAttempt(file repository.FileRecord, event repository.JobEvent) int {
+	if event.Outcome == repository.OutcomeFailed || event.EventCode == repository.EventCodeRetryWait {
 		return file.Attempts
 	}
 	return currentAttempt(file)
