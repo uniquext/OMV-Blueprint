@@ -1,0 +1,68 @@
+# ==============================================================================
+# MediaTools 媒体后处理工具链 (Media Post-Processing Stack)
+# ==============================================================================
+# 描述：
+#   基于独立网络隔离的媒体后处理工具集合，包括字幕感知翻译、音频轨道清理等功能。
+#   与 Servarr 核心管道分离，各自独立演进。
+#
+# 端口占用汇总：
+#   - 9800 (SubtitleTranslator): 智能字幕翻译与自动化后处理
+#   - 9830 (AudioCleaner): 媒体音轨智能清理
+#
+# 数据挂载逻辑：
+#   - ./config: 服务运行时生成的动态配置 (Service Local 层)
+#   - ./data, ./logs, 等: 服务各自的私有工作目录
+#   - ${RESOURCE}/Media: 海量媒体库物理存放路径 (Resource 层)
+# ==============================================================================
+
+services:
+  # 1. 智能字幕翻译与后处理
+  subtitle-translator:
+    image: subtitle-translator:latest
+    container_name: ${SUBTITLE_TRANSLATOR_HOSTNAME}
+    hostname: ${SUBTITLE_TRANSLATOR_HOSTNAME}
+    restart: unless-stopped
+    environment:
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+      LLM_API_URL: ${ST_LLM_API_URL}
+      LLM_API_KEY: ${ST_LLM_API_KEY}
+      LLM_MODEL: ${ST_LLM_MODEL}
+      LLM_MODEL_TYPE: ${ST_LLM_MODEL_TYPE}
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    volumes:
+      - ./config/subtitle-translator:/app/config
+      - ./data/subtitle-translator:/app/data
+      - ./logs/subtitle-translator:/app/logs
+      - ./prompts/subtitle-translator:/app/prompts
+      - ${RESOURCE}/Media:/media
+    ports:
+      - "${SUBTITLE_TRANSLATOR_PORT}:9800"
+
+  # 2. 媒体音轨清理
+  audiocleaner:
+    image: audiocleaner:latest
+    container_name: ${AUDIOCLEANER_HOSTNAME}
+    hostname: ${AUDIOCLEANER_HOSTNAME}
+    restart: unless-stopped
+    environment:
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    volumes:
+      - ./config/audiocleaner:/app/config
+      - ./data/audiocleaner:/app/data
+      - ./logs/audiocleaner:/app/logs
+      - ./backups/audiocleaner:/app/backups
+      - ./work/audiocleaner:/app/work
+      - ${RESOURCE}/Media:/media
+    ports:
+      - "${AUDIOCLEANER_PORT}:9830"
+
+networks:
+  default:
+    name: mediatools-network
