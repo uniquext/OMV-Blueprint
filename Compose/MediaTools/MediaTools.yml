@@ -19,6 +19,7 @@ services:
   # 1. 智能字幕翻译与后处理
   subtitle-translator:
     image: subtitle-translator:latest
+    pull_policy: never
     container_name: ${SUBTITLE_TRANSLATOR_HOSTNAME}
     hostname: ${SUBTITLE_TRANSLATOR_HOSTNAME}
     restart: unless-stopped
@@ -43,9 +44,10 @@ services:
 
   # 2. 媒体音轨清理
   audiocleaner:
-    image: audiocleaner:latest
-    container_name: ${AUDIOCLEANER_HOSTNAME}
-    hostname: ${AUDIOCLEANER_HOSTNAME}
+    image: audio-cleaner:latest
+    pull_policy: never
+    container_name: ${AUDIO_CLEANER_HOSTNAME}
+    hostname: ${AUDIO_CLEANER_HOSTNAME}
     restart: unless-stopped
     environment:
       PUID: ${PUID}
@@ -61,7 +63,7 @@ services:
       - ./work/audiocleaner:/app/work
       - ${RESOURCE}/Media:/media
     ports:
-      - "${AUDIOCLEANER_PORT}:9830"
+      - "${AUDIO_CLEANER_PORT}:9830"
 
 networks:
   default:
