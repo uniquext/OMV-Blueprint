@@ -44,15 +44,6 @@ func (r *Repository) Close() error {
 	return r.db.Close()
 }
 
-func (r *Repository) Meta(ctx context.Context, key string) (string, error) {
-	var value string
-	err := r.db.QueryRowContext(ctx, `SELECT value FROM system_meta WHERE key = ?`, key).Scan(&value)
-	if err != nil {
-		return "", err
-	}
-	return value, nil
-}
-
 func (r *Repository) UpsertFile(ctx context.Context, file FileRecord) (FileRecord, error) {
 	now := time.Now().UTC()
 	return upsertFile(ctx, r.db, file, now)
@@ -71,6 +62,9 @@ func upsertFile(ctx context.Context, queryer interface {
 	}
 	if file.PipelinePhase == "" {
 		file.PipelinePhase = PipelinePhasePending
+	}
+	if file.DiscoverySource == "" {
+		file.DiscoverySource = DiscoveryManual
 	}
 
 	row := queryer.QueryRowContext(ctx, `
@@ -104,9 +98,9 @@ ON CONFLICT(file_path) DO UPDATE SET
   last_error = excluded.last_error,
   updated_at = ?
 RETURNING `+fileSelectColumns, file.Path, string(file.Status),
-		string(file.DiscoverySource), string(file.FailureCause), string(file.PipelinePhase),
+		string(file.DiscoverySource), nullableEnum(file.FailureCause), string(file.PipelinePhase),
 		file.Fingerprint, file.Size, file.MTimeNS, file.AudioSignature,
-		file.VideoSignature, file.Attempts, file.LastError, formatTime(createdAt), formatTime(updatedAt),
+		file.VideoSignature, file.Attempts, nullableString(file.LastError), formatTime(createdAt), formatTime(updatedAt),
 		formatTime(now))
 
 	persisted, err := scanFile(row)
@@ -202,9 +196,9 @@ INSERT INTO job_events (
   started_at,
   finished_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		event.FileID, string(event.EventKind), string(event.EventCode), string(event.Phase),
-		string(event.Status), string(event.Outcome), event.Attempt, event.Command,
-		event.Message, event.Error, formatTime(startedAt), formatTime(event.FinishedAt))
+		event.FileID, string(event.EventKind), string(event.EventCode), nullableEnum(event.Phase),
+		nullableEnum(event.Status), nullableEnum(event.Outcome), event.Attempt, nullableString(event.Command),
+		nullableString(event.Message), nullableString(event.Error), formatTime(startedAt), nullableTime(event.FinishedAt))
 	if err != nil {
 		return fmt.Errorf("add job event: %w", err)
 	}
@@ -230,11 +224,14 @@ LIMIT ?`, limit)
 		var event JobEvent
 		var eventKind string
 		var eventCode string
-		var phase string
-		var status string
-		var outcome string
+		var phase sql.NullString
+		var status sql.NullString
+		var outcome sql.NullString
+		var command sql.NullString
+		var message sql.NullString
+		var eventError sql.NullString
 		var startedAt string
-		var finishedAt string
+		var finishedAt sql.NullString
 		if err := rows.Scan(
 			&event.ID,
 			&event.FileID,
@@ -244,9 +241,9 @@ LIMIT ?`, limit)
 			&status,
 			&outcome,
 			&event.Attempt,
-			&event.Command,
-			&event.Message,
-			&event.Error,
+			&command,
+			&message,
+			&eventError,
 			&startedAt,
 			&finishedAt,
 		); err != nil {
@@ -254,15 +251,18 @@ LIMIT ?`, limit)
 		}
 		event.EventKind = EventKind(eventKind)
 		event.EventCode = EventCode(eventCode)
-		event.Phase = PipelinePhase(phase)
-		event.Status = Status(status)
-		event.Outcome = EventOutcome(outcome)
+		event.Phase = PipelinePhase(nullableStringValue(phase))
+		event.Status = Status(nullableStringValue(status))
+		event.Outcome = EventOutcome(nullableStringValue(outcome))
+		event.Command = nullableStringValue(command)
+		event.Message = nullableStringValue(message)
+		event.Error = nullableStringValue(eventError)
 		var parseErr error
 		event.StartedAt, parseErr = parseTime(startedAt)
 		if parseErr != nil {
 			return nil, fmt.Errorf("parse event started_at: %w", parseErr)
 		}
-		event.FinishedAt, parseErr = parseTime(finishedAt)
+		event.FinishedAt, parseErr = parseNullableTime(finishedAt)
 		if parseErr != nil {
 			return nil, fmt.Errorf("parse event finished_at: %w", parseErr)
 		}
@@ -294,29 +294,23 @@ func (r *Repository) AddBackup(ctx context.Context, backup BackupRecord) error {
 	}
 
 	_, err := r.db.ExecContext(ctx, `
-INSERT INTO backups (
-  file_id,
-  original_path,
-  backup_path,
-  original_size,
-  original_mtime_ns,
-  created_at,
-  expires_at,
-  restored_at,
-  restore_safety_path,
-  missing
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		backup.FileID, backup.OriginalPath, backup.BackupPath, backup.OriginalSize,
-		backup.OriginalMTimeNS, formatTime(createdAt), formatTime(backup.ExpiresAt),
-		formatTime(backup.RestoredAt), backup.RestoreSafetyPath, boolInt(backup.Missing))
+	INSERT INTO backups (
+	  file_id,
+	  backup_path,
+	  created_at,
+	  restored_at,
+	  restore_safety_path
+	) VALUES (?, ?, ?, ?, ?)`,
+		backup.FileID, backup.BackupPath, formatTime(createdAt),
+		nullableTime(backup.RestoredAt), nullableString(backup.RestoreSafetyPath))
 	if err != nil {
 		return fmt.Errorf("add backup: %w", err)
 	}
 	return nil
 }
 
-func (r *Repository) Backups(ctx context.Context) ([]BackupRecord, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT `+backupSelectColumns+` FROM backups ORDER BY created_at DESC, id DESC`)
+func (r *Repository) Backups(ctx context.Context) ([]BackupView, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+backupSelectColumns+` FROM backups JOIN files ON files.id = backups.file_id ORDER BY backups.created_at DESC, backups.id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -324,35 +318,36 @@ func (r *Repository) Backups(ctx context.Context) ([]BackupRecord, error) {
 	return scanBackups(rows)
 }
 
-func (r *Repository) BackupsPage(ctx context.Context, req PageRequest) (PageResult[BackupRecord], error) {
+func (r *Repository) BackupsPage(ctx context.Context, req PageRequest) (PageResult[BackupView], error) {
 	req = req.Normalize()
 	var total int
 	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM backups`).Scan(&total); err != nil {
-		return PageResult[BackupRecord]{}, err
+		return PageResult[BackupView]{}, err
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT `+backupSelectColumns+` FROM backups ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, req.PageSize, req.Offset())
+	rows, err := r.db.QueryContext(ctx, `SELECT `+backupSelectColumns+` FROM backups JOIN files ON files.id = backups.file_id ORDER BY backups.created_at DESC, backups.id DESC LIMIT ? OFFSET ?`, req.PageSize, req.Offset())
 	if err != nil {
-		return PageResult[BackupRecord]{}, err
+		return PageResult[BackupView]{}, err
 	}
 	defer rows.Close()
 	items, err := scanBackups(rows)
 	if err != nil {
-		return PageResult[BackupRecord]{}, err
+		return PageResult[BackupView]{}, err
 	}
-	return PageResult[BackupRecord]{Items: items, Page: req.Page, PageSize: req.PageSize, Total: total}, nil
+	return PageResult[BackupView]{Items: items, Page: req.Page, PageSize: req.PageSize, Total: total}, nil
 }
 
-func (r *Repository) BackupByID(ctx context.Context, id int64) (BackupRecord, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT `+backupSelectColumns+` FROM backups WHERE id = ?`, id)
+func (r *Repository) BackupByID(ctx context.Context, id int64) (BackupView, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT `+backupSelectColumns+` FROM backups JOIN files ON files.id = backups.file_id WHERE backups.id = ?`, id)
 	return scanBackup(row)
 }
 
-func (r *Repository) ExpiredBackups(ctx context.Context, now time.Time) ([]BackupRecord, error) {
+func (r *Repository) UnrestoredBackups(ctx context.Context) ([]BackupView, error) {
 	rows, err := r.db.QueryContext(ctx, `
 SELECT `+backupSelectColumns+`
 FROM backups
-WHERE expires_at != '' AND expires_at <= ? AND restored_at = ''
-ORDER BY expires_at ASC, id ASC`, formatTime(now))
+JOIN files ON files.id = backups.file_id
+WHERE backups.restored_at IS NULL
+ORDER BY backups.created_at ASC, backups.id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -364,20 +359,9 @@ func (r *Repository) MarkBackupRestored(ctx context.Context, id int64, safetyPat
 	_, err := r.db.ExecContext(ctx, `
 UPDATE backups
 SET restored_at = ?, restore_safety_path = ?
-WHERE id = ?`, formatTime(time.Now().UTC()), safetyPath, id)
+WHERE id = ?`, formatTime(time.Now().UTC()), nullableString(safetyPath), id)
 	if err != nil {
 		return fmt.Errorf("mark backup restored: %w", err)
-	}
-	return nil
-}
-
-func (r *Repository) MarkBackupMissing(ctx context.Context, id int64, missing bool) error {
-	_, err := r.db.ExecContext(ctx, `
-UPDATE backups
-SET missing = ?
-WHERE id = ?`, boolInt(missing), id)
-	if err != nil {
-		return fmt.Errorf("mark backup missing: %w", err)
 	}
 	return nil
 }
@@ -393,7 +377,7 @@ func (r *Repository) RecordRestore(ctx context.Context, backupID int64, safetyPa
 	result, err := tx.ExecContext(ctx, `
 	UPDATE backups
 	SET restored_at = ?, restore_safety_path = ?
-	WHERE id = ?`, formatTime(now), safetyPath, backupID)
+	WHERE id = ?`, formatTime(now), nullableString(safetyPath), backupID)
 	if err != nil {
 		return FileRecord{}, fmt.Errorf("mark backup restored: %w", err)
 	}
@@ -428,7 +412,7 @@ func (r *Repository) DeleteBackup(ctx context.Context, id int64) error {
 }
 
 func (r *Repository) DeleteUnrestoredBackup(ctx context.Context, id int64) (bool, error) {
-	result, err := r.db.ExecContext(ctx, `DELETE FROM backups WHERE id = ? AND restored_at = ''`, id)
+	result, err := r.db.ExecContext(ctx, `DELETE FROM backups WHERE id = ? AND restored_at IS NULL`, id)
 	if err != nil {
 		return false, fmt.Errorf("delete unrestored backup: %w", err)
 	}
@@ -453,13 +437,6 @@ func (r *Repository) init(ctx context.Context) error {
 		if _, err := r.db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("initialize sqlite schema: %w", err)
 		}
-	}
-
-	_, err := r.db.ExecContext(ctx, `
-INSERT OR IGNORE INTO system_meta (key, value) VALUES (?, ?)`,
-		"db_initialized_at", time.Now().UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return fmt.Errorf("initialize sqlite metadata: %w", err)
 	}
 
 	return nil
@@ -513,8 +490,9 @@ func scanFile(row rowScanner) (FileRecord, error) {
 	var file FileRecord
 	var status string
 	var discoverySource string
-	var failureCause string
+	var failureCause sql.NullString
 	var pipelinePhase string
+	var lastError sql.NullString
 	var createdAt string
 	var updatedAt string
 
@@ -531,7 +509,7 @@ func scanFile(row rowScanner) (FileRecord, error) {
 		&file.AudioSignature,
 		&file.VideoSignature,
 		&file.Attempts,
-		&file.LastError,
+		&lastError,
 		&createdAt,
 		&updatedAt,
 	)
@@ -550,8 +528,9 @@ func scanFile(row rowScanner) (FileRecord, error) {
 	}
 	file.Status = Status(status)
 	file.DiscoverySource = DiscoverySource(discoverySource)
-	file.FailureCause = FailureCause(failureCause)
+	file.FailureCause = FailureCause(nullableStringValue(failureCause))
 	file.PipelinePhase = PipelinePhase(pipelinePhase)
+	file.LastError = nullableStringValue(lastError)
 
 	return file, nil
 }
@@ -571,48 +550,39 @@ func scanFiles(rows *sql.Rows) ([]FileRecord, error) {
 	return files, nil
 }
 
-func scanBackup(row rowScanner) (BackupRecord, error) {
-	var backup BackupRecord
+func scanBackup(row rowScanner) (BackupView, error) {
+	var backup BackupView
 	var createdAt string
-	var expiresAt string
-	var restoredAt string
-	var missing int
+	var restoredAt sql.NullString
+	var restoreSafetyPath sql.NullString
 	err := row.Scan(
 		&backup.ID,
 		&backup.FileID,
 		&backup.OriginalPath,
 		&backup.BackupPath,
-		&backup.OriginalSize,
-		&backup.OriginalMTimeNS,
 		&createdAt,
-		&expiresAt,
 		&restoredAt,
-		&backup.RestoreSafetyPath,
-		&missing,
+		&restoreSafetyPath,
 	)
 	if err != nil {
-		return BackupRecord{}, err
+		return BackupView{}, err
 	}
 
 	var parseErr error
 	backup.CreatedAt, parseErr = parseTime(createdAt)
 	if parseErr != nil {
-		return BackupRecord{}, fmt.Errorf("parse backup created_at: %w", parseErr)
+		return BackupView{}, fmt.Errorf("parse backup created_at: %w", parseErr)
 	}
-	backup.ExpiresAt, parseErr = parseTime(expiresAt)
+	backup.RestoredAt, parseErr = parseNullableTime(restoredAt)
 	if parseErr != nil {
-		return BackupRecord{}, fmt.Errorf("parse backup expires_at: %w", parseErr)
+		return BackupView{}, fmt.Errorf("parse backup restored_at: %w", parseErr)
 	}
-	backup.RestoredAt, parseErr = parseTime(restoredAt)
-	if parseErr != nil {
-		return BackupRecord{}, fmt.Errorf("parse backup restored_at: %w", parseErr)
-	}
-	backup.Missing = missing != 0
+	backup.RestoreSafetyPath = nullableStringValue(restoreSafetyPath)
 	return backup, nil
 }
 
-func scanBackups(rows *sql.Rows) ([]BackupRecord, error) {
-	backups := make([]BackupRecord, 0)
+func scanBackups(rows *sql.Rows) ([]BackupView, error) {
+	backups := make([]BackupView, 0)
 	for rows.Next() {
 		backup, err := scanBackup(rows)
 		if err != nil {
@@ -640,6 +610,41 @@ func parseTime(value string) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, value)
 }
 
+func parseNullableTime(value sql.NullString) (time.Time, error) {
+	if !value.Valid {
+		return time.Time{}, nil
+	}
+	return parseTime(value.String)
+}
+
+func nullableEnum[T ~string](value T) any {
+	if value == "" {
+		return nil
+	}
+	return string(value)
+}
+
+func nullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func nullableTime(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return formatTime(value)
+}
+
+func nullableStringValue(value sql.NullString) string {
+	if !value.Valid {
+		return ""
+	}
+	return value.String
+}
+
 func boolInt(value bool) int {
 	if value {
 		return 1
@@ -665,65 +670,52 @@ const fileSelectColumns = `
   updated_at`
 
 const backupSelectColumns = `
-  id,
-  file_id,
-  original_path,
-  backup_path,
-  original_size,
-  original_mtime_ns,
-  created_at,
-  expires_at,
-  restored_at,
-  restore_safety_path,
-  missing`
+  backups.id,
+  backups.file_id,
+  files.file_path,
+  backups.backup_path,
+  backups.created_at,
+  backups.restored_at,
+  backups.restore_safety_path`
 
 var schemaStatements = []string{
-	`CREATE TABLE IF NOT EXISTS system_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);`,
 	`CREATE TABLE IF NOT EXISTS files (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id INTEGER PRIMARY KEY,
   file_path TEXT NOT NULL UNIQUE,
-  status TEXT NOT NULL,
-  discovery_source TEXT NOT NULL DEFAULT '',
-  failure_cause TEXT NOT NULL DEFAULT '',
-  pipeline_phase TEXT NOT NULL DEFAULT 'pending',
-  fingerprint TEXT NOT NULL DEFAULT '',
-  size INTEGER NOT NULL DEFAULT 0,
-  mtime_ns INTEGER NOT NULL DEFAULT 0,
-  audio_signature TEXT NOT NULL DEFAULT '',
-  video_signature TEXT NOT NULL DEFAULT '',
-  attempts INTEGER NOT NULL DEFAULT 0,
-  last_error TEXT NOT NULL DEFAULT '',
+  size INTEGER CHECK(size IS NULL OR size >= 0),
+  mtime_ns INTEGER CHECK(mtime_ns IS NULL OR mtime_ns >= 0),
+  audio_signature TEXT,
+  video_signature TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );`,
-	`CREATE TABLE IF NOT EXISTS job_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+	`CREATE TABLE IF NOT EXISTS jobs (
+  id INTEGER PRIMARY KEY,
   file_id INTEGER NOT NULL,
-  event_kind TEXT NOT NULL DEFAULT '',
-  event_code TEXT NOT NULL DEFAULT '',
-  phase TEXT NOT NULL DEFAULT '',
-  status TEXT NOT NULL DEFAULT '',
-  outcome TEXT NOT NULL DEFAULT '',
-  attempt INTEGER NOT NULL DEFAULT 0,
-  command TEXT NOT NULL DEFAULT '',
-  message TEXT NOT NULL DEFAULT '',
-  error TEXT NOT NULL DEFAULT '',
-  started_at TEXT NOT NULL DEFAULT '',
-  finished_at TEXT NOT NULL DEFAULT '',
-  FOREIGN KEY(file_id) REFERENCES files(id)
+  kind TEXT NOT NULL CHECK(kind IN ('process','restore')),
+  trigger_source TEXT NOT NULL CHECK(trigger_source IN ('scan','watchdog','manual')),
+  result TEXT NOT NULL CHECK(result IN ('processing','compatible','succeeded','failed')),
+  final_error TEXT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE RESTRICT,
+  CHECK((result = 'failed' AND final_error IS NOT NULL) OR (result <> 'failed' AND final_error IS NULL)),
+  CHECK((result = 'processing' AND finished_at IS NULL) OR (result <> 'processing' AND finished_at IS NOT NULL)),
+  CHECK(kind = 'process' OR result <> 'compatible')
 );`,
 	`CREATE TABLE IF NOT EXISTS backups (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  file_id INTEGER NOT NULL,
-  original_path TEXT NOT NULL,
-  backup_path TEXT NOT NULL,
-  original_size INTEGER NOT NULL DEFAULT 0,
-  original_mtime_ns INTEGER NOT NULL DEFAULT 0,
+  id INTEGER PRIMARY KEY,
+  created_by_job_id INTEGER NOT NULL,
+  backup_path TEXT NOT NULL UNIQUE,
   created_at TEXT NOT NULL,
-  expires_at TEXT NOT NULL DEFAULT '',
-  restored_at TEXT NOT NULL DEFAULT '',
-  restore_safety_path TEXT NOT NULL DEFAULT '',
-  missing INTEGER NOT NULL DEFAULT 0,
-  FOREIGN KEY(file_id) REFERENCES files(id)
+  restored_by_job_id INTEGER,
+  restore_safety_path TEXT,
+  FOREIGN KEY(created_by_job_id) REFERENCES jobs(id) ON DELETE RESTRICT,
+  FOREIGN KEY(restored_by_job_id) REFERENCES jobs(id) ON DELETE RESTRICT,
+  CHECK(restore_safety_path IS NULL OR restored_by_job_id IS NOT NULL)
 );`,
+	`CREATE INDEX IF NOT EXISTS idx_files_updated_at_id ON files(updated_at DESC, id DESC);`,
+	`CREATE INDEX IF NOT EXISTS idx_jobs_result_finished_at ON jobs(result, finished_at DESC, id DESC);`,
+	`CREATE INDEX IF NOT EXISTS idx_jobs_file_id_finished_at ON jobs(file_id, finished_at DESC, id DESC);`,
+	`CREATE INDEX IF NOT EXISTS idx_backups_created_at_id ON backups(created_at DESC, id DESC);`,
 }
