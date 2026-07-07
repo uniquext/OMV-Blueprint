@@ -1,7 +1,7 @@
-import type { JobRecord } from './types'
+import type { HistoryRecord, JobRecord } from './types'
 import type { PageResult } from './types'
 
-export type JobFilter = 'all' | 'compatible' | 'processing' | 'processed' | 'failed' | 'restored' | 'ignored'
+export type JobFilter = 'all' | 'compatible' | 'processing' | 'processed' | 'failed' | 'restored'
 
 export interface JobsRequestPlan {
   page: number
@@ -9,48 +9,37 @@ export interface JobsRequestPlan {
   localPagination: boolean
 }
 
-type CompatJob = Partial<JobRecord> & {
-  ID?: number
-  Path?: string
-  Status?: string
-  DiscoverySource?: string
-  FailureCause?: string
-  PipelinePhase?: string
+type JobLike = Partial<HistoryRecord>
+type FailureCauseLike = Partial<Pick<JobRecord, 'failure_cause'>>
+
+export function jobID(job: JobLike): number {
+  return job.id ?? 0
 }
 
-export function jobID(job: CompatJob): number {
-  return job.id ?? job.ID ?? 0
+export function jobPath(job: JobLike): string {
+  return job.path ?? ''
 }
 
-export function jobPath(job: CompatJob): string {
-  return job.path ?? job.Path ?? ''
+export function jobStatus(job: JobLike): string {
+  return job.status ?? ''
 }
 
-export function jobStatus(job: CompatJob): string {
-  return job.status ?? job.Status ?? ''
+export function jobDiscoverySource(job: JobLike): string {
+  return job.discovery_source ?? ''
 }
 
-export function jobDiscoverySource(job: CompatJob): string {
-  return job.discovery_source ?? job.DiscoverySource ?? ''
+export function jobFailureCause(job: FailureCauseLike): string {
+  return job.failure_cause ?? ''
 }
 
-export function jobFailureCause(job: CompatJob): string {
-  return job.failure_cause ?? job.FailureCause ?? ''
-}
-
-export function jobPipelinePhase(job: CompatJob): string {
-  return job.pipeline_phase ?? job.PipelinePhase ?? ''
-}
-
-export function jobFilterKey(job: CompatJob): Exclude<JobFilter, 'all'> | null {
+export function jobFilterKey(job: JobLike): Exclude<JobFilter, 'all'> | null {
   const status = jobStatus(job)
   if (
     status === 'compatible' ||
     status === 'processing' ||
     status === 'processed' ||
     status === 'failed' ||
-    status === 'restored' ||
-    status === 'ignored'
+    status === 'restored'
   ) {
     return status
   }
@@ -88,7 +77,7 @@ export function jobDiscoverySourceDisplay(source: string, translate: (key: strin
   return key ? translate(key) : source
 }
 
-export function filterJobs<T extends CompatJob>(jobs: T[], filter: JobFilter, keyword: string): T[] {
+export function filterJobs<T extends JobLike>(jobs: T[], filter: JobFilter, keyword: string): T[] {
   const normalizedKeyword = keyword.trim().toLowerCase()
   return jobs.filter((job) => {
     const matchesFilter = filter === 'all' || jobFilterKey(job) === filter

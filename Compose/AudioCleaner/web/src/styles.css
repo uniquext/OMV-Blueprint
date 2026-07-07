@@ -314,12 +314,6 @@ textarea {
   white-space: nowrap;
 }
 
-.attempts-cell,
-.missing-cell {
-  min-width: 56px;
-  white-space: nowrap;
-}
-
 .actions-cell {
   min-width: 116px;
   white-space: nowrap;
@@ -599,6 +593,7 @@ textarea {
 
 .history-expand-cell {
   width: 40px;
+  white-space: nowrap;
 }
 
 .history-expand-button {
@@ -607,6 +602,13 @@ textarea {
   padding: 2px 6px;
   font-family: "SF Mono", "SFMono-Regular", Consolas, monospace;
   font-size: 12px;
+}
+
+.history-id-cell {
+  width: 72px;
+  white-space: nowrap;
+  font-family: "SF Mono", "SFMono-Regular", Consolas, monospace;
+  color: #24313c;
 }
 
 .history-detail-row td {

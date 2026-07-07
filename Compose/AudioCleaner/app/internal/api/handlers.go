@@ -18,7 +18,6 @@ import (
 
 var (
 	ErrProcessing            = errors.New("file is currently processing")
-	ErrInvalidJobState       = errors.New("invalid job state")
 	ErrConfigWriteInProgress = errors.New("config write already in progress")
 )
 
@@ -49,10 +48,10 @@ type Deps struct {
 	ScanAll        func(context.Context) error
 	RequestRestart func(config.Config)
 
-	Status  StatusProvider
-	Jobs    JobStore
-	Backups BackupStore
-	Logs    LogStore
+	Status      StatusProvider
+	History     HistoryStore
+	Backups     BackupStore
+	Logs        LogStore
 	RuntimeLogs RuntimeLogStore
 }
 
@@ -60,11 +59,8 @@ type StatusProvider interface {
 	Status(ctx context.Context) (any, error)
 }
 
-type JobStore interface {
-	ListJobs(ctx context.Context, page *repository.PageRequest) (any, error)
-	JobByID(ctx context.Context, id int64) (any, error)
-	RetryJob(ctx context.Context, id int64) error
-	IgnoreJob(ctx context.Context, id int64) error
+type HistoryStore interface {
+	ListHistory(ctx context.Context, page *repository.PageRequest) (any, error)
 }
 
 type BackupStore interface {
@@ -107,8 +103,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeDependencyResult(w, status, err)
 }
 
-func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
-	if s.deps.Jobs == nil {
+func (s *Server) handleListHistory(w http.ResponseWriter, r *http.Request) {
+	if s.deps.History == nil {
 		writeOK(w, []repository.FileRecord{})
 		return
 	}
@@ -117,21 +113,8 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	jobs, err := s.deps.Jobs.ListJobs(r.Context(), page)
-	writeDependencyResult(w, jobs, err)
-}
-
-func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
-	id, ok := parseID(w, r)
-	if !ok {
-		return
-	}
-	if s.deps.Jobs == nil {
-		writeError(w, http.StatusNotFound, "job not found")
-		return
-	}
-	job, err := s.deps.Jobs.JobByID(r.Context(), id)
-	writeDependencyResult(w, job, err)
+	history, err := s.deps.History.ListHistory(r.Context(), page)
+	writeDependencyResult(w, history, err)
 }
 
 func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
@@ -149,32 +132,6 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeOK(w, map[string]string{"status": "queued"})
-}
-
-func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
-	id, ok := parseID(w, r)
-	if !ok {
-		return
-	}
-	if s.deps.Jobs == nil {
-		writeError(w, http.StatusNotFound, "job not found")
-		return
-	}
-	err := s.deps.Jobs.RetryJob(r.Context(), id)
-	writeDependencyResult(w, map[string]int64{"id": id}, err)
-}
-
-func (s *Server) handleIgnoreJob(w http.ResponseWriter, r *http.Request) {
-	id, ok := parseID(w, r)
-	if !ok {
-		return
-	}
-	if s.deps.Jobs == nil {
-		writeError(w, http.StatusNotFound, "job not found")
-		return
-	}
-	err := s.deps.Jobs.IgnoreJob(r.Context(), id)
-	writeDependencyResult(w, map[string]int64{"id": id}, err)
 }
 
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
@@ -303,7 +260,7 @@ func (s *Server) handleRuntimeLogs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListBackups(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Backups == nil {
-		writeOK(w, []repository.BackupRecord{})
+		writeOK(w, []repository.BackupView{})
 		return
 	}
 	page, err := parsePageRequest(r)
@@ -356,10 +313,6 @@ func writeDependencyResult(w http.ResponseWriter, data any, err error) {
 	}
 	if errors.Is(err, ErrConfigWriteInProgress) {
 		writeError(w, http.StatusConflict, ErrConfigWriteInProgress.Error())
-		return
-	}
-	if errors.Is(err, ErrInvalidJobState) {
-		writeError(w, http.StatusBadRequest, ErrInvalidJobState.Error())
 		return
 	}
 	var invalidConfig invalidConfigError

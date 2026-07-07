@@ -17,15 +17,13 @@ export function jobStatusTone(status: string): SemanticTone {
       return 'info'
     case 'restored':
       return 'restored'
-    case 'ignored':
-      return 'muted'
     default:
       return 'muted'
   }
 }
 
-export function backupStateTone(state: string): SemanticTone {
-  switch (state) {
+export function backupAvailabilityTone(availability: string): SemanticTone {
+  switch (availability) {
     case 'available':
       return 'success'
     case 'restored':

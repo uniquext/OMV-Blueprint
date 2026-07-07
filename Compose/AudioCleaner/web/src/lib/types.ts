@@ -78,7 +78,7 @@ export interface NotificationsConfig {
   targets: string[]
 }
 
-export type JobStatus = 'compatible' | 'processing' | 'processed' | 'failed' | 'restored' | 'ignored' | string
+export type JobStatus = 'compatible' | 'processing' | 'processed' | 'failed' | 'restored' | string
 export type DiscoverySource = 'scan' | 'watchdog' | 'manual' | string
 export type PipelinePhase =
   | 'pending'
@@ -112,12 +112,12 @@ export type EventCode =
   | 'compatible'
   | 'processed'
   | 'failed'
-  | 'ignored'
   | 'restore'
   | 'ffmpeg_data_stream_fallback'
   | string
 export type EventOutcome = 'transcoded' | 'failed' | 'unsupported' | 'restored' | string
 export type JobPhase = PipelinePhase
+export type BackupAvailability = 'available' | 'missing' | 'restored' | 'expired' | string
 
 export interface JobRecord {
   id: number
@@ -137,14 +137,25 @@ export interface JobRecord {
   updated_at: string
 }
 
+export interface HistoryRecord {
+  id: number
+  path: string
+  status: JobStatus
+  discovery_source: DiscoverySource
+  audio_signature: string
+  video_signature: string
+  last_error: string
+  updated_at: string
+}
+
 export interface JobEventRecord {
   id: number
   file_id: number
   event_kind: EventKind
   event_code: EventCode
-  phase: PipelinePhase
-  status: JobStatus
-  outcome: EventOutcome
+  phase: PipelinePhase | null
+  status: JobStatus | null
+  outcome: EventOutcome | null
   attempt: number
   command: string
   message: string
@@ -163,13 +174,10 @@ export interface BackupRecord {
   file_id: number
   original_path: string
   backup_path: string
-  original_size: number
-  original_mtime_ns: number
   created_at: string
-  expires_at: string
   restored_at: string
   restore_safety_path: string
-  missing: boolean
+  availability: BackupAvailability
 }
 
 export interface ServiceStatus {
@@ -198,10 +206,6 @@ export interface TranscodeSuccessRate {
 
 export interface ScanResponse {
   status: 'queued' | string
-}
-
-export interface ActionIDResponse {
-  id: number
 }
 
 export interface CleanupExpiredResponse {

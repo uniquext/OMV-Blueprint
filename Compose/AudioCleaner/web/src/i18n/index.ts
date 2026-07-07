@@ -9,7 +9,6 @@ export const dictionaries: Record<SupportedLanguage, Dictionary> = {
   'zh-CN': {
     appName: 'AudioCleaner',
     navDashboard: '概览',
-    navJobs: '任务',
     navHistory: '历史',
     navBackups: '备份',
     navSettings: '设置',
@@ -17,7 +16,6 @@ export const dictionaries: Record<SupportedLanguage, Dictionary> = {
     sidebarFooter: 'WebUI V1.1',
     sseStatus: '事件流',
     pageDashboardTitle: '概览',
-    pageJobsTitle: '任务',
     pageHistoryTitle: '历史',
     pageBackupsTitle: '备份',
     pageSettingsTitle: '设置',
@@ -117,7 +115,6 @@ export const dictionaries: Record<SupportedLanguage, Dictionary> = {
     tableUpdated: '更新时间',
     jobsScanAll: '扫描全部',
     jobsRetry: '重试',
-    jobsIgnore: '忽略',
     jobsStatusFilter: '状态筛选',
     jobsPathSearch: '路径搜索',
     jobsPathSearchPlaceholder: '按路径关键字过滤',
@@ -128,12 +125,10 @@ export const dictionaries: Record<SupportedLanguage, Dictionary> = {
     jobsColumnPath: '路径',
     jobsColumnReason: '原因',
     jobsColumnSource: '来源',
-    jobsColumnAttempts: '尝试次数',
+    historyColumnResult: '结果',
     jobsColumnActions: '操作',
     jobsConfirmScanTitle: '确认扫描全部',
     jobsConfirmScanMessage: '这会请求后端重新扫描全部媒体文件。',
-    jobsConfirmIgnoreTitle: '确认忽略任务',
-    jobsConfirmIgnoreMessage: '确认忽略此任务？',
     backupsCleanupExpired: '清理过期备份',
     backupsRestore: '恢复',
     backupsStatusFilter: '状态筛选',
@@ -143,14 +138,10 @@ export const dictionaries: Record<SupportedLanguage, Dictionary> = {
     backupsNoData: '暂无备份',
     backupsErrorLabel: '错误：',
     backupsEmptyValue: '暂无',
-    backupsYes: '是',
-    backupsNo: '否',
     backupsColumnOriginalPath: '原始路径',
     backupsColumnBackupPath: '备份路径',
     backupsColumnCreated: '创建时间',
-    backupsColumnExpires: '过期时间',
     backupsColumnRestored: '恢复时间',
-    backupsColumnMissing: '缺失',
     backupsColumnActions: '操作',
     backupsConfirmRestoreTitle: '确认恢复备份',
     backupsConfirmRestoreMessage: '确认恢复此备份到原始路径？',
@@ -162,13 +153,11 @@ export const dictionaries: Record<SupportedLanguage, Dictionary> = {
     jobFilterprocessed: '处理成功',
     jobFilterfailed: '处理失败',
     jobFilterrestored: '已恢复',
-    jobFilterignored: '已忽略',
     jobStatusCompatible: '原本合规',
     jobStatusProcessing: '处理中',
     jobStatusProcessed: '处理成功',
     jobStatusFailed: '处理失败',
     jobStatusRestored: '已恢复',
-    jobStatusIgnored: '已忽略',
     jobFailureCauseFailed: '失败',
     jobFailureCauseUnsupported: '不支持',
     jobFailureCauseFfprobeError: 'ffprobe 错误',
@@ -224,7 +213,6 @@ export const dictionaries: Record<SupportedLanguage, Dictionary> = {
   'en-US': {
     appName: 'AudioCleaner',
     navDashboard: 'Dashboard',
-    navJobs: 'Jobs',
     navHistory: 'History',
     navBackups: 'Backups',
     navSettings: 'Settings',
@@ -232,7 +220,6 @@ export const dictionaries: Record<SupportedLanguage, Dictionary> = {
     sidebarFooter: 'WebUI V1.1',
     sseStatus: 'Event stream',
     pageDashboardTitle: 'Dashboard',
-    pageJobsTitle: 'Jobs',
     pageHistoryTitle: 'History',
     pageBackupsTitle: 'Backups',
     pageSettingsTitle: 'Settings',
@@ -332,7 +319,6 @@ export const dictionaries: Record<SupportedLanguage, Dictionary> = {
     tableUpdated: 'Updated',
     jobsScanAll: 'Scan All',
     jobsRetry: 'Retry',
-    jobsIgnore: 'Ignore',
     jobsStatusFilter: 'Status',
     jobsPathSearch: 'Path search',
     jobsPathSearchPlaceholder: 'Filter by path keyword',
@@ -343,12 +329,10 @@ export const dictionaries: Record<SupportedLanguage, Dictionary> = {
     jobsColumnPath: 'Path',
     jobsColumnReason: 'Reason',
     jobsColumnSource: 'Source',
-    jobsColumnAttempts: 'Attempts',
+    historyColumnResult: 'Result',
     jobsColumnActions: 'Actions',
     jobsConfirmScanTitle: 'Confirm Scan All',
     jobsConfirmScanMessage: 'This will ask the backend to rescan all media files.',
-    jobsConfirmIgnoreTitle: 'Confirm Ignore Job',
-    jobsConfirmIgnoreMessage: 'Ignore this job?',
     backupsCleanupExpired: 'Cleanup expired backups',
     backupsRestore: 'Restore',
     backupsStatusFilter: 'Status',
@@ -358,14 +342,10 @@ export const dictionaries: Record<SupportedLanguage, Dictionary> = {
     backupsNoData: 'No backups',
     backupsErrorLabel: 'Error:',
     backupsEmptyValue: 'None',
-    backupsYes: 'Yes',
-    backupsNo: 'No',
     backupsColumnOriginalPath: 'Original path',
     backupsColumnBackupPath: 'Backup path',
     backupsColumnCreated: 'Created',
-    backupsColumnExpires: 'Expires',
     backupsColumnRestored: 'Restored',
-    backupsColumnMissing: 'Missing',
     backupsColumnActions: 'Actions',
     backupsConfirmRestoreTitle: 'Confirm Restore Backup',
     backupsConfirmRestoreMessage: 'Restore this backup to its original path?',
@@ -377,13 +357,11 @@ export const dictionaries: Record<SupportedLanguage, Dictionary> = {
     jobFilterprocessed: 'Processed',
     jobFilterfailed: 'Failed',
     jobFilterrestored: 'Restored',
-    jobFilterignored: 'Ignored',
     jobStatusCompatible: 'Compatible',
     jobStatusProcessing: 'Processing',
     jobStatusProcessed: 'Processed',
     jobStatusFailed: 'Failed',
     jobStatusRestored: 'Restored',
-    jobStatusIgnored: 'Ignored',
     jobFailureCauseFailed: 'Failed',
     jobFailureCauseUnsupported: 'Unsupported',
     jobFailureCauseFfprobeError: 'ffprobe error',
@@ -457,8 +435,7 @@ export function jobStatusLabel(status: JobStatus): string {
     processing: 'jobStatusProcessing',
     processed: 'jobStatusProcessed',
     failed: 'jobStatusFailed',
-    restored: 'jobStatusRestored',
-    ignored: 'jobStatusIgnored'
+    restored: 'jobStatusRestored'
   }
   const key = keys[status]
   return key ? t(key) : status
@@ -511,25 +488,15 @@ export function jobEventCodeLabel(eventCode: EventCode | string): string {
   return key ? t(key) : eventCode
 }
 
-export function backupStatusLabel(backup: Pick<BackupRecord, 'restored_at' | 'missing'>): string {
-  if (backup.missing) {
-    return t('backupStatusMissing')
-  }
-  if (backup.restored_at) {
-    return t('backupStatusRestored')
-  }
-  return t('backupStatusAvailable')
-}
-
-export function backupStateLabel(state: string): string {
+export function backupAvailabilityLabel(availability: string): string {
   const keys: Record<string, string> = {
     available: 'backupStatusAvailable',
     missing: 'backupStatusMissing',
     restored: 'backupStatusRestored',
     expired: 'backupStatusExpired'
   }
-  const key = keys[state]
-  return key ? t(key) : state
+  const key = keys[availability]
+  return key ? t(key) : availability
 }
 
 export function eventStreamStatusLabel(status: EventStreamStatus): string {

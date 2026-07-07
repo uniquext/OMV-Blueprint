@@ -34,7 +34,7 @@ open http://localhost:9830/
 Hash 路由：
 
 - `/#/`：概览；Dashboard 不包含 Scan All。
-- `/#/jobs`：任务、扫描全部、单条重试、单条忽略。
+- `/#/history`：历史记录。
 - `/#/backups`：备份恢复、清理过期备份。
 - `/#/settings`：配置只读展示，允许修改语言和备份保留天数。
 - `/#/logs`：最近日志和 SSE 状态。
@@ -62,6 +62,6 @@ bash test/scripts/run-integration.sh
 生成的报告会写入 `test/reports`：
 
 - `latest-status.json` 保存最近一次 `/api/status` 响应。
-- `latest-jobs.json` 保存最近一次 `/api/jobs` 响应。
+- `latest-history.json` 保存最近一次 `/api/history` 响应。
 - `latest-backups.json` 保存最近一次 `/api/backups` 响应。
 - `source-probe-summary.jsonl` 和 `output-probe-summary.jsonl` 保存源媒体和处理后媒体的 ffprobe 摘要。

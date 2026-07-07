@@ -12,10 +12,7 @@ import (
 )
 
 type ReplaceResult struct {
-	BackupPath      string
-	OriginalSize    int64
-	OriginalMTimeNS int64
-	ExpiresAt       time.Time
+	BackupPath string
 }
 
 type RestoreRequest struct {
@@ -36,7 +33,7 @@ var (
 	}
 )
 
-func ReplaceWithBackup(originalPath string, outputPath string, backupRoot string, retention time.Duration) (ReplaceResult, error) {
+func ReplaceWithBackup(originalPath string, outputPath string, backupRoot string) (ReplaceResult, error) {
 	originalPath = filepath.Clean(originalPath)
 	outputPath = filepath.Clean(outputPath)
 	if !filepath.IsAbs(originalPath) {
@@ -54,8 +51,7 @@ func ReplaceWithBackup(originalPath string, outputPath string, backupRoot string
 	if originalPath == outputPath {
 		return ReplaceResult{}, errors.New("original path and output path must differ")
 	}
-	info, err := regularFileInfo("original path", originalPath)
-	if err != nil {
+	if _, err := regularFileInfo("original path", originalPath); err != nil {
 		return ReplaceResult{}, err
 	}
 	if _, err := regularFileInfo("output path", outputPath); err != nil {
@@ -79,10 +75,7 @@ func ReplaceWithBackup(originalPath string, outputPath string, backupRoot string
 		return ReplaceResult{}, fmt.Errorf("replace output failed: %w", err)
 	}
 	return ReplaceResult{
-		BackupPath:      backupPath,
-		OriginalSize:    info.Size(),
-		OriginalMTimeNS: info.ModTime().UnixNano(),
-		ExpiresAt:       now.Add(retention),
+		BackupPath: backupPath,
 	}, nil
 }
 

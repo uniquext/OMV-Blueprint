@@ -1,12 +1,11 @@
 import type {
-  ActionIDResponse,
   ApiEnvelope,
   AudioCleanerConfig,
   BackupPatchResponse,
   BackupRecord,
   CleanupExpiredResponse,
+  HistoryRecord,
   JobEventRecord,
-  JobRecord,
   PageRequest,
   PageResult,
   RestoreResult,
@@ -90,16 +89,15 @@ export const api = {
   status: () => request<ServiceStatus>('/api/status'),
   logs: async () => unwrapItems(await request<CollectionResponse<JobEventRecord>>('/api/logs/recent')),
   runtimeLogs: (lines = 100) => request<RuntimeLogResponse>(`/api/logs?lines=${encodeURIComponent(String(lines))}`),
-  jobs: async (page?: PageRequest) => unwrapItems(await request<CollectionResponse<JobRecord>>(withPage('/api/jobs', page))),
-  jobsPage: async (page?: PageRequest) =>
-    unwrapPage(await request<CollectionResponse<JobRecord>>(withPage('/api/jobs', page)), page),
+  history: async (page?: PageRequest) =>
+    unwrapItems(await request<CollectionResponse<HistoryRecord>>(withPage('/api/history', page))),
+  historyPage: async (page?: PageRequest) =>
+    unwrapPage(await request<CollectionResponse<HistoryRecord>>(withPage('/api/history', page)), page),
   backups: async (page?: PageRequest) =>
     unwrapItems(await request<CollectionResponse<BackupRecord>>(withPage('/api/backups', page))),
   backupsPage: async (page?: PageRequest) =>
     unwrapPage(await request<CollectionResponse<BackupRecord>>(withPage('/api/backups', page)), page),
   scan: () => request<ScanResponse>('/api/scan', post()),
-  retry: (id: number) => request<ActionIDResponse>(`/api/jobs/${id}/retry`, post()),
-  ignore: (id: number) => request<ActionIDResponse>(`/api/jobs/${id}/ignore`, post()),
   restore: (id: number) => request<RestoreResult>(`/api/backups/${id}/restore`, post()),
   cleanupExpired: () => request<CleanupExpiredResponse>('/api/backups/cleanup', post()),
   patchUI: (language: SupportedLanguage) => request<UIConfig>('/api/config/ui', jsonPatch({ language })),

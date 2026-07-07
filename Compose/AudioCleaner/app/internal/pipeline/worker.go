@@ -43,6 +43,8 @@ func runFFmpegWithFallbackReport(ctx context.Context, runner CommandRunner, name
 type WorkerRepository interface {
 	FileByPath(ctx context.Context, path string) (repository.FileRecord, error)
 	UpsertFile(ctx context.Context, file repository.FileRecord) (repository.FileRecord, error)
+	AddJob(ctx context.Context, job repository.JobRecord) (repository.JobRecord, error)
+	FinishJob(ctx context.Context, id int64, result repository.JobResult, finalError string) (repository.JobRecord, error)
 	AddJobEvent(ctx context.Context, event repository.JobEvent) error
 	AddBackup(ctx context.Context, backup repository.BackupRecord) error
 }
@@ -57,7 +59,7 @@ type WorkerProber interface {
 }
 
 type WorkerBackupService interface {
-	Replace(ctx context.Context, originalPath string, outputPath string, backupRoot string, retention time.Duration) (backup.ReplaceResult, error)
+	Replace(ctx context.Context, originalPath string, outputPath string, backupRoot string) (backup.ReplaceResult, error)
 }
 
 type WorkerStatProvider interface {
@@ -218,17 +220,26 @@ func (w *Worker) ProcessPathWithSource(ctx context.Context, path string, source 
 	if err != nil {
 		return err
 	}
+	processJob, err := w.repository.AddJob(ctx, repository.JobRecord{
+		FileID:        file.ID,
+		Kind:          repository.JobKindProcess,
+		TriggerSource: file.DiscoverySource,
+		Result:        repository.JobResultProcessing,
+	})
+	if err != nil {
+		return err
+	}
 
 	jobCtx, cancel := context.WithTimeout(ctx, w.cfg.Pipeline.JobTimeout())
 	defer cancel()
 
-	latest, err := w.processJob(jobCtx, ctx, file, source, fileMissing)
+	latest, err := w.processJob(jobCtx, ctx, file, processJob.ID)
 	if err != nil {
 		var postReplaceErr postReplacePersistenceError
 		if errors.As(err, &postReplaceErr) {
 			return err
 		}
-		return w.recordFailure(ctx, latest, err)
+		return w.recordFailure(ctx, latest, processJob.ID, err)
 	}
 	return nil
 }
@@ -268,7 +279,7 @@ func canUseStatOnlyFingerprint(file repository.FileRecord) bool {
 		file.VideoSignature == ""
 }
 
-func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, file repository.FileRecord, source JobSource, fileMissing bool) (repository.FileRecord, error) {
+func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, file repository.FileRecord, processJobID int64) (repository.FileRecord, error) {
 	var err error
 	file, err = w.transitionPhase(persistCtx, file, repository.PipelinePhaseChecking, "")
 	if err != nil {
@@ -302,6 +313,9 @@ func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, 
 		file.PipelinePhase = repository.PipelinePhasePending
 		file.LastError = decision.Reason
 		file, err := w.persist(persistCtx, file, "unsupported")
+		if err == nil {
+			_, err = w.repository.FinishJob(persistCtx, processJobID, repository.JobResultFailed, finalErrorForFailure(file, errors.New(file.LastError)))
+		}
 		return file, err
 	case media.ActionAlreadyCompatible:
 		file.Status = repository.StatusCompatible
@@ -309,6 +323,9 @@ func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, 
 		file.PipelinePhase = repository.PipelinePhasePending
 		file.LastError = ""
 		file, err := w.persist(persistCtx, file, "compatible")
+		if err == nil {
+			_, err = w.repository.FinishJob(persistCtx, processJobID, repository.JobResultCompatible, "")
+		}
 		return file, err
 	}
 
@@ -399,18 +416,14 @@ func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, 
 	if err != nil {
 		return file, err
 	}
-	replace, err := w.backup.Replace(jobCtx, file.Path, outputPath, w.backupRoot, retentionDuration(w.cfg.Backup.RetentionDays))
+	replace, err := w.backup.Replace(jobCtx, file.Path, outputPath, w.backupRoot)
 	if err != nil {
 		return file, failure(err, causeForContextOr(repository.CauseFailed, err))
 	}
 	removeOutputOnFailure = false
 	if err := w.repository.AddBackup(persistCtx, repository.BackupRecord{
-		FileID:          file.ID,
-		OriginalPath:    file.Path,
-		BackupPath:      replace.BackupPath,
-		OriginalSize:    replace.OriginalSize,
-		OriginalMTimeNS: replace.OriginalMTimeNS,
-		ExpiresAt:       replace.ExpiresAt,
+		CreatedByJobID: processJobID,
+		BackupPath:     replace.BackupPath,
 	}); err != nil {
 		return file, postReplacePersistenceError{err: err}
 	}
@@ -447,10 +460,13 @@ func (w *Worker) processJob(jobCtx context.Context, persistCtx context.Context, 
 	if err != nil {
 		return file, postReplacePersistenceError{err: err}
 	}
+	if _, err := w.repository.FinishJob(persistCtx, processJobID, repository.JobResultSucceeded, ""); err != nil {
+		return file, postReplacePersistenceError{err: err}
+	}
 	return file, nil
 }
 
-func (w *Worker) recordFailure(ctx context.Context, file repository.FileRecord, err error) error {
+func (w *Worker) recordFailure(ctx context.Context, file repository.FileRecord, processJobID int64, err error) error {
 	file.Attempts++
 	file.LastError = err.Error()
 
@@ -472,6 +488,11 @@ func (w *Worker) recordFailure(ctx context.Context, file repository.FileRecord, 
 	if persisted.Status == repository.StatusProcessing && persisted.PipelinePhase == repository.PipelinePhaseRetryWait && w.scheduler != nil {
 		w.scheduler.Schedule(persisted.Path, w.cfg.Pipeline.RetryDelay())
 	}
+	if persisted.Status == repository.StatusFailed {
+		if _, finishErr := w.repository.FinishJob(ctx, processJobID, repository.JobResultFailed, finalErrorForFailure(persisted, err)); finishErr != nil {
+			return fmt.Errorf("%w; finish job: %v", err, finishErr)
+		}
+	}
 	return err
 }
 
@@ -488,6 +509,12 @@ func (w *Worker) persist(ctx context.Context, file repository.FileRecord, messag
 	if err != nil {
 		return file, err
 	}
+	persisted.Status = file.Status
+	persisted.DiscoverySource = file.DiscoverySource
+	persisted.FailureCause = file.FailureCause
+	persisted.PipelinePhase = file.PipelinePhase
+	persisted.Attempts = file.Attempts
+	persisted.LastError = file.LastError
 
 	event := eventForPersist(persisted, message)
 	if err := w.repository.AddJobEvent(ctx, event); err != nil {
@@ -569,6 +596,22 @@ func outcomeForCause(cause repository.FailureCause) repository.EventOutcome {
 	}
 }
 
+func finalErrorForFailure(file repository.FileRecord, err error) string {
+	if file.FailureCause != "" && file.LastError != "" {
+		return string(file.FailureCause) + ": " + file.LastError
+	}
+	if file.FailureCause != "" {
+		return string(file.FailureCause)
+	}
+	if file.LastError != "" {
+		return file.LastError
+	}
+	if err != nil {
+		return err.Error()
+	}
+	return "failed"
+}
+
 func discoverySourceForJob(source JobSource, current repository.DiscoverySource) repository.DiscoverySource {
 	switch source {
 	case JobSourceScan:
@@ -617,11 +660,11 @@ func (w *Worker) validateDeps() error {
 
 type defaultBackupService struct{}
 
-func (defaultBackupService) Replace(ctx context.Context, originalPath string, outputPath string, backupRoot string, retention time.Duration) (backup.ReplaceResult, error) {
+func (defaultBackupService) Replace(ctx context.Context, originalPath string, outputPath string, backupRoot string) (backup.ReplaceResult, error) {
 	if err := ctx.Err(); err != nil {
 		return backup.ReplaceResult{}, err
 	}
-	return backup.ReplaceWithBackup(originalPath, outputPath, backupRoot, retention)
+	return backup.ReplaceWithBackup(originalPath, outputPath, backupRoot)
 }
 
 type osStatProvider struct{}
@@ -782,8 +825,4 @@ func eventAttempt(file repository.FileRecord, event repository.JobEvent) int {
 		return file.Attempts
 	}
 	return currentAttempt(file)
-}
-
-func retentionDuration(days int) time.Duration {
-	return time.Duration(days) * 24 * time.Hour
 }

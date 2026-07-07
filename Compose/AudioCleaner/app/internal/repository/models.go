@@ -12,6 +12,9 @@ type FailureCause string
 type EventKind string
 type EventCode string
 type EventOutcome string
+type BackupAvailability string
+type JobKind string
+type JobResult string
 
 const (
 	StatusCompatible Status = "compatible"
@@ -66,6 +69,19 @@ const (
 	OutcomeFailed      EventOutcome = "failed"
 	OutcomeUnsupported EventOutcome = "unsupported"
 	OutcomeRestored    EventOutcome = "restored"
+
+	BackupAvailable BackupAvailability = "available"
+	BackupMissing   BackupAvailability = "missing"
+	BackupRestored  BackupAvailability = "restored"
+	BackupExpired   BackupAvailability = "expired"
+
+	JobKindProcess JobKind = "process"
+	JobKindRestore JobKind = "restore"
+
+	JobResultProcessing JobResult = "processing"
+	JobResultCompatible JobResult = "compatible"
+	JobResultSucceeded  JobResult = "succeeded"
+	JobResultFailed     JobResult = "failed"
 )
 
 type FileRecord struct {
@@ -86,6 +102,17 @@ type FileRecord struct {
 	UpdatedAt       time.Time       `json:"updated_at"`
 }
 
+type HistoryRecord struct {
+	ID              int64           `json:"id"`
+	Path            string          `json:"path"`
+	Status          Status          `json:"status"`
+	DiscoverySource DiscoverySource `json:"discovery_source"`
+	AudioSignature  string          `json:"audio_signature"`
+	VideoSignature  string          `json:"video_signature"`
+	LastError       string          `json:"last_error"`
+	UpdatedAt       time.Time       `json:"updated_at"`
+}
+
 type JobEvent struct {
 	ID         int64         `json:"id"`
 	FileID     int64         `json:"file_id"`
@@ -102,47 +129,142 @@ type JobEvent struct {
 	FinishedAt time.Time     `json:"finished_at"`
 }
 
+func (e JobEvent) MarshalJSON() ([]byte, error) {
+	type jobEventJSON struct {
+		ID         int64   `json:"id"`
+		FileID     int64   `json:"file_id"`
+		EventKind  string  `json:"event_kind"`
+		EventCode  string  `json:"event_code"`
+		Phase      *string `json:"phase"`
+		Status     *string `json:"status"`
+		Outcome    *string `json:"outcome"`
+		Attempt    int     `json:"attempt"`
+		Command    string  `json:"command"`
+		Message    string  `json:"message"`
+		Error      string  `json:"error"`
+		StartedAt  string  `json:"started_at"`
+		FinishedAt string  `json:"finished_at"`
+	}
+	return json.Marshal(jobEventJSON{
+		ID:         e.ID,
+		FileID:     e.FileID,
+		EventKind:  string(e.EventKind),
+		EventCode:  string(e.EventCode),
+		Phase:      optionalString(e.Phase),
+		Status:     optionalString(e.Status),
+		Outcome:    optionalString(e.Outcome),
+		Attempt:    e.Attempt,
+		Command:    e.Command,
+		Message:    e.Message,
+		Error:      e.Error,
+		StartedAt:  formatTime(e.StartedAt),
+		FinishedAt: formatTime(e.FinishedAt),
+	})
+}
+
+type JobRecord struct {
+	ID            int64           `json:"id"`
+	FileID        int64           `json:"file_id"`
+	Kind          JobKind         `json:"kind"`
+	TriggerSource DiscoverySource `json:"trigger_source"`
+	Result        JobResult       `json:"result"`
+	FinalError    string          `json:"final_error"`
+	StartedAt     time.Time       `json:"started_at"`
+	FinishedAt    time.Time       `json:"finished_at"`
+}
+
+func (j JobRecord) MarshalJSON() ([]byte, error) {
+	type jobRecordJSON struct {
+		ID            int64   `json:"id"`
+		FileID        int64   `json:"file_id"`
+		Kind          JobKind `json:"kind"`
+		TriggerSource string  `json:"trigger_source"`
+		Result        string  `json:"result"`
+		FinalError    string  `json:"final_error"`
+		StartedAt     string  `json:"started_at"`
+		FinishedAt    string  `json:"finished_at"`
+	}
+	return json.Marshal(jobRecordJSON{
+		ID:            j.ID,
+		FileID:        j.FileID,
+		Kind:          j.Kind,
+		TriggerSource: string(j.TriggerSource),
+		Result:        string(j.Result),
+		FinalError:    j.FinalError,
+		StartedAt:     formatTime(j.StartedAt),
+		FinishedAt:    formatTime(j.FinishedAt),
+	})
+}
+
 type BackupRecord struct {
 	ID                int64     `json:"id"`
-	FileID            int64     `json:"file_id"`
-	OriginalPath      string    `json:"original_path"`
+	CreatedByJobID    int64     `json:"created_by_job_id"`
 	BackupPath        string    `json:"backup_path"`
-	OriginalSize      int64     `json:"original_size"`
-	OriginalMTimeNS   int64     `json:"original_mtime_ns"`
 	CreatedAt         time.Time `json:"created_at"`
-	ExpiresAt         time.Time `json:"expires_at"`
-	RestoredAt        time.Time `json:"restored_at"`
+	RestoredByJobID   int64     `json:"restored_by_job_id"`
 	RestoreSafetyPath string    `json:"restore_safety_path"`
-	Missing           bool      `json:"missing"`
 }
 
 func (b BackupRecord) MarshalJSON() ([]byte, error) {
 	type backupRecordJSON struct {
 		ID                int64  `json:"id"`
-		FileID            int64  `json:"file_id"`
-		OriginalPath      string `json:"original_path"`
+		CreatedByJobID    int64  `json:"created_by_job_id"`
 		BackupPath        string `json:"backup_path"`
-		OriginalSize      int64  `json:"original_size"`
-		OriginalMTimeNS   int64  `json:"original_mtime_ns"`
 		CreatedAt         string `json:"created_at"`
-		ExpiresAt         string `json:"expires_at"`
-		RestoredAt        string `json:"restored_at"`
+		RestoredByJobID   int64  `json:"restored_by_job_id"`
 		RestoreSafetyPath string `json:"restore_safety_path"`
-		Missing           bool   `json:"missing"`
 	}
 	return json.Marshal(backupRecordJSON{
 		ID:                b.ID,
+		CreatedByJobID:    b.CreatedByJobID,
+		BackupPath:        b.BackupPath,
+		CreatedAt:         formatTime(b.CreatedAt),
+		RestoredByJobID:   b.RestoredByJobID,
+		RestoreSafetyPath: b.RestoreSafetyPath,
+	})
+}
+
+type BackupView struct {
+	BackupRecord
+	FileID       int64              `json:"file_id"`
+	OriginalPath string             `json:"original_path"`
+	RestoredAt   time.Time          `json:"restored_at"`
+	Availability BackupAvailability `json:"availability,omitempty"`
+}
+
+func (b BackupView) MarshalJSON() ([]byte, error) {
+	type backupViewJSON struct {
+		ID                int64              `json:"id"`
+		FileID            int64              `json:"file_id"`
+		CreatedByJobID    int64              `json:"created_by_job_id"`
+		OriginalPath      string             `json:"original_path"`
+		BackupPath        string             `json:"backup_path"`
+		CreatedAt         string             `json:"created_at"`
+		RestoredAt        string             `json:"restored_at"`
+		RestoredByJobID   int64              `json:"restored_by_job_id"`
+		RestoreSafetyPath string             `json:"restore_safety_path"`
+		Availability      BackupAvailability `json:"availability,omitempty"`
+	}
+	return json.Marshal(backupViewJSON{
+		ID:                b.ID,
 		FileID:            b.FileID,
+		CreatedByJobID:    b.CreatedByJobID,
 		OriginalPath:      b.OriginalPath,
 		BackupPath:        b.BackupPath,
-		OriginalSize:      b.OriginalSize,
-		OriginalMTimeNS:   b.OriginalMTimeNS,
 		CreatedAt:         formatTime(b.CreatedAt),
-		ExpiresAt:         formatTime(b.ExpiresAt),
 		RestoredAt:        formatTime(b.RestoredAt),
+		RestoredByJobID:   b.RestoredByJobID,
 		RestoreSafetyPath: b.RestoreSafetyPath,
-		Missing:           b.Missing,
+		Availability:      b.Availability,
 	})
+}
+
+func optionalString[T ~string](value T) *string {
+	if value == "" {
+		return nil
+	}
+	text := string(value)
+	return &text
 }
 
 type TranscodeStats struct {

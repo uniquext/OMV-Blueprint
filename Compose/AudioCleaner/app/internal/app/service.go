@@ -46,8 +46,8 @@ const (
 )
 
 type RecoveryRepository interface {
-	ProcessingFiles(ctx context.Context) ([]repository.FileRecord, error)
-	SaveFile(ctx context.Context, record repository.FileRecord) error
+	ProcessingJobs(ctx context.Context) ([]repository.JobRecord, error)
+	FinishJob(ctx context.Context, id int64, result repository.JobResult, finalError string) (repository.JobRecord, error)
 }
 
 type Options struct {
@@ -124,24 +124,12 @@ type workerJob struct {
 }
 
 func RecoverStartup(ctx context.Context, repo RecoveryRepository) error {
-	files, err := repo.ProcessingFiles(ctx)
+	jobs, err := repo.ProcessingJobs(ctx)
 	if err != nil {
 		return err
 	}
-	for _, file := range files {
-		if isCriticalPhase(file.PipelinePhase) {
-			interruptedPhase := file.PipelinePhase
-			file.Status = repository.StatusFailed
-			file.PipelinePhase = repository.PipelinePhasePending
-			file.FailureCause = repository.CauseFailed
-			file.LastError = fmt.Sprintf("%s%s; manual review required", startupCriticalRecoveryPrefix, interruptedPhase)
-		} else {
-			file.Status = repository.StatusProcessing
-			file.PipelinePhase = repository.PipelinePhaseQueued
-			file.LastError = ""
-			file.FailureCause = ""
-		}
-		if err := repo.SaveFile(ctx, file); err != nil {
+	for _, job := range jobs {
+		if _, err := repo.FinishJob(ctx, job.ID, repository.JobResultFailed, startupCriticalRecoveryPrefix+"processing; manual review required"); err != nil {
 			return err
 		}
 	}
@@ -227,9 +215,6 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 		cancelWorker()
 		return nil, fmt.Errorf("recover startup jobs: %w", err)
 	}
-	if err := service.markMissingBackups(ctx); err != nil {
-		service.logf("startup backup presence check failed: %v", err)
-	}
 	if err := service.cleanupOrphanTempOutputs(ctx); err != nil {
 		service.logf("startup temp cleanup failed: %v", err)
 	}
@@ -254,7 +239,7 @@ func withDefaults(opts Options) Options {
 		opts.ConfigPath = getenv("CONFIG_PATH", defaultConfigPath)
 	}
 	if opts.DBPath == "" {
-		opts.DBPath = getenv("DB_PATH", getenv("DATA_PATH", defaultDBPath))
+		opts.DBPath = getenv("DB_PATH", defaultDBPath)
 	}
 	if opts.LogPath == "" {
 		opts.LogPath = getenv("LOG_PATH", defaultLogPath)
@@ -322,33 +307,9 @@ func (s *Service) ScanAll(ctx context.Context) error {
 		return err
 	}
 	for _, path := range paths {
-		skip, err := s.shouldSkipStartupRecoveredCritical(ctx, path)
-		if err != nil {
-			return err
-		}
-		if skip {
-			continue
-		}
 		s.enqueueWithSource(path, pipeline.JobSourceScan)
 	}
 	return nil
-}
-
-func (s *Service) shouldSkipStartupRecoveredCritical(ctx context.Context, path string) (bool, error) {
-	if s.db == nil {
-		return false, nil
-	}
-	file, err := s.db.FileByPath(ctx, path)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return file.Status == repository.StatusFailed &&
-		file.PipelinePhase == repository.PipelinePhasePending &&
-		file.FailureCause == repository.CauseFailed &&
-		strings.HasPrefix(file.LastError, startupCriticalRecoveryPrefix), nil
 }
 
 func (s *Service) startWatcher() error {
@@ -449,7 +410,7 @@ func (s *Service) prepareHTTPServer() (net.Listener, error) {
 		ScanAll:        s.ScanAll,
 		RequestRestart: s.RequestRestart,
 		Status:         s,
-		Jobs:           s,
+		History:        s,
 		Backups:        s,
 		Logs:           s,
 		RuntimeLogs:    s,
@@ -560,10 +521,17 @@ func (s *Service) Status(ctx context.Context) (any, error) {
 		}
 	}
 	var backupUsage int64
+	now := time.Now().UTC()
+	retentionDays := cfg.Backup.RetentionDays
 	for _, record := range backups {
-		if record.RestoredAt.IsZero() && !record.Missing {
-			backupUsage += record.OriginalSize
+		if backupAvailability(record, now, retentionDays) != repository.BackupAvailable {
+			continue
 		}
+		info, err := os.Stat(record.BackupPath)
+		if err != nil {
+			continue
+		}
+		backupUsage += info.Size()
 	}
 	queueCount := 0
 	if s.queue != nil {
@@ -617,108 +585,59 @@ func transcodeSuccessRate(stats repository.TranscodeStats) map[string]any {
 	}
 }
 
-func (s *Service) ListJobs(ctx context.Context, page *repository.PageRequest) (any, error) {
+func (s *Service) ListHistory(ctx context.Context, page *repository.PageRequest) (any, error) {
 	if page != nil {
-		return s.db.FilesPage(ctx, *page)
+		return s.db.HistoryPage(ctx, *page)
 	}
-	return s.db.Files(ctx)
-}
-
-func (s *Service) JobByID(ctx context.Context, id int64) (any, error) {
-	file, err := s.db.FileByID(ctx, id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("job not found")
-	}
-	return file, err
-}
-
-func (s *Service) RetryJob(ctx context.Context, id int64) error {
-	file, err := s.db.FileByID(ctx, id)
-	if err != nil {
-		return err
-	}
-	if file.Status == repository.StatusProcessing {
-		return api.ErrProcessing
-	}
-	if file.Status != repository.StatusFailed {
-		return api.ErrInvalidJobState
-	}
-	s.workerIntakeMu.Lock()
-	defer s.workerIntakeMu.Unlock()
-	if !s.canEnqueueLocked(file.Path) {
-		return api.ErrProcessing
-	}
-	file.Status = repository.StatusProcessing
-	file.PipelinePhase = repository.PipelinePhaseQueued
-	file.FailureCause = ""
-	file.LastError = ""
-	if err := s.db.SaveFile(ctx, file); err != nil {
-		return err
-	}
-	s.queue.Enqueue(file.Path)
-	return nil
-}
-
-func (s *Service) IgnoreJob(ctx context.Context, id int64) error {
-	file, err := s.db.FileByID(ctx, id)
-	if err != nil {
-		return err
-	}
-	if file.Status == repository.StatusProcessing {
-		return api.ErrProcessing
-	}
-	if file.Status != repository.StatusFailed {
-		return api.ErrInvalidJobState
-	}
-	if s.isProcessingPath(file.Path) || s.isPathMutating(file.Path) {
-		return api.ErrProcessing
-	}
-	if err := s.updateCurrentFingerprint(ctx, &file); err != nil {
-		return err
-	}
-	file.Status = repository.StatusIgnored
-	file.PipelinePhase = repository.PipelinePhasePending
-	file.LastError = ""
-	return s.db.SaveFile(ctx, file)
-}
-
-func (s *Service) updateCurrentFingerprint(ctx context.Context, file *repository.FileRecord) error {
-	info, err := os.Stat(file.Path)
-	if err != nil {
-		return err
-	}
-	file.Size = info.Size()
-	file.MTimeNS = info.ModTime().UnixNano()
-
-	prober := s.prober
-	if prober == nil {
-		prober = ffprobeProber{name: s.ffprobeName}
-	}
-	probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	probe, probeErr := prober.Probe(probeCtx, file.Path)
-	cancel()
-	if probeErr != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if errors.Is(probeErr, context.Canceled) || errors.Is(probeErr, context.DeadlineExceeded) {
-			return probeErr
-		}
-		file.AudioSignature = ""
-		file.VideoSignature = ""
-	} else {
-		file.AudioSignature = probe.AudioSignature()
-		file.VideoSignature = probe.VideoSignature()
-	}
-	file.Fingerprint = media.Fingerprint(file.Path, file.Size, file.MTimeNS, file.AudioSignature, file.VideoSignature)
-	return nil
+	return s.db.History(ctx)
 }
 
 func (s *Service) ListBackups(ctx context.Context, page *repository.PageRequest) (any, error) {
+	now := time.Now().UTC()
+	retentionDays := s.config().Backup.RetentionDays
 	if page != nil {
-		return s.db.BackupsPage(ctx, *page)
+		result, err := s.db.BackupsPage(ctx, *page)
+		if err != nil {
+			return nil, err
+		}
+		result.Items = backupsWithAvailability(result.Items, now, retentionDays)
+		return result, nil
 	}
-	return s.db.Backups(ctx)
+	records, err := s.db.Backups(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return backupsWithAvailability(records, now, retentionDays), nil
+}
+
+func backupsWithAvailability(records []repository.BackupView, now time.Time, retentionDays int) []repository.BackupView {
+	for i := range records {
+		records[i].Availability = backupAvailability(records[i], now, retentionDays)
+	}
+	return records
+}
+
+func backupAvailability(record repository.BackupView, now time.Time, retentionDays int) repository.BackupAvailability {
+	if _, err := os.Stat(record.BackupPath); errors.Is(err, os.ErrNotExist) {
+		return repository.BackupMissing
+	} else if err != nil {
+		return repository.BackupMissing
+	}
+	if !record.RestoredAt.IsZero() {
+		return repository.BackupRestored
+	}
+	if backupExpired(record, now, retentionDays) {
+		return repository.BackupExpired
+	}
+	return repository.BackupAvailable
+}
+
+func backupExpired(record repository.BackupView, now time.Time, retentionDays int) bool {
+	if record.CreatedAt.IsZero() {
+		return false
+	}
+	expiresAt := record.CreatedAt.AddDate(0, 0, retentionDays)
+	return !expiresAt.After(now)
 }
 
 func (s *Service) RestoreBackup(ctx context.Context, id int64) (any, error) {
@@ -732,14 +651,11 @@ func (s *Service) RestoreBackup(ctx context.Context, id int64) (any, error) {
 	defer s.finishPathMutation(record.OriginalPath)
 
 	file, err := s.db.FileByPath(ctx, record.OriginalPath)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err != nil {
 		return nil, err
 	}
-	if err == nil && file.Status == repository.StatusProcessing {
+	if file.Status == repository.StatusProcessing {
 		return nil, api.ErrProcessing
-	}
-	if errors.Is(err, sql.ErrNoRows) {
-		file = repository.FileRecord{Path: record.OriginalPath}
 	}
 	cfg := s.config()
 	result, err := backup.RestoreBackup(backup.RestoreRequest{
@@ -772,12 +688,17 @@ func (s *Service) restorePersistDeadline() time.Duration {
 }
 
 func (s *Service) CleanupBackups(ctx context.Context) (any, error) {
-	records, err := s.db.ExpiredBackups(ctx, time.Now().UTC())
+	records, err := s.db.UnrestoredBackups(ctx)
 	if err != nil {
 		return nil, err
 	}
 	removed := 0
+	now := time.Now().UTC()
+	retentionDays := s.config().Backup.RetentionDays
 	for _, record := range records {
+		if !backupExpired(record, now, retentionDays) {
+			continue
+		}
 		didRemove, err := s.cleanupBackupRecord(ctx, record)
 		if err != nil {
 			return nil, err
@@ -813,29 +734,6 @@ func (s *Service) startBackupCleanup() {
 	}()
 }
 
-func (s *Service) markMissingBackups(ctx context.Context) error {
-	if s.db == nil {
-		return nil
-	}
-	records, err := s.db.Backups(ctx)
-	if err != nil {
-		return err
-	}
-	for _, record := range records {
-		_, statErr := os.Stat(record.BackupPath)
-		missing := errors.Is(statErr, os.ErrNotExist)
-		if statErr != nil && !missing {
-			return statErr
-		}
-		if record.Missing != missing {
-			if err := s.db.MarkBackupMissing(ctx, record.ID, missing); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
 func (s *Service) cleanupOrphanTempOutputs(ctx context.Context) error {
 	cfg := s.config()
 	for _, root := range cfg.Media.Roots {
@@ -868,7 +766,7 @@ func (s *Service) cleanupOrphanTempOutputs(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) cleanupBackupRecord(ctx context.Context, record repository.BackupRecord) (bool, error) {
+func (s *Service) cleanupBackupRecord(ctx context.Context, record repository.BackupView) (bool, error) {
 	if !s.beginPathMutation(record.OriginalPath) {
 		return false, nil
 	}

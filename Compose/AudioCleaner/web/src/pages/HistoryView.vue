@@ -1,24 +1,21 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import DataPager from '../components/DataPager.vue'
-import { jobPhaseLabel, jobStatusLabel, t } from '../i18n'
+import { jobStatusLabel, t } from '../i18n'
 import { api } from '../lib/api'
 import {
-  jobFailureCauseLabelKey,
   jobDiscoverySource,
   jobDiscoverySourceDisplay,
   jobFilterKey,
   jobID,
   jobPath,
-  jobPipelinePhase,
-  jobStatus,
-  jobFailureCause
+  jobStatus
 } from '../lib/jobs'
 import { jobStatusTone, semanticBadgeClass } from '../lib/semantic'
-import type { JobRecord } from '../lib/types'
+import type { HistoryRecord } from '../lib/types'
 
 const emptyValue = computed(() => t('logsNoValue'))
-const jobs = ref<JobRecord[]>([])
+const jobs = ref<HistoryRecord[]>([])
 const page = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
@@ -31,7 +28,7 @@ async function loadHistory(): Promise<void> {
   loading.value = true
   error.value = ''
   try {
-    const result = await api.jobsPage({ page: page.value, page_size: pageSize.value })
+    const result = await api.historyPage({ page: page.value, page_size: pageSize.value })
     jobs.value = result.items
     total.value = result.total
   } catch (caught) {
@@ -47,11 +44,11 @@ function updatePageSize(value: number): void {
   pageSize.value = value
 }
 
-function isExpanded(job: JobRecord): boolean {
+function isExpanded(job: HistoryRecord): boolean {
   return expandedJobIDs.value.has(jobID(job))
 }
 
-function toggleJob(job: JobRecord): void {
+function toggleJob(job: HistoryRecord): void {
   const next = new Set(expandedJobIDs.value)
   const id = jobID(job)
   if (next.has(id)) {
@@ -62,46 +59,19 @@ function toggleJob(job: JobRecord): void {
   expandedJobIDs.value = next
 }
 
-function labelOrRaw(value: string, key: string | null): string {
-  if (!value) {
-    return emptyValue.value
-  }
-  return key ? t(key) : value
-}
-
-function jobStatusDisplay(job: JobRecord): string {
+function jobStatusDisplay(job: HistoryRecord): string {
   return jobStatusLabel(jobFilterKey(job) ?? jobStatus(job))
 }
 
-function jobStatusBadgeClass(job: JobRecord): string {
+function jobStatusBadgeClass(job: HistoryRecord): string {
   return semanticBadgeClass(jobStatusTone(jobFilterKey(job) ?? jobStatus(job)))
 }
 
-function jobPhaseValue(job: JobRecord): string {
-  if (jobStatus(job) !== 'processing') {
-    return ''
-  }
-  return jobPipelinePhase(job)
-}
-
-function jobPhaseDisplay(job: JobRecord): string {
-  const phase = jobPhaseValue(job)
-  return phase ? jobPhaseLabel(phase) : '/'
-}
-
-function jobFailureCauseLabel(job: JobRecord): string {
-  if (jobStatus(job) !== 'failed') {
-    return '/'
-  }
-  const cause = jobFailureCause(job)
-  return cause ? labelOrRaw(cause, jobFailureCauseLabelKey(cause)) : '/'
-}
-
-function jobDiscoverySourceLabel(job: JobRecord): string {
+function jobDiscoverySourceLabel(job: HistoryRecord): string {
   return jobDiscoverySourceDisplay(jobDiscoverySource(job), t)
 }
 
-function openErrorDialog(job: JobRecord): void {
+function openErrorDialog(job: HistoryRecord): void {
   if (!job.last_error) {
     return
   }
@@ -147,10 +117,10 @@ onMounted(loadHistory)
         <thead>
           <tr>
             <th></th>
+            <th>ID</th>
             <th>{{ t('jobsColumnPath') }}</th>
-            <th>{{ t('tableStatus') }}</th>
             <th>{{ t('jobsColumnSource') }}</th>
-            <th>{{ t('jobsColumnAttempts') }}</th>
+            <th>{{ t('historyColumnResult') }}</th>
             <th>{{ t('tableUpdated') }}</th>
           </tr>
         </thead>
@@ -165,44 +135,32 @@ onMounted(loadHistory)
                   {{ isExpanded(job) ? 'v' : '>' }}
                 </button>
               </td>
+              <td class="history-id-cell">{{ jobID(job) }}</td>
               <td class="path-cell" :title="jobPath(job)">{{ jobPath(job) }}</td>
+              <td class="source-cell">{{ jobDiscoverySourceLabel(job) }}</td>
               <td class="status-cell">
                 <span :class="jobStatusBadgeClass(job)">{{ jobStatusDisplay(job) }}</span>
               </td>
-              <td class="source-cell">{{ jobDiscoverySourceLabel(job) }}</td>
-              <td class="attempts-cell">{{ job.attempts }}</td>
               <td class="date-cell">{{ job.updated_at || emptyValue }}</td>
             </tr>
             <tr v-if="isExpanded(job)" class="history-detail-row">
               <td colspan="6">
                 <div class="history-detail-grid">
                   <div class="history-detail-field">
-                    <span class="history-detail-key">Job ID</span>
+                    <span class="history-detail-key">JobID</span>
                     <span class="history-detail-value">{{ jobID(job) }}</span>
-                  </div>
-                  <div class="history-detail-field">
-                    <span class="history-detail-key">{{ t('tableStatus') }}</span>
-                    <span class="history-detail-value">{{ jobStatusDisplay(job) }}</span>
-                  </div>
-                  <div class="history-detail-field">
-                    <span class="history-detail-key">{{ t('dashboardPhase') }}</span>
-                    <span class="history-detail-value">{{ jobPhaseDisplay(job) }}</span>
                   </div>
                   <div class="history-detail-field">
                     <span class="history-detail-key">{{ t('jobsColumnSource') }}</span>
                     <span class="history-detail-value">{{ jobDiscoverySourceLabel(job) }}</span>
                   </div>
                   <div class="history-detail-field">
-                    <span class="history-detail-key">{{ t('jobsColumnReason') }}</span>
-                    <span class="history-detail-value">{{ jobFailureCauseLabel(job) }}</span>
+                    <span class="history-detail-key">{{ t('tableUpdated') }}</span>
+                    <span class="history-detail-value">{{ job.updated_at || emptyValue }}</span>
                   </div>
                   <div class="history-detail-field">
-                    <span class="history-detail-key">{{ t('jobsColumnAttempts') }}</span>
-                    <span class="history-detail-value">{{ job.attempts }}</span>
-                  </div>
-                  <div class="history-detail-field history-detail-field--wide">
-                    <span class="history-detail-key">{{ t('jobsColumnPath') }}</span>
-                    <span class="history-detail-value">{{ jobPath(job) }}</span>
+                    <span class="history-detail-key">{{ t('tableStatus') }}</span>
+                    <span class="history-detail-value">{{ jobStatusDisplay(job) }}</span>
                   </div>
                   <div class="history-detail-field">
                     <span class="history-detail-key">Audio signature</span>
@@ -212,9 +170,9 @@ onMounted(loadHistory)
                     <span class="history-detail-key">Video signature</span>
                     <span class="history-detail-value">{{ job.video_signature || emptyValue }}</span>
                   </div>
-                  <div class="history-detail-field">
-                    <span class="history-detail-key">{{ t('tableUpdated') }}</span>
-                    <span class="history-detail-value">{{ job.updated_at || emptyValue }}</span>
+                  <div class="history-detail-field history-detail-field--wide">
+                    <span class="history-detail-key">Media path</span>
+                    <span class="history-detail-value">{{ jobPath(job) }}</span>
                   </div>
                   <div v-if="job.last_error" class="history-detail-field history-detail-field--wide">
                     <span class="history-detail-key">{{ t('dashboardError') }}</span>

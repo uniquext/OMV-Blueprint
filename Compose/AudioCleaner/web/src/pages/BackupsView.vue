@@ -2,21 +2,19 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import DataPager from '../components/DataPager.vue'
-import { backupStateLabel, t } from '../i18n'
+import { backupAvailabilityLabel, t } from '../i18n'
 import { api } from '../lib/api'
 import {
-  backupExpiresAt,
+  backupAvailability,
   backupID,
-  backupMissing,
   backupPath,
   backupRestoredAt,
   backupsRequestPlan,
-  backupState,
   filterBackups,
   loadAllBackupPages,
   type BackupFilter
 } from '../lib/backups'
-import { backupStateTone, semanticBadgeClass } from '../lib/semantic'
+import { backupAvailabilityTone, semanticBadgeClass } from '../lib/semantic'
 import type { BackupRecord } from '../lib/types'
 
 const backups = ref<BackupRecord[]>([])
@@ -81,7 +79,6 @@ async function loadBackups(): Promise<void> {
   loading.value = true
   error.value = ''
   try {
-    const now = new Date()
     const plan = backupsRequestPlan(page.value, pageSize.value, filter.value, keyword.value)
     const result = plan.localPagination
       ? await loadAllBackupPages(plan.pageSize, (requestPage, requestPageSize) =>
@@ -93,7 +90,7 @@ async function loadBackups(): Promise<void> {
     }
 
     if (plan.localPagination) {
-      const filtered = filterBackups(result.items, filter.value, keyword.value, now)
+      const filtered = filterBackups(result.items, filter.value, keyword.value)
       total.value = filtered.length
       clampPage(filtered.length, true)
       backups.value = filtered.slice((page.value - 1) * pageSize.value, page.value * pageSize.value)
@@ -161,11 +158,11 @@ function updatePageSize(value: number): void {
 }
 
 function backupStateDisplay(record: BackupRecord): string {
-  return backupStateLabel(backupState(record))
+  return backupAvailabilityLabel(backupAvailability(record))
 }
 
 function backupStateBadgeClass(record: BackupRecord): string {
-  return semanticBadgeClass(backupStateTone(backupState(record)))
+  return semanticBadgeClass(backupAvailabilityTone(backupAvailability(record)))
 }
 
 function emptyValue(value: string): string {
@@ -237,15 +234,13 @@ onMounted(loadBackups)
             <th>{{ t('backupsColumnBackupPath') }}</th>
             <th>{{ t('tableStatus') }}</th>
             <th>{{ t('backupsColumnCreated') }}</th>
-            <th>{{ t('backupsColumnExpires') }}</th>
             <th>{{ t('backupsColumnRestored') }}</th>
-            <th>{{ t('backupsColumnMissing') }}</th>
             <th>{{ t('backupsColumnActions') }}</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="!loading && backups.length === 0">
-            <td colspan="8" class="muted">{{ t('backupsNoData') }}</td>
+            <td colspan="6" class="muted">{{ t('backupsNoData') }}</td>
           </tr>
           <tr v-for="backup in backups" :key="backupID(backup)">
             <td class="path-cell" :title="backupPath(backup)">{{ backupPath(backup) }}</td>
@@ -254,9 +249,7 @@ onMounted(loadBackups)
               <span :class="backupStateBadgeClass(backup)">{{ backupStateDisplay(backup) }}</span>
             </td>
             <td class="date-cell">{{ emptyValue(backup.created_at) }}</td>
-            <td class="date-cell">{{ emptyValue(backupExpiresAt(backup)) }}</td>
             <td class="date-cell">{{ emptyValue(backupRestoredAt(backup)) }}</td>
-            <td class="missing-cell">{{ backupMissing(backup) ? t('backupsYes') : t('backupsNo') }}</td>
             <td class="actions-cell">
               <div class="row-actions">
                 <button class="button" type="button" :disabled="busy" @click="askRestore(backup)">
