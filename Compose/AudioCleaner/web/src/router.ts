@@ -6,11 +6,11 @@ import LogsView from './pages/LogsView.vue'
 import SettingsView from './pages/SettingsView.vue'
 
 export const routes = [
-  { path: '/', name: 'Dashboard', component: DashboardView },
-  { path: '/history', name: 'History', component: HistoryView },
-  { path: '/backups', name: 'Backups', component: BackupsView },
-  { path: '/settings', name: 'Settings', component: SettingsView },
-  { path: '/logs', name: 'Logs', component: LogsView }
+  { path: '/', name: 'Dashboard', component: DashboardView, meta: { titleKey: 'navDashboard' } },
+  { path: '/history', name: 'History', component: HistoryView, meta: { titleKey: 'navHistory' } },
+  { path: '/backups', name: 'Backups', component: BackupsView, meta: { titleKey: 'navBackups' } },
+  { path: '/settings', name: 'Settings', component: SettingsView, meta: { titleKey: 'navSettings' } },
+  { path: '/logs', name: 'Logs', component: LogsView, meta: { titleKey: 'navLogs' } }
 ]
 
 export const router = createRouter({

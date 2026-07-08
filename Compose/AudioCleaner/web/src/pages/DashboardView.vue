@@ -69,13 +69,6 @@ onMounted(loadDashboard)
 
 <template>
   <div>
-    <div class="page-header">
-      <h1 class="page-title">{{ t('pageDashboardTitle') }}</h1>
-      <div class="actions">
-        <button class="button" type="button" :disabled="loading" @click="loadDashboard">{{ t('actionRefresh') }}</button>
-      </div>
-    </div>
-
     <div v-if="error" class="alert error">
       <strong>{{ t('dashboardErrorLabel') }}</strong>
       <span>{{ error }}</span>

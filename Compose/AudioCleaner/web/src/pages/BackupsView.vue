@@ -196,16 +196,6 @@ onMounted(loadBackups)
 
 <template>
   <div>
-    <div class="page-header">
-      <h1 class="page-title">{{ t('pageBackupsTitle') }}</h1>
-      <div class="actions">
-        <button class="button" type="button" :disabled="busy" @click="loadBackups">{{ t('actionRefresh') }}</button>
-        <button class="button primary" type="button" :disabled="busy" @click="askCleanupExpired">
-          {{ t('backupsCleanupExpired') }}
-        </button>
-      </div>
-    </div>
-
     <div class="panel">
       <div class="jobs-toolbar">
         <label class="field">
@@ -218,6 +208,11 @@ onMounted(loadBackups)
           <span>{{ t('backupsPathSearch') }}</span>
           <input v-model="keyword" type="search" :placeholder="t('backupsPathSearchPlaceholder')" />
         </label>
+        <div class="actions">
+          <button class="button primary" type="button" :disabled="busy" @click="askCleanupExpired">
+            {{ t('backupsCleanupExpired') }}
+          </button>
+        </div>
       </div>
 
       <div v-if="error" class="alert error">

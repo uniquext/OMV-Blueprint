@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { RouterLink, RouterView } from 'vue-router'
+import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { useEventStream } from './composables/useEventStream'
 import { eventStreamStatusLabel, t } from './i18n'
 
+type TranslationKey = Parameters<typeof t>[0]
+
 const eventStream = useEventStream()
+const route = useRoute()
 
 const navigation = computed(() => [
   { to: '/', label: t('navDashboard') },
@@ -13,6 +16,10 @@ const navigation = computed(() => [
   { to: '/settings', label: t('navSettings') },
   { to: '/logs', label: t('navLogs') }
 ])
+const pageTitle = computed(() => {
+  const titleKey = route.meta.titleKey
+  return typeof titleKey === 'string' ? t(titleKey as TranslationKey) : t('appName')
+})
 </script>
 
 <template>
@@ -35,7 +42,7 @@ const navigation = computed(() => [
 
     <main class="content-shell">
       <header class="topbar">
-        <div class="topbar-title">{{ t('appName') }}</div>
+        <div class="topbar-title">{{ pageTitle }}</div>
         <div class="sse-indicator" :data-status="eventStream.status">
           <span class="sse-dot" aria-hidden="true"></span>
           <span>{{ t('sseStatus') }}: {{ eventStreamStatusLabel(eventStream.status) }}</span>

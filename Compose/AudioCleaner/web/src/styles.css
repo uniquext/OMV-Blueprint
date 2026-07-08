@@ -246,7 +246,8 @@ textarea {
 
 .jobs-toolbar {
   display: grid;
-  grid-template-columns: minmax(160px, 220px) minmax(240px, 1fr);
+  grid-template-columns: minmax(160px, 220px) minmax(240px, 1fr) auto;
+  align-items: end;
   gap: 12px;
   border-bottom: 1px solid #e3e8ee;
   padding: 12px;
@@ -591,6 +592,44 @@ textarea {
   table-layout: auto;
 }
 
+.history-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 22px;
+  border-bottom: 1px solid #e3e8ee;
+  padding: 14px 16px;
+  color: #51616f;
+  font-size: 13px;
+}
+
+.history-summary strong {
+  color: #24313c;
+}
+
+.history-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid #e3e8ee;
+  padding: 12px 14px;
+}
+
+.history-filter-bar select,
+.history-filter-bar input {
+  min-height: 32px;
+  border: 1px solid #bcc8d3;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #24313c;
+  padding: 5px 10px;
+  font-size: 13px;
+}
+
+.history-filter-keyword {
+  min-width: 220px;
+  flex: 1 1 240px;
+}
+
 .history-expand-cell {
   width: 40px;
   white-space: nowrap;
@@ -606,26 +645,47 @@ textarea {
 
 .history-id-cell {
   width: 72px;
+  padding-left: 22px !important;
   white-space: nowrap;
   font-family: "SF Mono", "SFMono-Regular", Consolas, monospace;
+  font-weight: 700;
   color: #24313c;
 }
 
-.history-detail-row td {
-  background: #f8fafc;
-  padding: 12px 16px;
+.history-path-main {
+  display: block;
+  overflow: hidden;
+  color: #17212b;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-path-sub {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  color: #687886;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-detail-cell {
+  background: #fafbfc;
+  padding: 12px 20px 12px 70px !important;
 }
 
 .history-detail-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  grid-template-columns: 1fr 1fr;
   gap: 8px 24px;
+  font-size: 12px;
 }
 
 .history-detail-field {
-  display: grid;
-  grid-template-columns: minmax(112px, 148px) minmax(0, 1fr);
-  gap: 10px;
+  display: flex;
+  gap: 8px;
   align-items: start;
   min-width: 0;
 }
@@ -635,16 +695,21 @@ textarea {
 }
 
 .history-detail-key {
-  color: #687886;
+  flex: 0 0 96px;
+  color: #999999;
   font-size: 12px;
   font-weight: 700;
 }
 
 .history-detail-value {
   min-width: 0;
-  color: #24313c;
+  color: #555555;
   font-size: 12px;
-  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.history-detail-value.placeholder-text {
+  color: #bbbbbb;
 }
 
 .history-error-link {
@@ -656,7 +721,7 @@ textarea {
   padding: 0;
   text-align: left;
   text-decoration: underline dotted;
-  overflow-wrap: anywhere;
+  word-break: break-all;
 }
 
 .history-error-link:hover {

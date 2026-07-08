@@ -88,13 +88,6 @@ onMounted(loadLogs)
 
 <template>
   <div>
-    <div class="page-header">
-      <h1 class="page-title">{{ t('pageLogsTitle') }}</h1>
-      <div class="actions">
-        <button class="button" type="button" :disabled="loading" @click="loadLogs">{{ t('actionRefresh') }}</button>
-      </div>
-    </div>
-
     <div v-if="error" class="alert error">
       <strong>{{ t('logsErrorLabel') }}</strong>
       <span>{{ error }}</span>
@@ -113,7 +106,6 @@ onMounted(loadLogs)
               <option :value="500">500 {{ t('logsLines') }}</option>
             </select>
           </label>
-          <button class="button" type="button" :disabled="loading" @click="loadLogs">{{ t('actionRefresh') }}</button>
         </div>
       </div>
       <div v-if="loading" class="panel-body muted">{{ t('logsLoading') }}</div>

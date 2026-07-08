@@ -89,13 +89,6 @@ onMounted(loadConfig)
 
 <template>
   <div>
-    <div class="page-header">
-      <h1 class="page-title">{{ t('pageSettingsTitle') }}</h1>
-      <div class="actions">
-        <button class="button" type="button" :disabled="loading" @click="loadConfig">{{ t('actionRefresh') }}</button>
-      </div>
-    </div>
-
     <div v-if="error" class="alert error">
       <strong>{{ t('settingsErrorLabel') }}</strong>
       <span>{{ error }}</span>
