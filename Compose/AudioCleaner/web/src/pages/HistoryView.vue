@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import DataPager from '../components/DataPager.vue'
 import { jobStatusLabel, t } from '../i18n'
 import { api } from '../lib/api'
 import {
   filterHistoryJobs,
   historyJobSummary,
+  type HistorySourceFilter,
   jobBasename,
   jobDirectory,
   jobDiscoverySource,
@@ -28,19 +29,20 @@ const pageSize = ref(20)
 const expandedJobIDs = ref<Set<number>>(new Set())
 const selectedError = ref<{ path: string; message: string } | null>(null)
 const errorDialog = ref<HTMLDialogElement | null>(null)
+const historyRoot = ref<HTMLElement | null>(null)
 const loading = ref(false)
 const error = ref('')
 const resultFilter = ref<JobFilter>('all')
-const sourceFilter = ref('all')
+const sourceFilter = ref<HistorySourceFilter>('all')
 const dateFrom = ref('')
 const dateTo = ref('')
 const keyword = ref('')
+const openFilter = ref<'result' | 'source' | 'dateFrom' | 'dateTo' | null>(null)
+const calendarDraft = ref('')
+const calendarMonth = ref('')
 
 const resultFilters: JobFilter[] = ['all', 'processed', 'compatible', 'failed', 'processing', 'restored']
-const sourceFilters = computed(() => {
-  const sources = new Set(allJobs.value.map((job) => jobDiscoverySource(job)).filter(Boolean))
-  return ['all', ...Array.from(sources).sort()]
-})
+const sourceFilters: HistorySourceFilter[] = ['all', 'scan', 'watchdog', 'manual']
 const filteredJobs = computed(() =>
   filterHistoryJobs(allJobs.value, {
     result: resultFilter.value,
@@ -54,6 +56,21 @@ const jobs = computed(() => filteredJobs.value.slice((page.value - 1) * pageSize
 const total = computed(() => filteredJobs.value.length)
 const summary = computed(() => historyJobSummary(allJobs.value))
 const successRateDisplay = computed(() => `${(summary.value.successRate * 100).toFixed(1)}%`)
+const resultFilterLabel = computed(() => t(`jobFilter${resultFilter.value}`))
+const sourceFilterDisplay = computed(() => sourceFilterLabel(sourceFilter.value))
+const datePlaceholder = computed(() => t('historyFilterDatePlaceholder'))
+const calendarTitle = computed(() => {
+  const [year, month] = calendarMonth.value.split('-')
+  return year && month ? `${year} 年 ${Number(month)} 月` : ''
+})
+const calendarDays = computed(() => buildCalendarDays(calendarMonth.value))
+const calendarWeekdays = ['日', '一', '二', '三', '四', '五', '六']
+
+interface CalendarDay {
+  date: string
+  day: number
+  muted: boolean
+}
 
 function pageCountFor(nextTotal: number): number {
   return Math.max(1, Math.ceil(nextTotal / pageSize.value))
@@ -82,6 +99,133 @@ async function loadHistory(): Promise<void> {
 
 function updatePageSize(value: number): void {
   pageSize.value = value
+}
+
+function closeFilter(): void {
+  openFilter.value = null
+}
+
+function toggleMenu(menu: 'result' | 'source'): void {
+  openFilter.value = openFilter.value === menu ? null : menu
+}
+
+function selectResultFilter(value: JobFilter): void {
+  resultFilter.value = value
+  closeFilter()
+}
+
+function selectSourceFilter(value: HistorySourceFilter): void {
+  sourceFilter.value = value
+  closeFilter()
+}
+
+function displayDate(value: string): string {
+  return value ? value.replaceAll('-', '/') : datePlaceholder.value
+}
+
+function newestHistoryDate(): string {
+  const dates = allJobs.value
+    .map((job) => job.updated_at?.slice(0, 10) ?? '')
+    .filter(Boolean)
+    .sort()
+  return dates.at(-1) ?? localToday()
+}
+
+function localToday(): string {
+  const now = new Date()
+  return formatDateParts(now.getFullYear(), now.getMonth() + 1, now.getDate())
+}
+
+function formatDateParts(year: number, month: number, day: number): string {
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+function monthKey(value: string): string {
+  return value.slice(0, 7)
+}
+
+function openDateFilter(field: 'dateFrom' | 'dateTo'): void {
+  const value = field === 'dateFrom' ? dateFrom.value : dateTo.value
+  calendarDraft.value = value
+  calendarMonth.value = monthKey(value || newestHistoryDate())
+  openFilter.value = field
+}
+
+function selectCalendarDate(value: string): void {
+  calendarDraft.value = value
+  calendarMonth.value = monthKey(value)
+}
+
+function clearCalendarDate(field: 'dateFrom' | 'dateTo'): void {
+  calendarDraft.value = ''
+  if (field === 'dateFrom') {
+    dateFrom.value = ''
+  } else {
+    dateTo.value = ''
+  }
+  closeFilter()
+}
+
+function confirmCalendarDate(field: 'dateFrom' | 'dateTo'): void {
+  if (field === 'dateFrom') {
+    dateFrom.value = calendarDraft.value
+  } else {
+    dateTo.value = calendarDraft.value
+  }
+  closeFilter()
+}
+
+function shiftCalendarMonth(offset: number): void {
+  const [year, month] = calendarMonth.value.split('-').map(Number)
+  const next = new Date(year, month - 1 + offset, 1)
+  calendarMonth.value = monthKey(formatDateParts(next.getFullYear(), next.getMonth() + 1, 1))
+}
+
+function buildCalendarDays(month: string): CalendarDay[] {
+  const [year, monthNumber] = month.split('-').map(Number)
+  if (!year || !monthNumber) {
+    return []
+  }
+  const firstDay = new Date(year, monthNumber - 1, 1).getDay()
+  const currentMonthDays = new Date(year, monthNumber, 0).getDate()
+  const previousMonthDays = new Date(year, monthNumber - 1, 0).getDate()
+  const days: CalendarDay[] = []
+
+  for (let index = 0; index < 42; index += 1) {
+    const dayOffset = index - firstDay + 1
+    if (dayOffset < 1) {
+      const date = new Date(year, monthNumber - 2, previousMonthDays + dayOffset)
+      days.push({
+        date: formatDateParts(date.getFullYear(), date.getMonth() + 1, date.getDate()),
+        day: date.getDate(),
+        muted: true
+      })
+      continue
+    }
+    if (dayOffset > currentMonthDays) {
+      const date = new Date(year, monthNumber, dayOffset - currentMonthDays)
+      days.push({
+        date: formatDateParts(date.getFullYear(), date.getMonth() + 1, date.getDate()),
+        day: date.getDate(),
+        muted: true
+      })
+      continue
+    }
+    days.push({
+      date: formatDateParts(year, monthNumber, dayOffset),
+      day: dayOffset,
+      muted: false
+    })
+  }
+  return days
+}
+
+function closeFilterOnOutside(event: MouseEvent): void {
+  const target = event.target
+  if (!(target instanceof Node) || historyRoot.value?.contains(target)) {
+    return
+  }
+  closeFilter()
 }
 
 function isExpanded(job: HistoryRecord): boolean {
@@ -196,45 +340,181 @@ watch(
   { flush: 'post' }
 )
 
-onMounted(loadHistory)
+onMounted(() => {
+  void loadHistory()
+  document.addEventListener('click', closeFilterOnOutside)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('click', closeFilterOnOutside)
+})
 </script>
 
 <template>
-  <div>
+  <div ref="historyRoot">
     <div class="panel">
-      <div class="history-summary">
-        <span>✅ {{ t('historySummaryDone') }}: <strong>{{ summary.done }}</strong></span>
-        <span>⏭️ {{ t('historySummarySkipped') }}: <strong>{{ summary.skipped }}</strong></span>
-        <span>❌ {{ t('historySummaryFailed') }}: <strong>{{ summary.failed }}</strong></span>
-        <span>📈 {{ t('historySummarySuccessRate') }}: <strong>{{ successRateDisplay }}</strong></span>
-      </div>
+      <div class="history-toolbar">
+        <div class="history-summary">
+          <span>✅ {{ t('historySummaryDone') }}: <strong>{{ summary.done }}</strong></span>
+          <span>⏭️ {{ t('historySummarySkipped') }}: <strong>{{ summary.skipped }}</strong></span>
+          <span>❌ {{ t('historySummaryFailed') }}: <strong>{{ summary.failed }}</strong></span>
+          <span>
+            📈 {{ t('historySummarySuccessRate') }}: <strong>{{ successRateDisplay }}</strong>
+            <small class="history-summary-note">{{ t('historySummarySkippedExcluded') }}</small>
+          </span>
+        </div>
 
-      <div class="history-filter-bar">
-        <select v-model="resultFilter" class="history-filter-result" :aria-label="t('historyFilterResult')">
-          <option v-for="item in resultFilters" :key="item" :value="item">{{ t(`jobFilter${item}`) }}</option>
-        </select>
-        <select v-model="sourceFilter" class="history-filter-source" :aria-label="t('historyFilterSource')">
-          <option v-for="source in sourceFilters" :key="source" :value="source">{{ sourceFilterLabel(source) }}</option>
-        </select>
-        <input
-          v-model="dateFrom"
-          class="history-filter-date-from"
-          type="date"
-          :aria-label="t('historyFilterDateFrom')"
-        />
-        <input
-          v-model="dateTo"
-          class="history-filter-date-to"
-          type="date"
-          :aria-label="t('historyFilterDateTo')"
-        />
-        <input
-          v-model="keyword"
-          class="history-filter-keyword"
-          type="search"
-          :placeholder="t('historySearchPlaceholder')"
-          :aria-label="t('historyFilterKeyword')"
-        />
+        <div class="history-filter-bar">
+          <div class="history-filter-menu">
+            <button
+              class="history-filter-control history-filter-trigger history-filter-result"
+              type="button"
+              :aria-expanded="openFilter === 'result'"
+              :aria-label="t('historyFilterResult')"
+              @click="toggleMenu('result')"
+            >
+              <span>{{ resultFilterLabel }}</span>
+            </button>
+            <div v-if="openFilter === 'result'" class="history-filter-popover">
+              <button
+                v-for="item in resultFilters"
+                :key="item"
+                class="history-filter-option"
+                :class="{ 'history-filter-option--selected': resultFilter === item }"
+                type="button"
+                @click="selectResultFilter(item)"
+              >
+                <span class="history-filter-check" aria-hidden="true"></span>
+                <span>{{ t(`jobFilter${item}`) }}</span>
+              </button>
+            </div>
+          </div>
+          <div class="history-filter-menu">
+            <button
+              class="history-filter-control history-filter-trigger history-filter-source"
+              type="button"
+              :aria-expanded="openFilter === 'source'"
+              :aria-label="t('historyFilterSource')"
+              @click="toggleMenu('source')"
+            >
+              <span>{{ sourceFilterDisplay }}</span>
+            </button>
+            <div v-if="openFilter === 'source'" class="history-filter-popover">
+              <button
+                v-for="source in sourceFilters"
+                :key="source"
+                class="history-filter-option"
+                :class="{ 'history-filter-option--selected': sourceFilter === source }"
+                type="button"
+                @click="selectSourceFilter(source)"
+              >
+                <span class="history-filter-check" aria-hidden="true"></span>
+                <span>{{ sourceFilterLabel(source) }}</span>
+              </button>
+            </div>
+          </div>
+          <div class="history-filter-menu history-date-menu">
+            <button
+              class="history-filter-control history-filter-trigger history-filter-date history-filter-date-from"
+              type="button"
+              :aria-expanded="openFilter === 'dateFrom'"
+              :aria-label="t('historyFilterDateFrom')"
+              @click="openDateFilter('dateFrom')"
+            >
+              <span>{{ displayDate(dateFrom) }}</span>
+            </button>
+            <div v-if="openFilter === 'dateFrom'" class="history-filter-popover history-calendar-popover">
+              <div class="history-calendar-heading">
+                <strong>{{ calendarTitle }}</strong>
+                <div class="history-calendar-nav">
+                  <button type="button" @click="shiftCalendarMonth(-1)">‹</button>
+                  <button type="button" @click="shiftCalendarMonth(1)">›</button>
+                </div>
+              </div>
+              <div class="history-calendar-grid history-calendar-weekdays">
+                <span v-for="weekday in calendarWeekdays" :key="weekday">{{ weekday }}</span>
+              </div>
+              <div class="history-calendar-grid">
+                <button
+                  v-for="day in calendarDays"
+                  :key="day.date"
+                  class="history-calendar-day"
+                  :class="{
+                    'history-calendar-day--muted': day.muted,
+                    'history-calendar-day--selected': calendarDraft === day.date
+                  }"
+                  type="button"
+                  :data-date="day.date"
+                  @click="selectCalendarDate(day.date)"
+                >
+                  {{ day.day }}
+                </button>
+              </div>
+              <div class="history-calendar-actions">
+                <button class="button history-calendar-clear" type="button" @click="clearCalendarDate('dateFrom')">
+                  {{ t('historyFilterDateClear') }}
+                </button>
+                <button class="button primary history-calendar-confirm" type="button" @click="confirmCalendarDate('dateFrom')">
+                  {{ t('confirmConfirm') }}
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="history-filter-menu history-date-menu">
+            <button
+              class="history-filter-control history-filter-trigger history-filter-date history-filter-date-to"
+              type="button"
+              :aria-expanded="openFilter === 'dateTo'"
+              :aria-label="t('historyFilterDateTo')"
+              @click="openDateFilter('dateTo')"
+            >
+              <span>{{ displayDate(dateTo) }}</span>
+            </button>
+            <div v-if="openFilter === 'dateTo'" class="history-filter-popover history-calendar-popover">
+              <div class="history-calendar-heading">
+                <strong>{{ calendarTitle }}</strong>
+                <div class="history-calendar-nav">
+                  <button type="button" @click="shiftCalendarMonth(-1)">‹</button>
+                  <button type="button" @click="shiftCalendarMonth(1)">›</button>
+                </div>
+              </div>
+              <div class="history-calendar-grid history-calendar-weekdays">
+                <span v-for="weekday in calendarWeekdays" :key="weekday">{{ weekday }}</span>
+              </div>
+              <div class="history-calendar-grid">
+                <button
+                  v-for="day in calendarDays"
+                  :key="day.date"
+                  class="history-calendar-day"
+                  :class="{
+                    'history-calendar-day--muted': day.muted,
+                    'history-calendar-day--selected': calendarDraft === day.date
+                  }"
+                  type="button"
+                  :data-date="day.date"
+                  @click="selectCalendarDate(day.date)"
+                >
+                  {{ day.day }}
+                </button>
+              </div>
+              <div class="history-calendar-actions">
+                <button class="button history-calendar-clear" type="button" @click="clearCalendarDate('dateTo')">
+                  {{ t('historyFilterDateClear') }}
+                </button>
+                <button class="button primary history-calendar-confirm" type="button" @click="confirmCalendarDate('dateTo')">
+                  {{ t('confirmConfirm') }}
+                </button>
+              </div>
+            </div>
+          </div>
+          <input
+            v-model="keyword"
+            class="history-filter-control history-filter-keyword"
+            type="search"
+            :placeholder="t('historySearchPlaceholder')"
+            :aria-label="t('historyFilterKeyword')"
+          />
+        </div>
       </div>
 
       <div v-if="error" class="alert error">
@@ -247,7 +527,7 @@ onMounted(loadHistory)
         <thead>
           <tr>
             <th></th>
-            <th>ID</th>
+            <th class="history-id-heading">ID</th>
             <th>{{ t('jobsColumnPath') }}</th>
             <th>{{ t('jobsColumnSource') }}</th>
             <th>{{ t('historyColumnResult') }}</th>
