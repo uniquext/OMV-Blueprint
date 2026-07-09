@@ -82,7 +82,7 @@ DEFAULTS = {
         "model": "",
         "model_type": "chat",
         "temperature": 0.3,
-        "timeout": 120,
+        "timeout": 300,
         "batch_size": 20,
         "context_size": 5,
         "rpm_limit": 1000,

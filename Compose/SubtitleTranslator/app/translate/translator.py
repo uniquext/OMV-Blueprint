@@ -151,9 +151,7 @@ def call_llm(system_prompt: str, user_prompt: str, glossary: Dict, model_type: s
         "temperature": temperature
     }
 
-    if model_type == "chat":
-        payload["response_format"] = {"type": "json_object"}
-
+    # 移除强制的 response_format 以兼容推理模型 (Reasoning Models)
     with httpx.Client(timeout=float(_get_config()["llm"]["timeout"])) as client:
         rate_limiter.pre_request_check()
         response = client.post(_get_config()["llm"]["api_url"], headers=headers, json=payload)
