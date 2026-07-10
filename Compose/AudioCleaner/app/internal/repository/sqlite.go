@@ -211,7 +211,15 @@ func (r *Repository) TranscodeStats(ctx context.Context) (TranscodeStats, error)
 	  COALESCE(SUM(CASE WHEN result = 'succeeded' THEN 1 ELSE 0 END), 0),
 	  COALESCE(SUM(CASE WHEN result = 'failed' THEN 1 ELSE 0 END), 0)
 	FROM jobs
-	WHERE kind = 'process'`).Scan(&stats.Succeeded, &stats.Failed)
+	WHERE kind = 'process'
+	  AND id = (
+	    SELECT latest_jobs.id
+	    FROM jobs AS latest_jobs
+	    WHERE latest_jobs.file_id = jobs.file_id
+	      AND latest_jobs.kind = 'process'
+	    ORDER BY latest_jobs.started_at DESC, latest_jobs.id DESC
+	    LIMIT 1
+	  )`).Scan(&stats.Succeeded, &stats.Failed)
 	if err != nil {
 		return TranscodeStats{}, fmt.Errorf("query transcode stats: %w", err)
 	}

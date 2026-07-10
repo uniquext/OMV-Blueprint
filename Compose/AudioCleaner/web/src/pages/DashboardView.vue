@@ -2,19 +2,48 @@
 import { computed, onMounted, ref } from 'vue'
 import { serviceStatusLabel, t } from '../i18n'
 import { api } from '../lib/api'
-import { jobFailureCause, jobFailureCauseLabelKey } from '../lib/jobs'
-import type { AudioCleanerConfig, ServiceStatus } from '../lib/types'
+import type { AudioCleanerConfig, CurrentProcessing, PipelinePhase, ServiceStatus } from '../lib/types'
+
+type DashboardTaskTab = 'waiting' | 'active'
 
 const status = ref<ServiceStatus | null>(null)
 const config = ref<AudioCleanerConfig | null>(null)
 const loading = ref(false)
+const scanLoading = ref(false)
 const error = ref('')
+const dashboardTaskTab = ref<DashboardTaskTab>('waiting')
+const dashboardTaskPage = ref(1)
+const dashboardTaskPageSize = ref(10)
+
+const dashboardTaskPageSizes = [10, 20, 50]
+const waitingPhases = new Set<PipelinePhase | string>(['pending', 'queued', 'checking'])
+const activePhases = new Set<PipelinePhase | string>(['retry_wait', 'transcoding', 'verifying', 'backing_up', 'replacing'])
 
 const compatibleCount = computed(() => status.value?.counts.compatible ?? 0)
 const processedCount = computed(() => status.value?.counts.processed ?? 0)
 const failedCount = computed(() => status.value?.counts.failed ?? 0)
 const processingCount = computed(() => status.value?.counts.processing ?? status.value?.current_processing.length ?? 0)
 const mediaRoots = computed(() => config.value?.media.roots ?? status.value?.media_roots ?? [])
+const waitingTasks = computed(() => status.value?.current_processing.filter((task) => waitingPhases.has(task.phase)) ?? [])
+const activeTasks = computed(() => status.value?.current_processing.filter((task) => activePhases.has(task.phase)) ?? [])
+const waitingTaskCount = computed(() => status.value?.queue_count ?? waitingTasks.value.length)
+const activeTaskCount = computed(() => processingCount.value)
+const selectedTasks = computed(() => (dashboardTaskTab.value === 'waiting' ? waitingTasks.value : activeTasks.value))
+const dashboardTaskTotal = computed(() => selectedTasks.value.length)
+const dashboardTaskPageCount = computed(() => Math.max(1, Math.ceil(dashboardTaskTotal.value / dashboardTaskPageSize.value)))
+const effectiveDashboardTaskPage = computed(() => Math.min(dashboardTaskPage.value, dashboardTaskPageCount.value))
+const pagedDashboardTasks = computed(() => {
+  const start = (effectiveDashboardTaskPage.value - 1) * dashboardTaskPageSize.value
+  return selectedTasks.value.slice(start, start + dashboardTaskPageSize.value)
+})
+const canGoPreviousDashboardTaskPage = computed(() => effectiveDashboardTaskPage.value > 1)
+const canGoNextDashboardTaskPage = computed(() => effectiveDashboardTaskPage.value < dashboardTaskPageCount.value)
+const dashboardTaskSummary = computed(
+  () =>
+    `${t('dashboardTaskTotalPrefix')} ${dashboardTaskTotal.value} ${t('pagerItems')} · ${t('pagerPage')} ${
+      effectiveDashboardTaskPage.value
+    } / ${dashboardTaskPageCount.value} ${t('dashboardTaskPageUnit')}`
+)
 const successRate = computed(() => {
   const rate = status.value?.transcode_success_rate
   if (!rate) {
@@ -41,13 +70,50 @@ function formatBytes(bytes: number | undefined): string {
   return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`
 }
 
-function failureCauseLabel(job: { failure_cause: string }): string {
-  const cause = jobFailureCause(job)
-  if (!cause) {
+function selectDashboardTaskTab(tab: DashboardTaskTab): void {
+  dashboardTaskTab.value = tab
+  dashboardTaskPage.value = 1
+}
+
+function updateDashboardTaskPageSize(event: Event): void {
+  dashboardTaskPageSize.value = Number((event.target as HTMLSelectElement).value)
+  dashboardTaskPage.value = 1
+}
+
+function goDashboardTaskPage(page: number): void {
+  dashboardTaskPage.value = Math.min(Math.max(1, page), dashboardTaskPageCount.value)
+}
+
+function dashboardTaskFileName(path: string): string {
+  const parts = path.split('/').filter(Boolean)
+  return parts.at(-1) ?? path
+}
+
+function dashboardTaskDirectory(path: string): string {
+  const separatorIndex = path.lastIndexOf('/')
+  if (separatorIndex <= 0) {
     return '/'
   }
-  const key = jobFailureCauseLabelKey(cause)
-  return key ? t(key) : cause
+  return path.slice(0, separatorIndex)
+}
+
+function dashboardTaskPhaseLabel(phase: PipelinePhase | string): string {
+  const keys: Record<string, string> = {
+    pending: 'dashboardPhasePending',
+    queued: 'dashboardPhaseQueued',
+    retry_wait: 'dashboardPhaseRetryWait',
+    checking: 'dashboardPhaseChecking',
+    transcoding: 'dashboardPhaseTranscoding',
+    verifying: 'dashboardPhaseVerifying',
+    backing_up: 'dashboardPhaseBackingUp',
+    replacing: 'dashboardPhaseReplacing'
+  }
+  const key = keys[phase]
+  return key ? t(key) : t('dashboardPhaseUnknown')
+}
+
+function dashboardTaskPhaseClass(task: CurrentProcessing): string {
+  return waitingPhases.has(task.phase) ? 'dashboard-task-chip--waiting' : 'dashboard-task-chip--active'
 }
 
 async function loadDashboard(): Promise<void> {
@@ -61,6 +127,19 @@ async function loadDashboard(): Promise<void> {
     error.value = caught instanceof Error ? caught.message : String(caught)
   } finally {
     loading.value = false
+  }
+}
+
+async function quickScan(): Promise<void> {
+  scanLoading.value = true
+  error.value = ''
+  try {
+    await api.scan()
+    await loadDashboard()
+  } catch (caught) {
+    error.value = caught instanceof Error ? caught.message : String(caught)
+  } finally {
+    scanLoading.value = false
   }
 }
 
@@ -103,10 +182,6 @@ onMounted(loadDashboard)
         <span class="dashboard-metric__label">{{ t('dashboardQueueCount') }}</span>
         <strong class="dashboard-metric__value">{{ status.queue_count }}</strong>
       </section>
-      <section class="dashboard-metric dashboard-metric--workers panel">
-        <span class="dashboard-metric__label">{{ t('dashboardWorkerCount') }}</span>
-        <strong class="dashboard-metric__value">{{ status.workers }}</strong>
-      </section>
       <section class="dashboard-metric dashboard-metric--backup panel">
         <span class="dashboard-metric__label">{{ t('dashboardBackupUsage') }}</span>
         <strong class="dashboard-metric__value">{{ formatBytes(status.backup_usage_bytes) }}</strong>
@@ -117,6 +192,86 @@ onMounted(loadDashboard)
       </section>
     </div>
 
+    <section v-if="status" class="dashboard-task-panel panel" data-testid="dashboard-task-queue">
+      <div class="dashboard-task-tabbar">
+        <div class="dashboard-task-tabs" role="tablist">
+          <button
+            type="button"
+            class="dashboard-task-tab"
+            :class="{ 'dashboard-task-tab--active': dashboardTaskTab === 'waiting' }"
+            :aria-selected="dashboardTaskTab === 'waiting'"
+            @click="selectDashboardTaskTab('waiting')"
+          >
+            {{ t('dashboardTaskWaitingTab') }} {{ waitingTaskCount }}
+          </button>
+          <button
+            type="button"
+            class="dashboard-task-tab"
+            :class="{ 'dashboard-task-tab--active': dashboardTaskTab === 'active' }"
+            :aria-selected="dashboardTaskTab === 'active'"
+            @click="selectDashboardTaskTab('active')"
+          >
+            {{ t('dashboardTaskActiveTab') }} {{ activeTaskCount }}
+          </button>
+        </div>
+        <button
+          type="button"
+          class="button primary"
+          data-testid="dashboard-quick-scan"
+          :disabled="scanLoading || loading"
+          @click="quickScan"
+        >
+          {{ t('dashboardQuickScan') }}
+        </button>
+      </div>
+
+      <div class="dashboard-task-list">
+        <div v-if="pagedDashboardTasks.length === 0" class="dashboard-task-empty muted">
+          {{ t('dashboardTaskEmpty') }}
+        </div>
+        <div v-for="task in pagedDashboardTasks" :key="`${task.phase}:${task.path}`" class="dashboard-task-row">
+          <div class="dashboard-task-path">
+            <strong>{{ dashboardTaskFileName(task.path) }}</strong>
+            <span>{{ dashboardTaskDirectory(task.path) }}</span>
+          </div>
+          <span class="dashboard-task-chip" :class="dashboardTaskPhaseClass(task)">{{ dashboardTaskPhaseLabel(task.phase) }}</span>
+        </div>
+      </div>
+
+      <div class="dashboard-task-pager">
+        <span class="dashboard-task-pager__summary">{{ dashboardTaskSummary }}</span>
+        <div class="dashboard-task-pager__controls">
+          <label class="dashboard-task-page-size">
+            <span>{{ t('dashboardTaskPageSize') }}</span>
+            <select :value="dashboardTaskPageSize" aria-label="dashboard task page size" @change="updateDashboardTaskPageSize">
+              <option v-for="size in dashboardTaskPageSizes" :key="size" :value="size">{{ size }} {{ t('pagerItems') }}</option>
+            </select>
+          </label>
+          <div class="dashboard-task-pagination" aria-label="dashboard task pagination">
+            <button
+              type="button"
+              class="dashboard-task-page-button"
+              :disabled="!canGoPreviousDashboardTaskPage"
+              @click="goDashboardTaskPage(effectiveDashboardTaskPage - 1)"
+            >
+              ‹
+            </button>
+            <button type="button" class="dashboard-task-page-button dashboard-task-page-button--active" disabled>
+              {{ effectiveDashboardTaskPage }}
+            </button>
+            <button
+              type="button"
+              class="dashboard-task-page-button"
+              :disabled="!canGoNextDashboardTaskPage"
+              @click="goDashboardTaskPage(effectiveDashboardTaskPage + 1)"
+            >
+              ›
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <div v-if="status" class="dashboard-sections">
       <section class="panel">
         <div class="panel-body">
@@ -125,33 +280,6 @@ onMounted(loadDashboard)
             <li v-for="root in mediaRoots" :key="root">{{ root }}</li>
             <li v-if="mediaRoots.length === 0" class="muted">{{ t('dashboardEmptyValue') }}</li>
           </ul>
-        </div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-body">
-          <h2>{{ t('dashboardRecentFailed') }}</h2>
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>{{ t('dashboardPath') }}</th>
-                <th>{{ t('jobsColumnReason') }}</th>
-                <th>{{ t('dashboardError') }}</th>
-                <th>{{ t('tableUpdated') }}</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-if="status.recent_failed.length === 0">
-                <td colspan="4" class="muted">{{ t('dashboardNoFailures') }}</td>
-              </tr>
-              <tr v-for="job in status.recent_failed" :key="job.id">
-                <td class="path-cell" :title="job.path">{{ job.path }}</td>
-                <td class="status-cell">{{ failureCauseLabel(job) }}</td>
-                <td class="path-cell" :title="job.last_error || t('dashboardEmptyValue')">{{ job.last_error || t('dashboardEmptyValue') }}</td>
-                <td class="date-cell">{{ job.updated_at || t('dashboardEmptyValue') }}</td>
-              </tr>
-            </tbody>
-          </table>
         </div>
       </section>
     </div>
