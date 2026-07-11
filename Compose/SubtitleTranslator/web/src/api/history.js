@@ -22,6 +22,9 @@ export async function getJobs(params = {}) {
   if (params.date_to) {
     queryParts.push(`date_to=${encodeURIComponent(params.date_to)}`)
   }
+  if (params.is_deleted !== undefined) {
+    queryParts.push(`is_deleted=${params.is_deleted}`)
+  }
 
   const queryStr = queryParts.length > 0 ? `?${queryParts.join('&')}` : ''
   const response = await fetch(`/api/jobs${queryStr}`)
@@ -45,6 +48,13 @@ export async function getTaskErrors(taskId) {
 
 export async function retryTask(taskId) {
   const response = await fetch(`/api/tasks/${taskId}/retry`, {
+    method: 'POST'
+  })
+  return handleResponse(response)
+}
+
+export async function deleteJob(jobId) {
+  const response = await fetch(`/api/jobs/${jobId}/delete`, {
     method: 'POST'
   })
   return handleResponse(response)

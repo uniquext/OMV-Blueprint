@@ -32,3 +32,15 @@ export async function triggerScan() {
     });
     return handleResponse(response);
 }
+
+export async function ignoreCompleteTask(taskId) {
+    const response = await fetch(`/api/tasks/${taskId}/ignore-complete`, {
+        method: 'POST'
+    });
+    return handleResponse(response);
+}
+
+export async function getTaskPreview(taskId) {
+    const response = await fetch(`/api/tasks/${taskId}/preview`);
+    return handleResponse(response);
+}

@@ -123,7 +123,7 @@
       <!-- 执行与翻译 TAB 任务列表 -->
       <div class="task-list" v-if="(activeTab === 'execute' || activeTab === 'translate')">
         <div class="empty-state" v-if="tabData.length === 0">暂无任务</div>
-        <div class="task-item" v-for="task in tabData" :key="task.id">
+        <div class="task-item" v-for="task in tabData" :key="task.id" :class="{ 'clickable-row': isTranslating(task) || task.status === 'incomplete' }" @click="(isTranslating(task) || task.status === 'incomplete') && openPreview(task.translate_task_id)">
           <span class="icon">{{ getStatusIcon(task) }}</span>
           <span class="path" :title="task.media_path">{{ basename(task.media_path) }}</span>
           <span :class="['status-tag', getStatusClass(task)]">{{ getStatusLabel(task) }}</span>
@@ -142,6 +142,8 @@
           </template>
           <!-- 时间 -->
           <span class="meta time-info">{{ formatTime(task.created_at) }}</span>
+          <!-- 操作 -->
+          <button v-if="task.status === 'incomplete'" class="btn" style="padding:2px 8px;font-size:11px;" @click.stop="handleIgnore(task.translate_task_id)">忽略并完成</button>
         </div>
       </div>
 
@@ -154,13 +156,36 @@
         <button :disabled="currentPage === totalPages" @click="changePage(currentPage + 1)">下一页</button>
       </div>
     </div>
+
+    <!-- 实时翻译快照预览模态框 -->
+    <div class="diag-overlay" v-if="previewVisible" @click.self="closePreview">
+      <div class="diag-modal">
+        <div class="diag-header">
+          <span class="diag-title">翻译快照对照 (Task: {{ previewTaskId.substring(0,8) }}...)</span>
+          <button class="diag-close" @click="closePreview">&times;</button>
+        </div>
+        <div class="diag-body">
+          <div v-if="previewLoading" style="text-align:center;padding:24px;color:#999;">加载中...</div>
+          <div v-else-if="previewLines.length === 0" style="text-align:center;padding:24px;color:#999;">暂无数据</div>
+          <div v-else class="preview-container">
+            <div class="preview-row" v-for="line in previewLines" :key="line.id">
+              <div class="preview-id">{{ line.id }}</div>
+              <div class="preview-content">
+                <div class="preview-original">{{ line.original }}</div>
+                <div class="preview-translated" :class="{ empty: !line.translated }">{{ line.translated || '(未翻译)' }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { reactive, ref, computed, onMounted } from 'vue'
 import { createDiscreteApi } from 'naive-ui'
-import { getStats, getDebouncing, getPending, getJobsByStatuses, triggerScan } from '../api/dashboard'
+import { getStats, getDebouncing, getPending, getJobsByStatuses, triggerScan, ignoreCompleteTask, getTaskPreview } from '../api/dashboard'
 import { useSSE } from '../composables/useSSE'
 
 const { message } = createDiscreteApi(['message'])
@@ -248,14 +273,19 @@ const formatSuccessRate = (rate) => {
   return (rate * 100).toFixed(1) + '%'
 }
 
-const formatAvgTime = (seconds) => {
+const formatDuration = (seconds) => {
   if (seconds === undefined || seconds === null) return '0s'
-  if (seconds >= 60) {
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`
-  }
-  return `${seconds}s`
+  if (seconds < 60) return `${Math.floor(seconds)}s`
+  
+  const d = Math.floor(seconds / 86400)
+  const h = Math.floor((seconds % 86400) / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = Math.floor(seconds % 60)
+  
+  if (d > 0) return `${d}d ${h}h ${m}m ${s}s`
+  if (h > 0) return `${h}h ${m}m ${s}s`
+  if (m > 0) return `${m}m ${s}s`
+  return `${s}s`
 }
 
 const formatTokens = (tokens) => {
@@ -291,7 +321,7 @@ const isTranslating = (task) => {
 }
 
 const getStatusIcon = (task) => {
-  const map = { done: '✅', skipped: '⏭️', failed: '❌', funneling: '🔍', extracting: '📤', rebuilding: '🔨' }
+  const map = { done: '✅', incomplete: '⚠️', skipped: '⏭️', failed: '❌', funneling: '🔍', extracting: '📤', rebuilding: '🔨' }
   if (task.status === 'translating') {
     // 区分等待翻译和正在翻译
     if (task.task_status === 'queued') return '⏳'
@@ -301,7 +331,7 @@ const getStatusIcon = (task) => {
 }
 
 const getStatusClass = (task) => {
-  const map = { done: 'done', skipped: 'skipped', failed: 'failed', funneling: 'funneling', extracting: 'extracting', rebuilding: 'rebuilding' }
+  const map = { done: 'done', incomplete: 'incomplete', skipped: 'skipped', failed: 'failed', funneling: 'funneling', extracting: 'extracting', rebuilding: 'rebuilding' }
   if (task.status === 'translating') {
     if (task.task_status === 'queued') return 'waiting'
     if (task.task_status === 'processing') return 'translating'
@@ -311,7 +341,7 @@ const getStatusClass = (task) => {
 }
 
 const getStatusLabel = (task) => {
-  const map = { done: '完成', skipped: '跳过', failed: '失败', rebuilding: '字幕回写' }
+  const map = { done: '完成', incomplete: '待完成', skipped: '跳过', failed: '失败', rebuilding: '字幕回写' }
   if (task.status === 'funneling') return '漏斗分流'
   if (task.status === 'extracting') {
     if (task.funnel_type === 11 || task.funnel_type === 21) return '繁简转换'
@@ -343,7 +373,7 @@ const fetchStats = async () => {
     stats.skipped = data.skipped || 0
     stats.failed = data.failed || 0
     stats.successRate = formatSuccessRate(data.success_rate)
-    stats.avgTime = formatAvgTime(data.avg_duration_seconds)
+    stats.avgTime = formatDuration(data.avg_duration_seconds)
     stats.totalTokens = data.total_tokens || 0
     hasAnomaly.value = data.has_timing_anomaly || false
     anomalyReason.value = data.anomaly_reason || ''
@@ -456,6 +486,44 @@ const handleScan = async () => {
   }
 }
 
+// ============ 快照预览与忽略完成 ============
+
+const previewVisible = ref(false)
+const previewLoading = ref(false)
+const previewTaskId = ref('')
+const previewLines = ref([])
+
+const openPreview = async (taskId) => {
+  if (!taskId) return
+  previewTaskId.value = taskId
+  previewVisible.value = true
+  previewLoading.value = true
+  try {
+    const data = await getTaskPreview(taskId)
+    previewLines.value = data.lines || []
+  } catch (err) {
+    message.error('加载预览失败: ' + err.message)
+    previewLines.value = []
+  } finally {
+    previewLoading.value = false
+  }
+}
+
+const closePreview = () => {
+  previewVisible.value = false
+}
+
+const handleIgnore = async (taskId) => {
+  if (!confirm('确定要忽略跳过批次并强制完成任务吗？')) return
+  try {
+    await ignoreCompleteTask(taskId)
+    message.success('任务已标记为完成')
+    fetchTabData()
+  } catch (err) {
+    message.error('操作失败: ' + err.message)
+  }
+}
+
 // ============ SSE 事件处理 ============
 
 const handleSSEEvent = (type, payload) => {
@@ -555,6 +623,8 @@ useSSE('/api/events', {
 
 /* 任务列表 */
 .task-item { padding: 10px 16px; border-bottom: 1px solid #f5f5f8; font-size: 13px; display: flex; align-items: center; gap: 10px; transition: background 0.15s; }
+.task-item.clickable-row { cursor: pointer; }
+.task-item.clickable-row:hover { background: #f0f0f4; }
 .task-item:last-child { border-bottom: none; }
 .task-item:hover { background: #fafbfc; }
 .task-item .icon { font-size: 16px; flex-shrink: 0; }
@@ -566,6 +636,7 @@ useSSE('/api/events', {
 .status-tag.done { background: #e8f8ef; color: #18a058; }
 .status-tag.skipped { background: #f5f5f8; color: #999; }
 .status-tag.failed { background: #fde8ec; color: #d03050; }
+.status-tag.incomplete { background: #fff8e1; color: #f0a020; }
 .status-tag.funneling { background: #fdf6ec; color: #f0a020; }
 .status-tag.extracting { background: #fdf6ec; color: #e0a010; }
 .status-tag.translating { background: #e8f0fe; color: #2080f0; }
@@ -621,4 +692,13 @@ useSSE('/api/events', {
   25% { transform: translateX(-4px); }
   75% { transform: translateX(4px); }
 }
+/* 快照预览区 */
+.preview-container { border: 1px solid #e8e8ec; border-radius: 6px; overflow: hidden; }
+.preview-row { display: flex; border-bottom: 1px solid #f0f0f4; }
+.preview-row:last-child { border-bottom: none; }
+.preview-id { padding: 12px; width: 40px; background: #fafafa; color: #999; font-size: 11px; text-align: right; border-right: 1px solid #f0f0f4; flex-shrink: 0; }
+.preview-content { flex: 1; min-width: 0; display: grid; grid-template-columns: 1fr 1fr; }
+.preview-original { padding: 12px; color: #555; font-size: 13px; line-height: 1.5; border-right: 1px solid #f0f0f4; white-space: pre-wrap; word-break: break-all; }
+.preview-translated { padding: 12px; color: #333; font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+.preview-translated.empty { color: #bbb; font-style: italic; }
 </style>

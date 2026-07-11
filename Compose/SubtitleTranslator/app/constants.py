@@ -5,4 +5,4 @@
 """
 
 # 终态集合：Job/Task 进入这些状态后即视为生命周期结束
-TERMINAL_STATES = {"done", "failed", "skipped"}
+TERMINAL_STATES = {"done", "failed", "skipped", "incomplete"}

@@ -36,6 +36,10 @@
       </select>
       <input type="date" v-model="filterDateFrom" />
       <input type="date" v-model="filterDateTo" />
+      <label style="font-size: 13px; color: #666; display: flex; align-items: center; gap: 6px; margin-left: 8px;">
+        <input type="checkbox" v-model="filterShowDeleted" />
+        仅显示已忽略记录
+      </label>
     </div>
 
     <!-- 任务列表 -->
@@ -112,6 +116,12 @@
                     <span class="v" style="display:flex;align-items:center;gap:12px;">
                       <span class="skipped-batches-text" style="color:#d03050;font-weight:500;">[{{ task.skipped_batches.join(', ') }}]</span>
                       <button class="btn retry-btn" style="padding:2px 8px;font-size:11px;" @click="retrySkippedBatches(task.translate_task_id)">重试跳过批次</button>
+                    </span>
+                  </div>
+                  <div class="field full-width" v-if="task.status === 'failed' || task.status === 'incomplete'">
+                    <span class="k">操作:</span>
+                    <span class="v">
+                      <button class="btn" style="padding:2px 8px;font-size:11px;color:#d03050;border-color:#d03050;" @click="handleDeleteJob(task.id)">删除记录 (隐藏)</button>
                     </span>
                   </div>
                 </div>
@@ -222,7 +232,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { createDiscreteApi } from 'naive-ui'
-import { getJobs, getJobsStats, getLogs, getTaskErrors, retryTask } from '../api/history'
+import { getJobs, getJobsStats, getLogs, getTaskErrors, retryTask, deleteJob } from '../api/history'
 
 const { message } = createDiscreteApi(['message'])
 
@@ -243,6 +253,7 @@ const statusOptions = [
   { value: 'extracting', label: '📤 字幕提取' },
   { value: 'translating', label: '🌐 翻译中' },
   { value: 'rebuilding', label: '🔨 字幕重建' },
+  { value: 'incomplete', label: '⚠️ 待完成' },
   { value: 'done', label: '✅ 完成' },
   { value: 'skipped', label: '⏭️ 跳过' },
   { value: 'failed', label: '❌ 失败' }
@@ -252,6 +263,7 @@ const filterStatusList = ref([])
 const filterFunnelType = ref('')
 const filterDateFrom = ref('')
 const filterDateTo = ref('')
+const filterShowDeleted = ref(false)
 
 const statusDropdownOpen = ref(false)
 const statusDropdownRef = ref(null)
@@ -300,7 +312,7 @@ function toggleDetail(idx) {
 }
 
 function statusLabel(status) {
-  const map = { done: '完成', skipped: '跳过', failed: '失败', translating: '翻译中', funneling: '漏斗分析', extracting: '字幕提取', rebuilding: '字幕重建' }
+  const map = { done: '完成', incomplete: '待完成', skipped: '跳过', failed: '失败', translating: '翻译中', funneling: '漏斗分析', extracting: '字幕提取', rebuilding: '字幕重建' }
   return map[status] || status
 }
 
@@ -412,7 +424,8 @@ async function fetchJobs() {
       status: statusParam,
       funnel_type: filterFunnelType.value !== '' ? parseInt(filterFunnelType.value) : null,
       date_from: filterDateFrom.value ? `${filterDateFrom.value}T00:00:00` : null,
-      date_to: filterDateTo.value ? `${filterDateTo.value}T23:59:59` : null
+      date_to: filterDateTo.value ? `${filterDateTo.value}T23:59:59` : null,
+      is_deleted: filterShowDeleted.value ? 1 : 0
     })
 
     tasks.value = (data.items || []).map(item => {
@@ -423,8 +436,7 @@ async function fetchJobs() {
         const diffMs = end - start
         if (diffMs > 0) {
           const diffSec = Math.floor(diffMs / 1000)
-          if (diffSec < 60) duration = `${diffSec}s`
-          else duration = `${Math.floor(diffSec / 60)}m ${diffSec % 60}s`
+          duration = formatDuration(diffSec)
         }
       }
 
@@ -496,13 +508,39 @@ async function retrySkippedBatches(taskId) {
   }
 }
 
+async function handleDeleteJob(jobId) {
+  if (!confirm('确定要删除这条记录吗？该操作不会删除真实文件，但会在页面上将其隐藏。')) return
+  try {
+    await deleteJob(jobId)
+    message.success('已隐藏该记录')
+    fetchJobs()
+  } catch (err) {
+    message.error('操作失败: ' + err.message)
+  }
+}
+
+const formatDuration = (seconds) => {
+  if (seconds === undefined || seconds === null) return '0s'
+  if (seconds < 60) return `${Math.floor(seconds)}s`
+  
+  const d = Math.floor(seconds / 86400)
+  const h = Math.floor((seconds % 86400) / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = Math.floor(seconds % 60)
+  
+  if (d > 0) return `${d}d ${h}h ${m}m ${s}s`
+  if (h > 0) return `${h}h ${m}m ${s}s`
+  if (m > 0) return `${m}m ${s}s`
+  return `${s}s`
+}
+
 function handleSearch() {
   currentPage.value = 1
   fetchJobs()
 }
 
 // 筛选条件变化时自动搜索
-watch([filterStatusList, filterFunnelType, filterDateFrom, filterDateTo], () => {
+watch([filterStatusList, filterFunnelType, filterDateFrom, filterDateTo, filterShowDeleted], () => {
   handleSearch()
 })
 
@@ -590,6 +628,7 @@ tbody tr:last-child td { border-bottom: none; }
 /* 状态标签 */
 .status-tag { font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 500; }
 .status-tag.done { background: #e8f8ef; color: #18a058; }
+.status-tag.incomplete { background: #fff8e1; color: #f0a020; }
 .status-tag.skipped { background: #f5f5f8; color: #999; }
 .status-tag.failed { background: #fde8ec; color: #d03050; }
 .status-tag.translating { background: #e8f0fe; color: #2080f0; }

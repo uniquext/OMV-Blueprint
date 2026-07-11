@@ -434,7 +434,8 @@ async def get_jobs_api(
     funnel_type: Optional[int] = Query(None, description="漏斗类型"),
     date_from: Optional[str] = Query(None, description="起始时间 ISO 格式"),
     date_to: Optional[str] = Query(None, description="结束时间 ISO 格式"),
-    sort_dir: str = Query("desc", description="排序方向")
+    sort_dir: str = Query("desc", description="排序方向"),
+    is_deleted: Optional[int] = Query(0, description="是否删除")
 ):
     from core import db
     try:
@@ -445,7 +446,8 @@ async def get_jobs_api(
             funnel_type=funnel_type,
             date_from=date_from,
             date_to=date_to,
-            sort_dir=sort_dir
+            sort_dir=sort_dir,
+            is_deleted=is_deleted
         )
         return api_success(data={
             "items": items,
@@ -600,3 +602,88 @@ async def retry_task_endpoint(task_id: str):
     except Exception as e:
         logger.error(f"Error queuing task for retry: {e}")
         return api_error(code=500, message=str(e))
+
+
+@router.post("/api/tasks/{task_id}/ignore-complete", status_code=status.HTTP_200_OK)
+async def ignore_complete_task(task_id: str):
+    """忽略未完成批次，直接强制设为完成"""
+    from core import db
+    task = db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail={"error": "TASK_NOT_FOUND", "message": f"Task {task_id} not found"})
+    try:
+        db.force_complete_task(task_id)
+        return api_success(message=f"Task {task_id} marked as done")
+    except Exception as e:
+        logger.error(f"Error ignoring task: {e}")
+        return api_error(code=500, message=str(e))
+
+
+@router.post("/api/jobs/{job_id}/delete", status_code=status.HTTP_200_OK)
+async def delete_job(job_id: str):
+    """软删除任务对应的 job"""
+    from core import db
+    # check if job exists (can use get_jobs with id? or just call soft_delete_job and catch)
+    try:
+        db.soft_delete_job(job_id)
+        return api_success(message=f"Job {job_id} marked as deleted")
+    except Exception as e:
+        logger.error(f"Error deleting job: {e}")
+        return api_error(code=500, message=str(e))
+
+
+@router.get("/api/tasks/{task_id}/preview", status_code=status.HTTP_200_OK)
+async def preview_task(task_id: str):
+    """获取任务当前的翻译原文与译文快照对照"""
+    from core import db
+    import os
+    from translate.translator import preprocess
+    
+    task = db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail={"error": "TASK_NOT_FOUND", "message": f"Task {task_id} not found"})
+        
+    source_path = task["file_path"]
+    if not os.path.exists(source_path):
+        return api_error(code=404, message="Source file not found")
+        
+    try:
+        formatted_lines, _ = preprocess(source_path)
+    except Exception as e:
+        logger.error(f"Error preprocessing source file {source_path}: {e}")
+        return api_error(code=500, message="Failed to parse source file")
+        
+    original_lines = {}
+    for line in formatted_lines:
+        parts = line.split("|", 1)
+        if len(parts) == 2:
+            id_part = parts[0].replace("ID:", "").strip()
+            if id_part.isdigit():
+                original_lines[int(id_part)] = parts[1].strip()
+                
+    tmp_path = f"{source_path}.tmp"
+    translated_map = {}
+    if os.path.exists(tmp_path):
+        try:
+            with open(tmp_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split("|", 1)
+                    if len(parts) == 2:
+                        id_part = parts[0].replace("ID:", "").strip()
+                        if id_part.isdigit():
+                            translated_map[int(id_part)] = parts[1].strip()
+        except Exception as e:
+            logger.warning(f"Error reading tmp file {tmp_path}: {e}")
+            
+    lines = []
+    for line_id, text in original_lines.items():
+        lines.append({
+            "id": line_id,
+            "original": text,
+            "translated": translated_map.get(line_id, "")
+        })
+        
+    return api_success(data={"lines": lines})

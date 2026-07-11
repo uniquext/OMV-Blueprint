@@ -48,6 +48,10 @@ def init_db():
         # 检查是否需要执行列重命名迁移
         cursor = conn.execute("PRAGMA table_info(subtitle_job)")
         columns = [row[1] for row in cursor.fetchall()]
+        if columns and 'is_deleted' not in columns:
+            conn.execute("ALTER TABLE subtitle_job ADD COLUMN is_deleted INTEGER DEFAULT 0")
+            conn.commit()
+
         if 'funnel_level' in columns:
             conn.execute("ALTER TABLE subtitle_job RENAME COLUMN funnel_level TO funnel_type")
             # 执行数据迁移映射
@@ -91,7 +95,8 @@ def init_db():
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 error TEXT,
-                completed_at TEXT
+                completed_at TEXT,
+                is_deleted INTEGER DEFAULT 0
             )
         """)
         conn.execute("""
@@ -175,11 +180,12 @@ def update_progress(task_id: str, current_batch: int, total_batches: int, progre
 def complete_task(task_id: str, tokens: int = 0, skipped_batches: list = None):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     skipped_json = json.dumps(skipped_batches) if skipped_batches else None
+    status = 'incomplete' if skipped_batches else 'done'
     with sqlite3.connect(DB_PATH) as conn:
-        # done 是终态，同步设置 completed_at
+        # done/incomplete 是终态，同步设置 completed_at
         conn.execute(
-            "UPDATE translate_task SET status = 'done', completed_at = ?, updated_at = ?, tokens = ?, skipped_batches = ? WHERE id = ?",
-            (now, now, tokens, skipped_json, task_id)
+            "UPDATE translate_task SET status = ?, completed_at = ?, updated_at = ?, tokens = ?, skipped_batches = ? WHERE id = ?",
+            (status, now, now, tokens, skipped_json, task_id)
         )
         conn.commit()
 
@@ -581,7 +587,7 @@ def get_stats() -> dict:
         }
 
 
-def query_jobs(page: int = 1, page_size: int = 20, status: list = None, funnel_type: int = None, date_from: str = None, date_to: str = None, sort_dir: str = "desc") -> tuple:
+def query_jobs(page: int = 1, page_size: int = 20, status: list = None, funnel_type: int = None, date_from: str = None, date_to: str = None, sort_dir: str = "desc", is_deleted: int = 0) -> tuple:
     """分页与多条件模糊过滤查询 Job 列表，LEFT JOIN translate_task 获取翻译进度"""
     conditions = []
     params = []
@@ -605,6 +611,10 @@ def query_jobs(page: int = 1, page_size: int = 20, status: list = None, funnel_t
     if date_to:
         conditions.append("sj.created_at <= ?")
         params.append(date_to)
+
+    if is_deleted is not None:
+        conditions.append("sj.is_deleted = ?")
+        params.append(is_deleted)
 
     where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
 
@@ -747,3 +757,25 @@ def get_translation_errors(task_id: str) -> List[Dict]:
                     pass  # JSON 损坏时保留原始字符串
             results.append(record)
         return results
+
+def soft_delete_job(job_id: str):
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE subtitle_job SET is_deleted = 1, updated_at = ? WHERE id = ?",
+            (now, job_id)
+        )
+        conn.commit()
+
+def force_complete_task(task_id: str):
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE translate_task SET status = 'done', updated_at = ? WHERE id = ?",
+            (now, task_id)
+        )
+        conn.execute(
+            "UPDATE subtitle_job SET status = 'done', updated_at = ? WHERE translate_task_id = ?",
+            (now, task_id)
+        )
+        conn.commit()
