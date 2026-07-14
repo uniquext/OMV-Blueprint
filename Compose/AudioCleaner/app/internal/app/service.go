@@ -104,21 +104,12 @@ type Service struct {
 	stoppingWorkers atomic.Bool
 	restartState    atomic.Int32
 
-	activeMu   sync.Mutex
-	activeJobs map[string]activeJob
-
 	pathMutationMu    sync.Mutex
 	pathMutationPaths map[string]struct{}
 }
 
-type activeJob struct {
-	cancel context.CancelFunc
-	phase  repository.PipelinePhase
-}
-
 type workerJob struct {
-	path   string
-	source pipeline.JobSource
+	task   pipeline.QueueJob
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -192,7 +183,6 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 		backupCleanupInterval: defaultBackupCleanupInterval,
 		workerCtx:             workerCtx,
 		cancelWorker:          cancelWorker,
-		activeJobs:            make(map[string]activeJob),
 		pathMutationPaths:     make(map[string]struct{}),
 	}
 	service.accepting.Store(true)
@@ -337,11 +327,10 @@ func (s *Service) startWorkers() {
 		worker := pipeline.NewWorker(pipeline.WorkerDeps{
 			Config:     s.cfg,
 			Repository: s.db,
-			Queue:      s.queue,
+			BindJob:    s.queue.BindJob,
 			Runner:     pipeline.ExecRunner{},
 			Prober:     s.prober,
 			Events:     workerEvents{service: s},
-			Scheduler:  retryScheduler{service: s},
 			BackupRoot: s.backupRoot,
 			WorkRoot:   s.workRoot,
 			FFmpegName: s.ffmpegName,
@@ -363,14 +352,68 @@ func (s *Service) workerLoop(worker *pipeline.Worker) {
 		}
 		job, ok := s.nextActiveJob()
 		if ok {
+			var result pipeline.AttemptResult
+			var processErr error
 			if job.ctx.Err() == nil {
-				if err := worker.ProcessPathWithSource(job.ctx, job.path, job.source); err != nil {
-					s.logf("worker error: %v", err)
-				}
+				result, processErr = worker.ProcessAttempt(job.ctx, job.task)
 			}
 			job.cancel()
-			s.queue.Done(job.path)
-			s.untrackActiveJob(job.path)
+			if job.task.JobID == 0 && result.JobID != 0 && !s.queue.BindJob(job.task.Path, result.JobID) {
+				s.logf("worker failed to bind job id=%d path=%s", result.JobID, job.task.Path)
+			}
+			retryScheduled := false
+			if processErr != nil && result.Retryable {
+				pipelineConfig := s.config().Pipeline
+				retryScheduled = s.queue.ScheduleRetry(
+					job.task.Path,
+					pipelineConfig.RetryDelay(),
+					result.LastError,
+					pipelineConfig.MaxRetries,
+				)
+			}
+			if retryScheduled {
+				s.publishWorkerEvent(pipeline.WorkerEvent{
+					FileID:  result.FileID,
+					Path:    job.task.Path,
+					Kind:    "phase_transition",
+					Code:    string(pipeline.RuntimeRetryWait),
+					Phase:   pipeline.RuntimeRetryWait,
+					Attempt: job.task.AttemptNumber,
+					Error:   result.LastError,
+				})
+			} else {
+				if processErr != nil && result.JobID != 0 {
+					finalError := result.FinalError
+					if finalError == "" {
+						finalError = processErr.Error()
+					}
+					finishCtx, cancelFinish := context.WithTimeout(context.Background(), 30*time.Second)
+					_, finishErr := s.db.FinishJob(finishCtx, result.JobID, repository.JobResultFailed, finalError)
+					cancelFinish()
+					if finishErr != nil {
+						s.logf("finish failed job id=%d: %v", result.JobID, finishErr)
+					} else {
+						outcome := result.FailureOutcome
+						if outcome == "" {
+							outcome = "failed"
+						}
+						s.publishWorkerEvent(pipeline.WorkerEvent{
+							FileID:  result.FileID,
+							Path:    job.task.Path,
+							Kind:    "status_change",
+							Code:    "failed",
+							Status:  "failed",
+							Outcome: outcome,
+							Attempt: job.task.AttemptNumber,
+							Error:   result.LastError,
+						})
+					}
+				}
+				s.queue.Done(job.task.Path)
+			}
+			if processErr != nil {
+				s.logf("worker error: %v", processErr)
+			}
 		}
 		select {
 		case <-s.workerCtx.Done():
@@ -386,13 +429,13 @@ func (s *Service) nextActiveJob() (workerJob, bool) {
 	if s.stoppingWorkers.Load() {
 		return workerJob{}, false
 	}
-	job, ok := s.queue.NextJob()
+	jobCtx, cancel := context.WithCancel(s.workerCtx)
+	job, ok := s.queue.ClaimNext(cancel)
 	if !ok {
+		cancel()
 		return workerJob{}, false
 	}
-	jobCtx, cancel := context.WithCancel(s.workerCtx)
-	s.trackActiveJob(job.Path, cancel)
-	return workerJob{path: job.Path, source: job.Source, ctx: jobCtx, cancel: cancel}, true
+	return workerJob{task: job, ctx: jobCtx, cancel: cancel}, true
 }
 
 func (s *Service) stopWorkerIntake() {
@@ -410,9 +453,9 @@ func (s *Service) prepareHTTPServer() (net.Listener, error) {
 		ScanAll:        s.ScanAll,
 		RequestRestart: s.RequestRestart,
 		Status:         s,
+		RuntimeTasks:   s,
 		History:        s,
 		Backups:        s,
-		Logs:           s,
 		RuntimeLogs:    s,
 	})
 	s.server = &http.Server{
@@ -491,7 +534,7 @@ func (s *Service) Status(ctx context.Context) (any, error) {
 	case restartFailed:
 		status = "restart_failed"
 	}
-	files, err := s.db.Files(ctx)
+	outcomeCounts, err := s.db.LatestOutcomeCounts(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -499,26 +542,15 @@ func (s *Service) Status(ctx context.Context) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	transcodeStats, err := s.db.TranscodeStats(ctx)
+	transcodeStats, err := s.db.ProcessJobStats(ctx)
 	if err != nil {
 		return nil, err
 	}
 	counts := map[string]int{
-		string(repository.StatusCompatible): 0,
-		string(repository.StatusProcessing): 0,
-		string(repository.StatusProcessed):  0,
-		string(repository.StatusFailed):     0,
-		string(repository.StatusRestored):   0,
-		string(repository.StatusIgnored):    0,
-	}
-	recentFailed := make([]repository.FileRecord, 0)
-	for _, file := range files {
-		counts[string(file.Status)]++
-		if file.Status == repository.StatusFailed &&
-			file.LastError != "" &&
-			len(recentFailed) < 5 {
-			recentFailed = append(recentFailed, file)
-		}
+		"compatible": outcomeCounts.Compatible,
+		"processed":  outcomeCounts.Processed,
+		"failed":     outcomeCounts.Failed,
+		"restored":   outcomeCounts.Restored,
 	}
 	var backupUsage int64
 	now := time.Now().UTC()
@@ -533,46 +565,25 @@ func (s *Service) Status(ctx context.Context) (any, error) {
 		}
 		backupUsage += info.Size()
 	}
-	queueCount := 0
-	if s.queue != nil {
-		queueCount = s.queue.Len()
-	}
 	return map[string]any{
 		"status":                 status,
-		"workers":                cfg.Pipeline.Workers,
-		"media_roots":            cfg.Media.Roots,
-		"snapshot_id":            s.snapshotID(),
-		"queue_count":            queueCount,
-		"current_processing":     s.currentProcessing(),
 		"counts":                 counts,
-		"recent_failed":          recentFailed,
 		"backup_usage_bytes":     backupUsage,
 		"transcode_success_rate": transcodeSuccessRate(transcodeStats),
 	}, nil
 }
 
-func (s *Service) snapshotID() uint64 {
-	if s.events == nil {
-		return 0
+func (s *Service) RuntimeTasks(_ context.Context) (any, error) {
+	if s.queue == nil {
+		return pipeline.RuntimeTaskSnapshot{
+			Waiting: []pipeline.RuntimeTask{},
+			Active:  []pipeline.RuntimeTask{},
+		}, nil
 	}
-	return s.events.SnapshotID()
+	return s.queue.Snapshot(), nil
 }
 
-func (s *Service) currentProcessing() []map[string]any {
-	s.activeMu.Lock()
-	defer s.activeMu.Unlock()
-
-	current := make([]map[string]any, 0, len(s.activeJobs))
-	for path, job := range s.activeJobs {
-		current = append(current, map[string]any{
-			"path":  path,
-			"phase": job.phase,
-		})
-	}
-	return current
-}
-
-func transcodeSuccessRate(stats repository.TranscodeStats) map[string]any {
+func transcodeSuccessRate(stats repository.ProcessJobStats) map[string]any {
 	total := stats.Succeeded + stats.Failed
 	rate := 0.0
 	if total > 0 {
@@ -653,9 +664,6 @@ func (s *Service) RestoreBackup(ctx context.Context, id int64) (any, error) {
 	file, err := s.db.FileByPath(ctx, record.OriginalPath)
 	if err != nil {
 		return nil, err
-	}
-	if file.Status == repository.StatusProcessing {
-		return nil, api.ErrProcessing
 	}
 	cfg := s.config()
 	result, err := backup.RestoreBackup(backup.RestoreRequest{
@@ -788,20 +796,12 @@ func (s *Service) cleanupBackupRecord(ctx context.Context, record repository.Bac
 	return s.db.DeleteUnrestoredBackup(ctx, current.ID)
 }
 
-func (s *Service) RecentLogs(ctx context.Context) (any, error) {
-	return s.db.RecentJobEvents(ctx, 50)
-}
-
 func (s *Service) RuntimeLogs(ctx context.Context, lines int) (any, error) {
 	content, count, err := tailLogFile(ctx, s.logPath, lines)
 	if err != nil {
 		return nil, err
 	}
 	return api.RuntimeLogResult{Content: content, Lines: count}, nil
-}
-
-func (s *Service) enqueue(path string) bool {
-	return s.enqueueWithSource(path, pipeline.JobSourceDefault)
 }
 
 func (s *Service) enqueueWithSource(path string, source pipeline.JobSource) bool {
@@ -830,9 +830,6 @@ func (s *Service) canEnqueueLocked(path string) bool {
 }
 
 func (s *Service) isProcessingPath(path string) bool {
-	if s.isActivePath(path) {
-		return true
-	}
 	return s.queue != nil && s.queue.Contains(path)
 }
 
@@ -867,7 +864,7 @@ func (s *Service) isPathMutating(path string) bool {
 	return ok
 }
 
-func (s *Service) persistRestoredFile(backupID int64, safetyPath string, file repository.FileRecord) error {
+func (s *Service) persistRestoredFile(backupID int64, safetyPath string, file repository.FileFacts) error {
 	info, statErr := os.Stat(file.Path)
 	prober := s.prober
 	if prober == nil {
@@ -877,47 +874,29 @@ func (s *Service) persistRestoredFile(backupID int64, safetyPath string, file re
 	probe, probeErr := prober.Probe(probeCtx, file.Path)
 	cancelProbe()
 
-	file.PipelinePhase = repository.PipelinePhasePending
-	if file.DiscoverySource == "" {
-		file.DiscoverySource = repository.DiscoveryManual
-	}
-	file.Attempts = 0
 	if statErr == nil {
 		file.Size = info.Size()
 		file.MTimeNS = info.ModTime().UnixNano()
 	}
 	file.AudioSignature = probe.AudioSignature()
 	file.VideoSignature = probe.VideoSignature()
-	file.Fingerprint = media.Fingerprint(file.Path, file.Size, file.MTimeNS, file.AudioSignature, file.VideoSignature)
 
+	jobResult := repository.JobResultSucceeded
+	finalError := ""
+	status := "restored"
 	if statErr != nil {
-		file.Status = repository.StatusFailed
-		file.FailureCause = repository.CauseRestoreStatError
-		file.PipelinePhase = repository.PipelinePhasePending
-		file.LastError = fmt.Sprintf("stat restored file: %v", statErr)
+		jobResult = repository.JobResultFailed
+		status = "failed"
+		finalError = fmt.Sprintf("%s: stat restored file: %v", pipeline.CauseRestoreStatError, statErr)
 	} else if probeErr != nil {
-		file.Status = repository.StatusFailed
-		file.FailureCause = repository.CauseRestoreProbeError
-		file.PipelinePhase = repository.PipelinePhasePending
-		file.LastError = fmt.Sprintf("probe restored file: %v", probeErr)
-	} else {
-		file.Status = repository.StatusRestored
-		file.FailureCause = ""
-		file.PipelinePhase = repository.PipelinePhasePending
-		file.LastError = ""
+		jobResult = repository.JobResultFailed
+		status = "failed"
+		finalError = fmt.Sprintf("%s: probe restored file: %v", pipeline.CauseRestoreProbeError, probeErr)
 	}
 
-	event := repository.JobEvent{
-		EventKind: repository.EventKindOperation,
-		EventCode: repository.EventCodeRestore,
-		Status:    file.Status,
-		Outcome:   repository.OutcomeRestored,
-		Message:   "restored",
-		Error:     file.LastError,
-	}
 	persistCtx, cancelPersist := context.WithTimeout(context.Background(), s.restorePersistDeadline())
 	defer cancelPersist()
-	persisted, err := s.db.RecordRestore(persistCtx, backupID, safetyPath, file, event)
+	persisted, _, err := s.db.RecordRestore(persistCtx, backupID, safetyPath, file, jobResult, finalError)
 	if err != nil {
 		return err
 	}
@@ -925,8 +904,8 @@ func (s *Service) persistRestoredFile(backupID int64, safetyPath string, file re
 		s.events.Publish("job.restored", map[string]any{
 			"file_id": persisted.ID,
 			"path":    persisted.Path,
-			"status":  persisted.Status,
-			"error":   persisted.LastError,
+			"status":  status,
+			"error":   finalError,
 		})
 	}
 	return nil
@@ -959,67 +938,39 @@ func (s *Service) setConfig(cfg config.Config) {
 }
 
 func (s *Service) publishWorkerEvent(event pipeline.WorkerEvent) {
-	s.updateActiveJobPhase(event.File.Path, event.Event.Phase)
+	if s.queue != nil && event.Phase != pipeline.RuntimeRetryWait {
+		s.queue.UpdatePhase(event.Path, event.Phase)
+	}
 	s.logf(
 		"job event kind=%s code=%s file_id=%d path=%s status=%s phase=%s outcome=%s message=%s error=%s",
-		event.Event.EventKind,
-		event.Event.EventCode,
-		event.File.ID,
-		event.File.Path,
-		event.File.Status,
-		event.Event.Phase,
-		event.Event.Outcome,
-		event.Event.Message,
-		event.Event.Error,
+		event.Kind,
+		event.Code,
+		event.FileID,
+		event.Path,
+		event.Status,
+		event.Phase,
+		event.Outcome,
+		event.Message,
+		event.Error,
 	)
-	s.events.Publish(string(event.Event.EventCode), map[string]any{
-		"file_id": event.File.ID,
-		"path":    event.File.Path,
-		"status":  event.File.Status,
-		"phase":   event.Event.Phase,
-		"kind":    event.Event.EventKind,
-		"code":    event.Event.EventCode,
-		"outcome": event.Event.Outcome,
-		"message": event.Event.Message,
-		"error":   event.Event.Error,
-	})
+	if s.events != nil {
+		s.events.Publish(event.Code, map[string]any{
+			"file_id": event.FileID,
+			"path":    event.Path,
+			"status":  event.Status,
+			"phase":   event.Phase,
+			"kind":    event.Kind,
+			"code":    event.Code,
+			"outcome": event.Outcome,
+			"attempt": event.Attempt,
+			"message": event.Message,
+			"error":   event.Error,
+		})
+	}
 }
 
 func (s *Service) hasCriticalPhase() bool {
-	return s.hasCriticalActiveJob()
-}
-
-func (s *Service) trackActiveJob(path string, cancel context.CancelFunc) {
-	s.activeMu.Lock()
-	defer s.activeMu.Unlock()
-	if s.activeJobs == nil {
-		s.activeJobs = make(map[string]activeJob)
-	}
-	s.activeJobs[path] = activeJob{cancel: cancel}
-}
-
-func (s *Service) updateActiveJobPhase(path string, phase repository.PipelinePhase) {
-	s.activeMu.Lock()
-	defer s.activeMu.Unlock()
-	job, ok := s.activeJobs[path]
-	if !ok {
-		return
-	}
-	job.phase = phase
-	s.activeJobs[path] = job
-}
-
-func (s *Service) untrackActiveJob(path string) {
-	s.activeMu.Lock()
-	defer s.activeMu.Unlock()
-	delete(s.activeJobs, path)
-}
-
-func (s *Service) isActivePath(path string) bool {
-	s.activeMu.Lock()
-	defer s.activeMu.Unlock()
-	_, ok := s.activeJobs[path]
-	return ok
+	return s.queue != nil && s.queue.HasCriticalActive()
 }
 
 func (s *Service) cancelNonCriticalActiveJobs() {
@@ -1031,35 +982,9 @@ func (s *Service) cancelAllActiveJobs() {
 }
 
 func (s *Service) cancelActiveJobs(includeCritical bool) {
-	s.activeMu.Lock()
-	jobs := make([]activeJob, 0, len(s.activeJobs))
-	for _, job := range s.activeJobs {
-		if includeCritical || !isCriticalPhase(job.phase) {
-			jobs = append(jobs, job)
-		}
+	if s.queue != nil {
+		s.queue.CancelActive(includeCritical)
 	}
-	s.activeMu.Unlock()
-
-	for _, job := range jobs {
-		if job.cancel != nil {
-			job.cancel()
-		}
-	}
-}
-
-func (s *Service) hasCriticalActiveJob() bool {
-	s.activeMu.Lock()
-	defer s.activeMu.Unlock()
-	for _, job := range s.activeJobs {
-		if isCriticalPhase(job.phase) {
-			return true
-		}
-	}
-	return false
-}
-
-func isCriticalPhase(phase repository.PipelinePhase) bool {
-	return phase == repository.PipelinePhaseBackingUp || phase == repository.PipelinePhaseReplacing
 }
 
 func (s *Service) logf(format string, args ...any) {
@@ -1075,16 +1000,6 @@ type workerEvents struct {
 func (w workerEvents) Publish(ctx context.Context, event pipeline.WorkerEvent) error {
 	w.service.publishWorkerEvent(event)
 	return nil
-}
-
-type retryScheduler struct {
-	service *Service
-}
-
-func (r retryScheduler) Schedule(path string, delay time.Duration) {
-	time.AfterFunc(delay, func() {
-		r.service.enqueue(path)
-	})
 }
 
 type ffprobeProber struct {

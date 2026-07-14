@@ -80,8 +80,9 @@ export interface NotificationsConfig {
 
 export type JobStatus = 'compatible' | 'processing' | 'processed' | 'failed' | 'restored' | string
 export type DiscoverySource = 'scan' | 'watchdog' | 'manual' | string
-export type PipelinePhase =
-  | 'pending'
+export type JobKind = 'process' | 'restore'
+export type JobResult = 'processing' | 'compatible' | 'succeeded' | 'failed'
+export type RuntimePhase =
   | 'queued'
   | 'retry_wait'
   | 'checking'
@@ -89,77 +90,16 @@ export type PipelinePhase =
   | 'verifying'
   | 'backing_up'
   | 'replacing'
-  | string
-export type FailureCause =
-  | 'failed'
-  | 'unsupported'
-  | 'ffprobe_error'
-  | 'verification_failed'
-  | 'timeout'
-  | 'restore_stat_error'
-  | 'restore_probe_error'
-  | 'restored_requires_transcoding'
-  | string
-export type EventKind = 'phase_transition' | 'status_change' | 'operation' | 'diagnostic' | string
-export type EventCode =
-  | 'queued'
-  | 'checking'
-  | 'transcoding'
-  | 'verifying'
-  | 'backing_up'
-  | 'replacing'
-  | 'retry_wait'
-  | 'compatible'
-  | 'processed'
-  | 'failed'
-  | 'restore'
-  | 'ffmpeg_data_stream_fallback'
-  | string
-export type EventOutcome = 'transcoded' | 'failed' | 'unsupported' | 'restored' | string
-export type JobPhase = PipelinePhase
 export type BackupAvailability = 'available' | 'missing' | 'restored' | 'expired' | string
-
-export interface JobRecord {
-  id: number
-  path: string
-  status: JobStatus
-  discovery_source: DiscoverySource
-  failure_cause: FailureCause
-  pipeline_phase: PipelinePhase
-  fingerprint: string
-  size: number
-  mtime_ns: number
-  audio_signature: string
-  video_signature: string
-  attempts: number
-  last_error: string
-  created_at: string
-  updated_at: string
-}
 
 export interface HistoryRecord {
   id: number
-  path: string
-  status: JobStatus
-  discovery_source: DiscoverySource
-  audio_signature: string
-  video_signature: string
-  last_error: string
-  updated_at: string
-}
-
-export interface JobEventRecord {
-  id: number
   file_id: number
-  event_kind: EventKind
-  event_code: EventCode
-  phase: PipelinePhase | null
-  status: JobStatus | null
-  outcome: EventOutcome | null
-  attempt: number
-  command: string
-  message: string
-  error: string
+  path: string
+  kind: JobKind
+  trigger_source: DiscoverySource
+  result: JobResult
+  final_error: string
   started_at: string
   finished_at: string
 }
@@ -182,20 +122,20 @@ export interface BackupRecord {
 
 export interface ServiceStatus {
   status: 'running' | 'restarting' | 'restart_failed' | string
-  workers: number
-  media_roots: string[]
-  snapshot_id: number
-  queue_count: number
-  current_processing: CurrentProcessing[]
   counts: Record<string, number>
-  recent_failed: JobRecord[]
   backup_usage_bytes: number
   transcode_success_rate: TranscodeSuccessRate
 }
 
-export interface CurrentProcessing {
+export interface RuntimeTask {
   path: string
-  phase: PipelinePhase
+  phase: RuntimePhase
+  source?: DiscoverySource
+}
+
+export interface RuntimeTasksSnapshot {
+  waiting_tasks: RuntimeTask[]
+  active_tasks: RuntimeTask[]
 }
 
 export interface TranscodeSuccessRate {

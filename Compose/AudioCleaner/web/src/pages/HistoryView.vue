@@ -125,7 +125,7 @@ function displayDate(value: string): string {
 
 function newestHistoryDate(): string {
   const dates = allJobs.value
-    .map((job) => job.updated_at?.slice(0, 10) ?? '')
+    .map((job) => (job.finished_at || job.started_at).slice(0, 10))
     .filter(Boolean)
     .sort()
   return dates.at(-1) ?? localToday()
@@ -271,20 +271,20 @@ function historyDate(value: string, includeSeconds: boolean): string {
 }
 
 function jobTableDate(job: HistoryRecord): string {
-  return historyDate(job.updated_at, false)
+  return historyDate(job.finished_at || job.started_at, false)
 }
 
 function jobDetailDate(job: HistoryRecord): string {
-  return historyDate(job.updated_at, true)
+  return historyDate(job.finished_at || job.started_at, true)
 }
 
 function jobErrorSummary(job: HistoryRecord): string {
-  const labelKey = jobErrorSummaryLabelKey(job.last_error)
+  const labelKey = jobErrorSummaryLabelKey(job.final_error)
   return labelKey ? t(labelKey) : ''
 }
 
 function jobErrorDetail(job: HistoryRecord): string {
-  const labelKey = jobErrorSummaryLabelKey(job.last_error)
+  const labelKey = jobErrorSummaryLabelKey(job.final_error)
   if (!labelKey) {
     return ''
   }
@@ -292,7 +292,7 @@ function jobErrorDetail(job: HistoryRecord): string {
 }
 
 function openErrorDialog(job: HistoryRecord): void {
-  if (!job.last_error) {
+  if (!job.final_error) {
     return
   }
   selectedError.value = {
@@ -577,19 +577,11 @@ onBeforeUnmount(() => {
                       <span :class="jobStatusBadgeClass(job)">{{ jobStatusDisplay(job) }}</span>
                     </span>
                   </div>
-                  <div class="history-detail-field">
-                    <span class="history-detail-key">Audio signature:</span>
-                    <span class="history-detail-value placeholder-text">{{ job.audio_signature || '--' }}</span>
-                  </div>
-                  <div class="history-detail-field">
-                    <span class="history-detail-key">Video signature:</span>
-                    <span class="history-detail-value placeholder-text">{{ job.video_signature || '--' }}</span>
-                  </div>
                   <div class="history-detail-field history-detail-field--wide">
                     <span class="history-detail-key">Media path:</span>
                     <span class="history-detail-value">{{ jobPath(job) }}</span>
                   </div>
-                  <div v-if="job.last_error" class="history-detail-field history-detail-field--wide">
+                  <div v-if="job.final_error" class="history-detail-field history-detail-field--wide">
                     <span class="history-detail-key">{{ t('dashboardError') }}:</span>
                     <button class="history-error-link" type="button" @click="openErrorDialog(job)">
                       {{ jobErrorSummary(job) }}

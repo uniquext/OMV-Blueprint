@@ -1,5 +1,5 @@
 import { onBeforeUnmount, onMounted, reactive } from 'vue'
-import type { EventStreamStatus } from '../lib/types'
+import type { EventStreamStatus, ServerSentEvent } from '../lib/types'
 
 export type RefreshMode = 'full' | 'partial'
 
@@ -7,6 +7,7 @@ export interface EventStreamState {
   status: EventStreamStatus
   lastEventAt: string | null
   lastSnapshotID: number | null
+  lastEvent: ServerSentEvent | null
   refreshMode: RefreshMode
 }
 
@@ -14,6 +15,7 @@ export const eventStreamState = reactive<EventStreamState>({
   status: 'disconnected',
   lastEventAt: null,
   lastSnapshotID: null,
+  lastEvent: null,
   refreshMode: 'full'
 })
 
@@ -54,6 +56,21 @@ function parseEventData(data: string): unknown {
   }
 }
 
+function asServerSentEvent(payload: unknown): ServerSentEvent | null {
+  if (!payload || typeof payload !== 'object') {
+    return null
+  }
+  const event = payload as Partial<ServerSentEvent>
+  if (typeof event.type !== 'string' || typeof event.snapshot_id !== 'number') {
+    return null
+  }
+  return {
+    type: event.type,
+    snapshot_id: event.snapshot_id,
+    data: event.data && typeof event.data === 'object' ? event.data : null
+  }
+}
+
 function closeCurrentEventSource(): void {
   currentEventSource?.close()
   currentEventSource = null
@@ -75,7 +92,9 @@ export function useEventStream(url = '/api/events'): EventStreamState {
     eventSource.onmessage = (message) => {
       eventStreamState.lastEventAt = new Date().toISOString()
 
-      const snapshotID = extractSnapshotID(parseEventData(message.data))
+      const payload = parseEventData(message.data)
+      eventStreamState.lastEvent = asServerSentEvent(payload)
+      const snapshotID = extractSnapshotID(payload)
       if (snapshotID !== null) {
         eventStreamState.refreshMode = nextRefreshMode(eventStreamState.lastSnapshotID, snapshotID)
         eventStreamState.lastSnapshotID = snapshotID

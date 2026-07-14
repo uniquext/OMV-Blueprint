@@ -5,11 +5,11 @@ import type {
   BackupRecord,
   CleanupExpiredResponse,
   HistoryRecord,
-  JobEventRecord,
   PageRequest,
   PageResult,
   RestoreResult,
   RuntimeLogResponse,
+  RuntimeTasksSnapshot,
   ScanResponse,
   ServiceStatus,
   SupportedLanguage,
@@ -87,14 +87,10 @@ function withPage(path: string, page?: PageRequest): string {
 export const api = {
   config: () => request<AudioCleanerConfig>('/api/config'),
   status: () => request<ServiceStatus>('/api/status'),
-  logs: async () => unwrapItems(await request<CollectionResponse<JobEventRecord>>('/api/logs/recent')),
+  runtimeTasks: () => request<RuntimeTasksSnapshot>('/api/runtime-tasks'),
   runtimeLogs: (lines = 100) => request<RuntimeLogResponse>(`/api/logs?lines=${encodeURIComponent(String(lines))}`),
-  history: async (page?: PageRequest) =>
-    unwrapItems(await request<CollectionResponse<HistoryRecord>>(withPage('/api/history', page))),
   historyPage: async (page?: PageRequest) =>
     unwrapPage(await request<CollectionResponse<HistoryRecord>>(withPage('/api/history', page)), page),
-  backups: async (page?: PageRequest) =>
-    unwrapItems(await request<CollectionResponse<BackupRecord>>(withPage('/api/backups', page))),
   backupsPage: async (page?: PageRequest) =>
     unwrapPage(await request<CollectionResponse<BackupRecord>>(withPage('/api/backups', page)), page),
   scan: () => request<ScanResponse>('/api/scan', post()),

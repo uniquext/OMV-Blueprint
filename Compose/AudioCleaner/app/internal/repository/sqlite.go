@@ -44,14 +44,14 @@ func (r *Repository) Close() error {
 	return r.db.Close()
 }
 
-func (r *Repository) UpsertFile(ctx context.Context, file FileRecord) (FileRecord, error) {
+func (r *Repository) UpsertFile(ctx context.Context, file FileFacts) (FileFacts, error) {
 	now := time.Now().UTC()
 	return upsertFile(ctx, r.db, file, now)
 }
 
 func upsertFile(ctx context.Context, queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, file FileRecord, now time.Time) (FileRecord, error) {
+}, file FileFacts, now time.Time) (FileFacts, error) {
 	createdAt := file.CreatedAt
 	if createdAt.IsZero() {
 		createdAt = now
@@ -77,70 +77,46 @@ ON CONFLICT(file_path) DO UPDATE SET
   video_signature = excluded.video_signature,
   updated_at = ?
 RETURNING `+fileSelectColumns, file.Path,
-		nullableNonNegativeInt(file.Size), nullableNonNegativeInt(file.MTimeNS), nullableString(file.AudioSignature),
+		file.Size, file.MTimeNS, nullableString(file.AudioSignature),
 		nullableString(file.VideoSignature), formatTime(createdAt), formatTime(updatedAt),
 		formatTime(now))
 
 	persisted, err := scanFileFacts(row)
 	if err != nil {
-		return FileRecord{}, err
+		return FileFacts{}, err
 	}
 	return persisted, nil
 }
 
-func (r *Repository) FileByPath(ctx context.Context, path string) (FileRecord, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT `+fileViewSelectColumns+` FROM files `+latestJobJoin+` WHERE files.file_path = ?`, path)
-	file, err := scanFile(row)
-	if err != nil {
-		return FileRecord{}, err
-	}
-	return file, nil
+func (r *Repository) FileByPath(ctx context.Context, path string) (FileFacts, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT `+fileSelectColumns+` FROM files WHERE file_path = ?`, path)
+	return scanFileFacts(row)
 }
 
-func (r *Repository) FileByID(ctx context.Context, id int64) (FileRecord, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT `+fileViewSelectColumns+` FROM files `+latestJobJoin+` WHERE files.id = ?`, id)
-	file, err := scanFile(row)
+func (r *Repository) FileBaselineByPath(ctx context.Context, path string) (FileBaseline, error) {
+	file, err := r.FileByPath(ctx, path)
 	if err != nil {
-		return FileRecord{}, err
+		return FileBaseline{}, err
 	}
-	return file, nil
+	job, err := scanJob(r.db.QueryRowContext(ctx, `SELECT `+jobSelectColumns+`
+		FROM jobs
+		WHERE file_id = ?
+		ORDER BY started_at DESC, id DESC
+		LIMIT 1`, file.ID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return FileBaseline{File: file}, nil
+	}
+	if err != nil {
+		return FileBaseline{}, err
+	}
+	return FileBaseline{File: file, LatestJob: &job}, nil
 }
 
-func (r *Repository) Files(ctx context.Context) ([]FileRecord, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT `+fileViewSelectColumns+` FROM files `+latestJobJoin+` ORDER BY files.updated_at DESC, files.id DESC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanFiles(rows)
-}
-
-func (r *Repository) FilesPage(ctx context.Context, req PageRequest) (PageResult[FileRecord], error) {
-	req = req.Normalize()
-	var total int
-	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM files`).Scan(&total); err != nil {
-		return PageResult[FileRecord]{}, err
-	}
-	rows, err := r.db.QueryContext(ctx, `SELECT `+fileViewSelectColumns+` FROM files `+latestJobJoin+` ORDER BY files.updated_at DESC, files.id DESC LIMIT ? OFFSET ?`, req.PageSize, req.Offset())
-	if err != nil {
-		return PageResult[FileRecord]{}, err
-	}
-	defer rows.Close()
-	items, err := scanFiles(rows)
-	if err != nil {
-		return PageResult[FileRecord]{}, err
-	}
-	return PageResult[FileRecord]{Items: items, Page: req.Page, PageSize: req.PageSize, Total: total}, nil
-}
-
-func (r *Repository) History(ctx context.Context) ([]HistoryRecord, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT `+historySelectColumns+` FROM files JOIN jobs ON jobs.id = (
-	  SELECT latest_jobs.id
-	  FROM jobs AS latest_jobs
-	  WHERE latest_jobs.file_id = files.id
-	  ORDER BY latest_jobs.started_at DESC, latest_jobs.id DESC
-	  LIMIT 1
-	) ORDER BY COALESCE(jobs.finished_at, jobs.started_at) DESC, jobs.id DESC`)
+func (r *Repository) History(ctx context.Context) ([]JobHistoryRecord, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+historySelectColumns+`
+	FROM jobs
+	JOIN files ON files.id = jobs.file_id
+	ORDER BY COALESCE(jobs.finished_at, jobs.started_at) DESC, jobs.id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -148,80 +124,60 @@ func (r *Repository) History(ctx context.Context) ([]HistoryRecord, error) {
 	return scanHistoryRecords(rows)
 }
 
-func (r *Repository) HistoryPage(ctx context.Context, req PageRequest) (PageResult[HistoryRecord], error) {
+func (r *Repository) HistoryPage(ctx context.Context, req PageRequest) (PageResult[JobHistoryRecord], error) {
 	req = req.Normalize()
 	var total int
-	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM files WHERE EXISTS (SELECT 1 FROM jobs WHERE jobs.file_id = files.id)`).Scan(&total); err != nil {
-		return PageResult[HistoryRecord]{}, err
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs`).Scan(&total); err != nil {
+		return PageResult[JobHistoryRecord]{}, err
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT `+historySelectColumns+` FROM files JOIN jobs ON jobs.id = (
-	  SELECT latest_jobs.id
-	  FROM jobs AS latest_jobs
-	  WHERE latest_jobs.file_id = files.id
-	  ORDER BY latest_jobs.started_at DESC, latest_jobs.id DESC
-	  LIMIT 1
-	) ORDER BY COALESCE(jobs.finished_at, jobs.started_at) DESC, jobs.id DESC LIMIT ? OFFSET ?`, req.PageSize, req.Offset())
+	rows, err := r.db.QueryContext(ctx, `SELECT `+historySelectColumns+`
+	FROM jobs
+	JOIN files ON files.id = jobs.file_id
+	ORDER BY COALESCE(jobs.finished_at, jobs.started_at) DESC, jobs.id DESC
+	LIMIT ? OFFSET ?`, req.PageSize, req.Offset())
 	if err != nil {
-		return PageResult[HistoryRecord]{}, err
+		return PageResult[JobHistoryRecord]{}, err
 	}
 	defer rows.Close()
 	items, err := scanHistoryRecords(rows)
 	if err != nil {
-		return PageResult[HistoryRecord]{}, err
+		return PageResult[JobHistoryRecord]{}, err
 	}
-	return PageResult[HistoryRecord]{Items: items, Page: req.Page, PageSize: req.PageSize, Total: total}, nil
+	return PageResult[JobHistoryRecord]{Items: items, Page: req.Page, PageSize: req.PageSize, Total: total}, nil
 }
 
-func (r *Repository) ProcessingFiles(ctx context.Context) ([]FileRecord, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT `+fileViewSelectColumns+` FROM files `+latestJobJoin+` WHERE jobs.result = ? ORDER BY files.updated_at ASC, files.id ASC`, string(JobResultProcessing))
+func (r *Repository) LatestOutcomeCounts(ctx context.Context) (OutcomeCounts, error) {
+	var counts OutcomeCounts
+	err := r.db.QueryRowContext(ctx, `
+	SELECT
+	  COALESCE(SUM(CASE WHEN jobs.result = 'compatible' THEN 1 ELSE 0 END), 0),
+	  COALESCE(SUM(CASE WHEN jobs.kind = 'process' AND jobs.result = 'succeeded' THEN 1 ELSE 0 END), 0),
+	  COALESCE(SUM(CASE WHEN jobs.result = 'failed' THEN 1 ELSE 0 END), 0),
+	  COALESCE(SUM(CASE WHEN jobs.kind = 'restore' AND jobs.result = 'succeeded' THEN 1 ELSE 0 END), 0)
+	FROM jobs
+	WHERE jobs.id = (
+	  SELECT latest_jobs.id
+	  FROM jobs AS latest_jobs
+	  WHERE latest_jobs.file_id = jobs.file_id
+	  ORDER BY latest_jobs.started_at DESC, latest_jobs.id DESC
+	  LIMIT 1
+	)`).Scan(&counts.Compatible, &counts.Processed, &counts.Failed, &counts.Restored)
 	if err != nil {
-		return nil, err
+		return OutcomeCounts{}, fmt.Errorf("query latest outcome counts: %w", err)
 	}
-	defer rows.Close()
-	return scanFiles(rows)
+	return counts, nil
 }
 
-func (r *Repository) SaveFile(ctx context.Context, file FileRecord) error {
-	_, err := r.UpsertFile(ctx, file)
-	return err
-}
-
-func (r *Repository) AddJobEvent(ctx context.Context, event JobEvent) error {
-	var exists int
-	if err := r.db.QueryRowContext(ctx, `SELECT 1 FROM files WHERE id = ?`, event.FileID).Scan(&exists); err != nil {
-		return fmt.Errorf("add job event: %w", err)
-	}
-	return nil
-}
-
-func addJobEvent(ctx context.Context, execer interface {
-	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, event JobEvent, now time.Time) error {
-	return nil
-}
-
-func (r *Repository) RecentJobEvents(ctx context.Context, limit int) ([]JobEvent, error) {
-	return []JobEvent{}, nil
-}
-
-func (r *Repository) TranscodeStats(ctx context.Context) (TranscodeStats, error) {
-	var stats TranscodeStats
+func (r *Repository) ProcessJobStats(ctx context.Context) (ProcessJobStats, error) {
+	var stats ProcessJobStats
 	err := r.db.QueryRowContext(ctx, `
 	SELECT
 	  COALESCE(SUM(CASE WHEN result = 'succeeded' THEN 1 ELSE 0 END), 0),
 	  COALESCE(SUM(CASE WHEN result = 'failed' THEN 1 ELSE 0 END), 0)
 	FROM jobs
-	WHERE kind = 'process'
-	  AND id = (
-	    SELECT latest_jobs.id
-	    FROM jobs AS latest_jobs
-	    WHERE latest_jobs.file_id = jobs.file_id
-	      AND latest_jobs.kind = 'process'
-	    ORDER BY latest_jobs.started_at DESC, latest_jobs.id DESC
-	    LIMIT 1
-	  )`).Scan(&stats.Succeeded, &stats.Failed)
+	WHERE kind = 'process'`).Scan(&stats.Succeeded, &stats.Failed)
 	if err != nil {
-		return TranscodeStats{}, fmt.Errorf("query transcode stats: %w", err)
+		return ProcessJobStats{}, fmt.Errorf("query process job stats: %w", err)
 	}
 	return stats, nil
 }
@@ -284,20 +240,6 @@ RETURNING `+jobSelectColumns,
 	return scanJob(row)
 }
 
-func (r *Repository) JobByID(ctx context.Context, id int64) (JobRecord, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT `+jobSelectColumns+` FROM jobs WHERE id = ?`, id)
-	return scanJob(row)
-}
-
-func (r *Repository) Jobs(ctx context.Context) ([]JobRecord, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT `+jobSelectColumns+` FROM jobs ORDER BY started_at DESC, id DESC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanJobs(rows)
-}
-
 func (r *Repository) ProcessingJobs(ctx context.Context) ([]JobRecord, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT `+jobSelectColumns+` FROM jobs WHERE result = ? ORDER BY started_at ASC, id ASC`, string(JobResultProcessing))
 	if err != nil {
@@ -305,114 +247,6 @@ func (r *Repository) ProcessingJobs(ctx context.Context) ([]JobRecord, error) {
 	}
 	defer rows.Close()
 	return scanJobs(rows)
-}
-
-func (r *Repository) JobsPage(ctx context.Context, req PageRequest) (PageResult[JobRecord], error) {
-	req = req.Normalize()
-	var total int
-	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs`).Scan(&total); err != nil {
-		return PageResult[JobRecord]{}, err
-	}
-	rows, err := r.db.QueryContext(ctx, `SELECT `+jobSelectColumns+` FROM jobs ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?`, req.PageSize, req.Offset())
-	if err != nil {
-		return PageResult[JobRecord]{}, err
-	}
-	defer rows.Close()
-	items, err := scanJobs(rows)
-	if err != nil {
-		return PageResult[JobRecord]{}, err
-	}
-	return PageResult[JobRecord]{Items: items, Page: req.Page, PageSize: req.PageSize, Total: total}, nil
-}
-
-func finishJob(ctx context.Context, queryer interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, id int64, result JobResult, finalError string, now time.Time) (JobRecord, error) {
-	row := queryer.QueryRowContext(ctx, `
-UPDATE jobs
-SET result = ?, final_error = ?, finished_at = ?
-WHERE id = ?
-RETURNING `+jobSelectColumns,
-		string(result),
-		nullableString(finalError),
-		formatTime(now),
-		id)
-	return scanJob(row)
-}
-
-func finalErrorForFile(file FileRecord) string {
-	if file.Status != StatusFailed {
-		return ""
-	}
-	if file.FailureCause != "" && file.LastError != "" {
-		return string(file.FailureCause) + ": " + file.LastError
-	}
-	if file.FailureCause != "" {
-		return string(file.FailureCause)
-	}
-	if file.LastError != "" {
-		return file.LastError
-	}
-	return "failed"
-}
-
-func fileWithJob(file FileRecord, job JobRecord) FileRecord {
-	file.Status = statusForJob(job)
-	file.DiscoverySource = job.TriggerSource
-	if job.Result == JobResultFailed {
-		file.FailureCause = failureCauseFromFinalError(job.FinalError)
-		file.LastError = lastErrorFromFinalError(job.FinalError)
-	} else {
-		file.FailureCause = ""
-		file.LastError = ""
-	}
-	if job.Result == JobResultProcessing {
-		file.PipelinePhase = PipelinePhaseQueued
-	} else {
-		file.PipelinePhase = PipelinePhasePending
-	}
-	return file
-}
-
-func failureCauseFromFinalError(finalError string) FailureCause {
-	if finalError == "" {
-		return CauseFailed
-	}
-	candidate := finalError
-	if index := strings.Index(finalError, ":"); index >= 0 {
-		candidate = strings.TrimSpace(finalError[:index])
-	}
-	switch FailureCause(candidate) {
-	case CauseFailed, CauseUnsupported, CauseFFProbeError, CauseVerificationFailed, CauseTimeout, CauseRestoreStatError, CauseRestoreProbeError, CauseRestoredRequiresTranscoding:
-		return FailureCause(candidate)
-	default:
-		return CauseFailed
-	}
-}
-
-func lastErrorFromFinalError(finalError string) string {
-	if index := strings.Index(finalError, ":"); index >= 0 {
-		return strings.TrimSpace(finalError[index+1:])
-	}
-	return finalError
-}
-
-func statusForJob(job JobRecord) Status {
-	if job.Kind == JobKindRestore && job.Result == JobResultSucceeded {
-		return StatusRestored
-	}
-	switch job.Result {
-	case JobResultProcessing:
-		return StatusProcessing
-	case JobResultCompatible:
-		return StatusCompatible
-	case JobResultFailed:
-		return StatusFailed
-	case JobResultSucceeded:
-		return StatusProcessed
-	default:
-		return Status(job.Result)
-	}
 }
 
 func (r *Repository) AddBackup(ctx context.Context, backup BackupRecord) error {
@@ -485,47 +319,17 @@ ORDER BY backups.created_at ASC, backups.id ASC`)
 	return scanBackups(rows)
 }
 
-func (r *Repository) MarkBackupRestored(ctx context.Context, id int64, safetyPath string) error {
-	backup, err := r.BackupByID(ctx, id)
-	if err != nil {
-		return err
-	}
-	job, err := r.AddJob(ctx, JobRecord{
-		FileID:        backup.FileID,
-		Kind:          JobKindRestore,
-		TriggerSource: DiscoveryManual,
-		Result:        JobResultSucceeded,
-	})
-	if err != nil {
-		return fmt.Errorf("add restore job: %w", err)
-	}
-	_, err = r.db.ExecContext(ctx, `
-UPDATE backups
-SET restored_by_job_id = ?, restore_safety_path = ?
-WHERE id = ?`, job.ID, nullableString(safetyPath), id)
-	if err != nil {
-		return fmt.Errorf("mark backup restored: %w", err)
-	}
-	return nil
-}
-
-func (r *Repository) RecordRestore(ctx context.Context, backupID int64, safetyPath string, file FileRecord, event JobEvent) (FileRecord, error) {
+func (r *Repository) RecordRestore(ctx context.Context, backupID int64, safetyPath string, file FileFacts, jobResult JobResult, finalError string) (FileFacts, JobRecord, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return FileRecord{}, fmt.Errorf("begin restore transaction: %w", err)
+		return FileFacts{}, JobRecord{}, fmt.Errorf("begin restore transaction: %w", err)
 	}
 	defer tx.Rollback()
 
 	now := time.Now().UTC()
 	persisted, err := upsertFile(ctx, tx, file, now)
 	if err != nil {
-		return FileRecord{}, err
-	}
-	jobResult := JobResultSucceeded
-	finalError := ""
-	if file.Status == StatusFailed {
-		jobResult = JobResultFailed
-		finalError = finalErrorForFile(file)
+		return FileFacts{}, JobRecord{}, err
 	}
 	restoreJob, err := addJob(ctx, tx, JobRecord{
 		FileID:        persisted.ID,
@@ -537,35 +341,27 @@ func (r *Repository) RecordRestore(ctx context.Context, backupID int64, safetyPa
 		FinishedAt:    now,
 	}, now)
 	if err != nil {
-		return FileRecord{}, fmt.Errorf("add restore job: %w", err)
+		return FileFacts{}, JobRecord{}, fmt.Errorf("add restore job: %w", err)
 	}
 	result, err := tx.ExecContext(ctx, `
 	UPDATE backups
 	SET restored_by_job_id = ?, restore_safety_path = ?
 	WHERE id = ?`, restoreJob.ID, nullableString(safetyPath), backupID)
 	if err != nil {
-		return FileRecord{}, fmt.Errorf("mark backup restored: %w", err)
+		return FileFacts{}, JobRecord{}, fmt.Errorf("mark backup restored: %w", err)
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return FileRecord{}, fmt.Errorf("check restored backup update: %w", err)
+		return FileFacts{}, JobRecord{}, fmt.Errorf("check restored backup update: %w", err)
 	}
 	if affected == 0 {
-		return FileRecord{}, fmt.Errorf("mark backup restored: %w", sql.ErrNoRows)
+		return FileFacts{}, JobRecord{}, fmt.Errorf("mark backup restored: %w", sql.ErrNoRows)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return FileRecord{}, fmt.Errorf("commit restore transaction: %w", err)
+		return FileFacts{}, JobRecord{}, fmt.Errorf("commit restore transaction: %w", err)
 	}
-	return fileWithJob(persisted, restoreJob), nil
-}
-
-func (r *Repository) DeleteBackup(ctx context.Context, id int64) error {
-	_, err := r.db.ExecContext(ctx, `DELETE FROM backups WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("delete backup: %w", err)
-	}
-	return nil
+	return persisted, restoreJob, nil
 }
 
 func (r *Repository) DeleteUnrestoredBackup(ctx context.Context, id int64) (bool, error) {
@@ -595,7 +391,53 @@ func (r *Repository) init(ctx context.Context) error {
 			return fmt.Errorf("initialize sqlite schema: %w", err)
 		}
 	}
+	if err := r.validateSchema(ctx); err != nil {
+		return err
+	}
+	if _, err := r.db.ExecContext(ctx, `PRAGMA user_version = 1`); err != nil {
+		return fmt.Errorf("set sqlite schema version: %w", err)
+	}
 
+	return nil
+}
+
+func (r *Repository) validateSchema(ctx context.Context) error {
+	expected := map[string][]string{
+		"files":   {"id", "file_path", "size", "mtime_ns", "audio_signature", "video_signature", "created_at", "updated_at"},
+		"jobs":    {"id", "file_id", "kind", "trigger_source", "result", "final_error", "started_at", "finished_at"},
+		"backups": {"id", "created_by_job_id", "backup_path", "created_at", "restored_by_job_id", "restore_safety_path"},
+	}
+	for table, want := range expected {
+		rows, err := r.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+		if err != nil {
+			return fmt.Errorf("inspect %s schema: %w", table, err)
+		}
+		columns := make([]string, 0, len(want))
+		for rows.Next() {
+			var cid int
+			var name string
+			var columnType string
+			var notNull int
+			var defaultValue any
+			var primaryKey int
+			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan %s schema: %w", table, err)
+			}
+			columns = append(columns, name)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close %s schema rows: %w", table, err)
+		}
+		if len(columns) != len(want) {
+			return fmt.Errorf("unsupported %s schema columns: got %v, want %v", table, columns, want)
+		}
+		for index := range want {
+			if columns[index] != want[index] {
+				return fmt.Errorf("unsupported %s schema columns: got %v, want %v", table, columns, want)
+			}
+		}
+	}
 	return nil
 }
 
@@ -643,71 +485,8 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanFile(row rowScanner) (FileRecord, error) {
-	var file FileRecord
-	var status string
-	var discoverySource string
-	var failureCause sql.NullString
-	var pipelinePhase string
-	var lastError sql.NullString
-	var size sql.NullInt64
-	var mtimeNS sql.NullInt64
-	var audioSignature sql.NullString
-	var videoSignature sql.NullString
-	var createdAt string
-	var updatedAt string
-
-	err := row.Scan(
-		&file.ID,
-		&file.Path,
-		&status,
-		&discoverySource,
-		&failureCause,
-		&pipelinePhase,
-		&file.Fingerprint,
-		&size,
-		&mtimeNS,
-		&audioSignature,
-		&videoSignature,
-		&file.Attempts,
-		&lastError,
-		&createdAt,
-		&updatedAt,
-	)
-	if err != nil {
-		return FileRecord{}, err
-	}
-
-	var parseErr error
-	file.CreatedAt, parseErr = parseTime(createdAt)
-	if parseErr != nil {
-		return FileRecord{}, fmt.Errorf("parse file created_at: %w", parseErr)
-	}
-	file.UpdatedAt, parseErr = parseTime(updatedAt)
-	if parseErr != nil {
-		return FileRecord{}, fmt.Errorf("parse file updated_at: %w", parseErr)
-	}
-	file.Status = Status(status)
-	file.DiscoverySource = DiscoverySource(discoverySource)
-	file.PipelinePhase = PipelinePhase(pipelinePhase)
-	if file.Status == StatusFailed {
-		file.FailureCause = failureCauseFromFinalError(nullableStringValue(lastError))
-		file.LastError = lastErrorFromFinalError(nullableStringValue(lastError))
-	} else {
-		file.FailureCause = FailureCause(nullableStringValue(failureCause))
-		file.LastError = nullableStringValue(lastError)
-	}
-	file.Size = nullableInt64Value(size)
-	file.MTimeNS = nullableInt64Value(mtimeNS)
-	file.AudioSignature = nullableStringValue(audioSignature)
-	file.VideoSignature = nullableStringValue(videoSignature)
-	file.Fingerprint = fingerprint(file.Path, file.Size, file.MTimeNS, file.AudioSignature, file.VideoSignature)
-
-	return file, nil
-}
-
-func scanFileFacts(row rowScanner) (FileRecord, error) {
-	var file FileRecord
+func scanFileFacts(row rowScanner) (FileFacts, error) {
+	var file FileFacts
 	var size sql.NullInt64
 	var mtimeNS sql.NullInt64
 	var audioSignature sql.NullString
@@ -726,79 +505,67 @@ func scanFileFacts(row rowScanner) (FileRecord, error) {
 		&updatedAt,
 	)
 	if err != nil {
-		return FileRecord{}, err
+		return FileFacts{}, err
 	}
 
 	var parseErr error
 	file.CreatedAt, parseErr = parseTime(createdAt)
 	if parseErr != nil {
-		return FileRecord{}, fmt.Errorf("parse file created_at: %w", parseErr)
+		return FileFacts{}, fmt.Errorf("parse file created_at: %w", parseErr)
 	}
 	file.UpdatedAt, parseErr = parseTime(updatedAt)
 	if parseErr != nil {
-		return FileRecord{}, fmt.Errorf("parse file updated_at: %w", parseErr)
+		return FileFacts{}, fmt.Errorf("parse file updated_at: %w", parseErr)
 	}
 	file.Size = nullableInt64Value(size)
 	file.MTimeNS = nullableInt64Value(mtimeNS)
 	file.AudioSignature = nullableStringValue(audioSignature)
 	file.VideoSignature = nullableStringValue(videoSignature)
-	file.Fingerprint = fingerprint(file.Path, file.Size, file.MTimeNS, file.AudioSignature, file.VideoSignature)
 	return file, nil
 }
 
-func scanFiles(rows *sql.Rows) ([]FileRecord, error) {
-	files := make([]FileRecord, 0)
-	for rows.Next() {
-		file, err := scanFile(rows)
-		if err != nil {
-			return nil, err
-		}
-		files = append(files, file)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return files, nil
-}
-
-func scanHistoryRecord(row rowScanner) (HistoryRecord, error) {
-	var record HistoryRecord
-	var status string
-	var discoverySource string
-	var lastError sql.NullString
-	var audioSignature sql.NullString
-	var videoSignature sql.NullString
-	var updatedAt string
+func scanHistoryRecord(row rowScanner) (JobHistoryRecord, error) {
+	var record JobHistoryRecord
+	var kind string
+	var triggerSource string
+	var result string
+	var finalError sql.NullString
+	var startedAt string
+	var finishedAt sql.NullString
 
 	err := row.Scan(
 		&record.ID,
+		&record.FileID,
 		&record.Path,
-		&status,
-		&discoverySource,
-		&audioSignature,
-		&videoSignature,
-		&lastError,
-		&updatedAt,
+		&kind,
+		&triggerSource,
+		&result,
+		&finalError,
+		&startedAt,
+		&finishedAt,
 	)
 	if err != nil {
-		return HistoryRecord{}, err
+		return JobHistoryRecord{}, err
 	}
 
 	var parseErr error
-	record.UpdatedAt, parseErr = parseTime(updatedAt)
+	record.StartedAt, parseErr = parseTime(startedAt)
 	if parseErr != nil {
-		return HistoryRecord{}, fmt.Errorf("parse history updated_at: %w", parseErr)
+		return JobHistoryRecord{}, fmt.Errorf("parse history started_at: %w", parseErr)
 	}
-	record.Status = Status(status)
-	record.DiscoverySource = DiscoverySource(discoverySource)
-	record.LastError = nullableStringValue(lastError)
-	record.AudioSignature = nullableStringValue(audioSignature)
-	record.VideoSignature = nullableStringValue(videoSignature)
+	record.FinishedAt, parseErr = parseNullableTime(finishedAt)
+	if parseErr != nil {
+		return JobHistoryRecord{}, fmt.Errorf("parse history finished_at: %w", parseErr)
+	}
+	record.Kind = JobKind(kind)
+	record.TriggerSource = DiscoverySource(triggerSource)
+	record.Result = JobResult(result)
+	record.FinalError = nullableStringValue(finalError)
 	return record, nil
 }
 
-func scanHistoryRecords(rows *sql.Rows) ([]HistoryRecord, error) {
-	records := make([]HistoryRecord, 0)
+func scanHistoryRecords(rows *sql.Rows) ([]JobHistoryRecord, error) {
+	records := make([]JobHistoryRecord, 0)
 	for rows.Next() {
 		record, err := scanHistoryRecord(rows)
 		if err != nil {
@@ -934,13 +701,6 @@ func parseNullableTime(value sql.NullString) (time.Time, error) {
 	return parseTime(value.String)
 }
 
-func nullableEnum[T ~string](value T) any {
-	if value == "" {
-		return nil
-	}
-	return string(value)
-}
-
 func nullableString(value string) any {
 	if value == "" {
 		return nil
@@ -953,13 +713,6 @@ func nullableTime(value time.Time) any {
 		return nil
 	}
 	return formatTime(value)
-}
-
-func nullableNonNegativeInt(value int64) any {
-	if value < 0 {
-		return value
-	}
-	return value
 }
 
 func nullableInt64(value int64) any {
@@ -983,17 +736,6 @@ func nullableInt64Value(value sql.NullInt64) int64 {
 	return value.Int64
 }
 
-func fingerprint(path string, size int64, mtimeNS int64, audioSignature string, videoSignature string) string {
-	return fmt.Sprintf("%s|%d|%d|%s|%s", path, size, mtimeNS, audioSignature, videoSignature)
-}
-
-func boolInt(value bool) int {
-	if value {
-		return 1
-	}
-	return 0
-}
-
 const fileSelectColumns = `
   id,
   file_path,
@@ -1004,52 +746,16 @@ const fileSelectColumns = `
   created_at,
   updated_at`
 
-const fileViewSelectColumns = `
-	  files.id,
-	  files.file_path,
-	  COALESCE(
-    CASE
-      WHEN jobs.kind = 'restore' AND jobs.result = 'succeeded' THEN 'restored'
-      WHEN jobs.result = 'succeeded' THEN 'processed'
-      ELSE jobs.result
-    END,
-    ''
-  ) AS status,
-  COALESCE(jobs.trigger_source, '') AS discovery_source,
-  CASE WHEN jobs.result = 'failed' THEN COALESCE(jobs.final_error, 'failed') ELSE NULL END AS failure_cause,
-  CASE WHEN jobs.result = 'processing' THEN 'queued' ELSE 'pending' END AS pipeline_phase,
-  '' AS fingerprint,
-  files.size,
-  files.mtime_ns,
-  files.audio_signature,
-  files.video_signature,
-  1 AS attempts,
-  jobs.final_error,
-	  files.created_at,
-	  COALESCE(jobs.finished_at, jobs.started_at, files.updated_at) AS updated_at`
-
 const historySelectColumns = `
 	  jobs.id,
+	  jobs.file_id,
 	  files.file_path,
-	  CASE
-	    WHEN jobs.kind = 'restore' AND jobs.result = 'succeeded' THEN 'restored'
-	    WHEN jobs.result = 'succeeded' THEN 'processed'
-	    ELSE jobs.result
-	  END AS status,
+	  jobs.kind,
 	  jobs.trigger_source,
-	  files.audio_signature,
-	  files.video_signature,
+	  jobs.result,
 	  jobs.final_error,
-	  COALESCE(jobs.finished_at, jobs.started_at) AS updated_at`
-
-const latestJobJoin = `
-LEFT JOIN jobs ON jobs.id = (
-  SELECT latest_jobs.id
-  FROM jobs AS latest_jobs
-  WHERE latest_jobs.file_id = files.id
-  ORDER BY latest_jobs.started_at DESC, latest_jobs.id DESC
-  LIMIT 1
-)`
+	  jobs.started_at,
+	  jobs.finished_at`
 
 const jobSelectColumns = `
   id,

@@ -48,15 +48,19 @@ type Deps struct {
 	ScanAll        func(context.Context) error
 	RequestRestart func(config.Config)
 
-	Status      StatusProvider
-	History     HistoryStore
-	Backups     BackupStore
-	Logs        LogStore
-	RuntimeLogs RuntimeLogStore
+	Status       StatusProvider
+	RuntimeTasks RuntimeTaskProvider
+	History      HistoryStore
+	Backups      BackupStore
+	RuntimeLogs  RuntimeLogStore
 }
 
 type StatusProvider interface {
 	Status(ctx context.Context) (any, error)
+}
+
+type RuntimeTaskProvider interface {
+	RuntimeTasks(ctx context.Context) (any, error)
 }
 
 type HistoryStore interface {
@@ -67,10 +71,6 @@ type BackupStore interface {
 	ListBackups(ctx context.Context, page *repository.PageRequest) (any, error)
 	RestoreBackup(ctx context.Context, id int64) (any, error)
 	CleanupBackups(ctx context.Context) (any, error)
-}
-
-type LogStore interface {
-	RecentLogs(ctx context.Context) (any, error)
 }
 
 type RuntimeLogStore interface {
@@ -103,9 +103,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeDependencyResult(w, status, err)
 }
 
+func (s *Server) handleRuntimeTasks(w http.ResponseWriter, r *http.Request) {
+	if s.deps.RuntimeTasks == nil {
+		writeOK(w, map[string]any{"waiting_tasks": []any{}, "active_tasks": []any{}})
+		return
+	}
+	tasks, err := s.deps.RuntimeTasks.RuntimeTasks(r.Context())
+	writeDependencyResult(w, tasks, err)
+}
+
 func (s *Server) handleListHistory(w http.ResponseWriter, r *http.Request) {
 	if s.deps.History == nil {
-		writeOK(w, []repository.FileRecord{})
+		writeOK(w, []repository.JobHistoryRecord{})
 		return
 	}
 	page, err := parsePageRequest(r)
@@ -233,15 +242,6 @@ func (s *Server) handlePatchBackupConfig(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeOK(w, cfg.Backup)
-}
-
-func (s *Server) handleRecentLogs(w http.ResponseWriter, r *http.Request) {
-	if s.deps.Logs == nil {
-		writeOK(w, []string{})
-		return
-	}
-	logs, err := s.deps.Logs.RecentLogs(r.Context())
-	writeDependencyResult(w, logs, err)
 }
 
 func (s *Server) handleRuntimeLogs(w http.ResponseWriter, r *http.Request) {

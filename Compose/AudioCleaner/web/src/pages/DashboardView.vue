@@ -1,33 +1,55 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { eventStreamState } from '../composables/useEventStream'
 import { serviceStatusLabel, t } from '../i18n'
 import { api } from '../lib/api'
-import type { AudioCleanerConfig, CurrentProcessing, PipelinePhase, ServiceStatus } from '../lib/types'
+import type { AudioCleanerConfig, RuntimePhase, RuntimeTasksSnapshot, ServiceStatus } from '../lib/types'
 
 type DashboardTaskTab = 'waiting' | 'active'
 
 const status = ref<ServiceStatus | null>(null)
+const runtimeTasks = ref<RuntimeTasksSnapshot | null>(null)
 const config = ref<AudioCleanerConfig | null>(null)
 const loading = ref(false)
 const scanLoading = ref(false)
-const error = ref('')
+const statusError = ref('')
+const runtimeError = ref('')
+const configError = ref('')
+const operationError = ref('')
 const dashboardTaskTab = ref<DashboardTaskTab>('waiting')
 const dashboardTaskPage = ref(1)
 const dashboardTaskPageSize = ref(10)
 
-const dashboardTaskPageSizes = [10, 20, 50]
-const waitingPhases = new Set<PipelinePhase | string>(['pending', 'queued', 'checking'])
-const activePhases = new Set<PipelinePhase | string>(['retry_wait', 'transcoding', 'verifying', 'backing_up', 'replacing'])
+const runtimePollIntervalMs = 1_000
+const statusPollIntervalMs = 5_000
+const eventRefreshDelayMs = 100
+const statusInvalidationEvents = new Set([
+  'compatible',
+  'processed',
+  'failed',
+  'job.restored',
+  'service.restarting',
+  'service.restart_failed'
+])
 
+let runtimePollTimer: number | undefined
+let statusPollTimer: number | undefined
+let runtimeEventTimer: number | undefined
+let statusEventTimer: number | undefined
+
+const dashboardTaskPageSizes = [10, 20, 50]
+const error = computed(() =>
+  [operationError.value, statusError.value, runtimeError.value, configError.value].filter(Boolean).join('; ')
+)
 const compatibleCount = computed(() => status.value?.counts.compatible ?? 0)
 const processedCount = computed(() => status.value?.counts.processed ?? 0)
 const failedCount = computed(() => status.value?.counts.failed ?? 0)
-const processingCount = computed(() => status.value?.counts.processing ?? status.value?.current_processing.length ?? 0)
-const mediaRoots = computed(() => config.value?.media.roots ?? status.value?.media_roots ?? [])
-const waitingTasks = computed(() => status.value?.current_processing.filter((task) => waitingPhases.has(task.phase)) ?? [])
-const activeTasks = computed(() => status.value?.current_processing.filter((task) => activePhases.has(task.phase)) ?? [])
-const waitingTaskCount = computed(() => status.value?.queue_count ?? waitingTasks.value.length)
-const activeTaskCount = computed(() => processingCount.value)
+const processingCount = computed(() => activeTasks.value.length)
+const mediaRoots = computed(() => config.value?.media.roots ?? [])
+const waitingTasks = computed(() => runtimeTasks.value?.waiting_tasks ?? [])
+const activeTasks = computed(() => runtimeTasks.value?.active_tasks ?? [])
+const waitingTaskCount = computed(() => waitingTasks.value.length)
+const activeTaskCount = computed(() => activeTasks.value.length)
 const selectedTasks = computed(() => (dashboardTaskTab.value === 'waiting' ? waitingTasks.value : activeTasks.value))
 const dashboardTaskTotal = computed(() => selectedTasks.value.length)
 const dashboardTaskPageCount = computed(() => Math.max(1, Math.ceil(dashboardTaskTotal.value / dashboardTaskPageSize.value)))
@@ -97,9 +119,8 @@ function dashboardTaskDirectory(path: string): string {
   return path.slice(0, separatorIndex)
 }
 
-function dashboardTaskPhaseLabel(phase: PipelinePhase | string): string {
+function dashboardTaskPhaseLabel(phase: RuntimePhase): string {
   const keys: Record<string, string> = {
-    pending: 'dashboardPhasePending',
     queued: 'dashboardPhaseQueued',
     retry_wait: 'dashboardPhaseRetryWait',
     checking: 'dashboardPhaseChecking',
@@ -112,38 +133,183 @@ function dashboardTaskPhaseLabel(phase: PipelinePhase | string): string {
   return key ? t(key) : t('dashboardPhaseUnknown')
 }
 
-function dashboardTaskPhaseClass(task: CurrentProcessing): string {
-  return waitingPhases.has(task.phase) ? 'dashboard-task-chip--waiting' : 'dashboard-task-chip--active'
+function dashboardTaskPhaseClass(): string {
+  return dashboardTaskTab.value === 'waiting' ? 'dashboard-task-chip--waiting' : 'dashboard-task-chip--active'
+}
+
+function errorMessage(caught: unknown): string {
+  return caught instanceof Error ? caught.message : String(caught)
+}
+
+function createRefreshTask<T>(
+  request: () => Promise<T>,
+  apply: (value: T) => void,
+  setError: (message: string) => void
+): () => Promise<void> {
+  let inFlight: Promise<void> | null = null
+  let refreshAgain = false
+
+  const refresh = async (): Promise<void> => {
+    if (inFlight) {
+      refreshAgain = true
+      return inFlight
+    }
+
+    inFlight = (async () => {
+      try {
+        apply(await request())
+        setError('')
+      } catch (caught) {
+        setError(errorMessage(caught))
+      }
+    })()
+
+    try {
+      await inFlight
+    } finally {
+      inFlight = null
+      if (refreshAgain) {
+        refreshAgain = false
+        void refresh()
+      }
+    }
+  }
+
+  return refresh
+}
+
+const refreshStatus = createRefreshTask(
+  api.status,
+  (nextStatus) => {
+    status.value = nextStatus
+  },
+  (message) => {
+    statusError.value = message
+  }
+)
+
+const refreshRuntimeTasks = createRefreshTask(
+  api.runtimeTasks,
+  (nextRuntimeTasks) => {
+    runtimeTasks.value = nextRuntimeTasks
+  },
+  (message) => {
+    runtimeError.value = message
+  }
+)
+
+async function refreshConfig(): Promise<void> {
+  try {
+    config.value = await api.config()
+    configError.value = ''
+  } catch (caught) {
+    configError.value = errorMessage(caught)
+  }
 }
 
 async function loadDashboard(): Promise<void> {
   loading.value = true
-  error.value = ''
   try {
-    const [nextStatus, nextConfig] = await Promise.all([api.status(), api.config()])
-    status.value = nextStatus
-    config.value = nextConfig
-  } catch (caught) {
-    error.value = caught instanceof Error ? caught.message : String(caught)
+    await Promise.all([refreshStatus(), refreshRuntimeTasks(), refreshConfig()])
   } finally {
     loading.value = false
   }
 }
 
+function scheduleRuntimeRefresh(): void {
+  if (runtimeEventTimer !== undefined) {
+    window.clearTimeout(runtimeEventTimer)
+  }
+  runtimeEventTimer = window.setTimeout(() => {
+    runtimeEventTimer = undefined
+    void refreshRuntimeTasks()
+  }, eventRefreshDelayMs)
+}
+
+function scheduleStatusRefresh(): void {
+  if (statusEventTimer !== undefined) {
+    window.clearTimeout(statusEventTimer)
+  }
+  statusEventTimer = window.setTimeout(() => {
+    statusEventTimer = undefined
+    void refreshStatus()
+  }, eventRefreshDelayMs)
+}
+
+function refreshVisibleDashboard(): void {
+  if (document.visibilityState === 'hidden') {
+    return
+  }
+  void refreshRuntimeTasks()
+  void refreshStatus()
+}
+
 async function quickScan(): Promise<void> {
   scanLoading.value = true
-  error.value = ''
+  operationError.value = ''
   try {
     await api.scan()
-    await loadDashboard()
+    await Promise.all([refreshStatus(), refreshRuntimeTasks()])
   } catch (caught) {
-    error.value = caught instanceof Error ? caught.message : String(caught)
+    operationError.value = errorMessage(caught)
   } finally {
     scanLoading.value = false
   }
 }
 
-onMounted(loadDashboard)
+watch(
+  () => eventStreamState.lastEvent,
+  (event) => {
+    if (!event) {
+      return
+    }
+    scheduleRuntimeRefresh()
+    if (statusInvalidationEvents.has(event.type)) {
+      scheduleStatusRefresh()
+    }
+  }
+)
+
+watch(
+  () => eventStreamState.status,
+  (nextStatus, previousStatus) => {
+    if (nextStatus === 'connected' && previousStatus !== 'connected') {
+      scheduleRuntimeRefresh()
+      scheduleStatusRefresh()
+    }
+  }
+)
+
+onMounted(() => {
+  void loadDashboard()
+  runtimePollTimer = window.setInterval(() => {
+    if (document.visibilityState !== 'hidden') {
+      void refreshRuntimeTasks()
+    }
+  }, runtimePollIntervalMs)
+  statusPollTimer = window.setInterval(() => {
+    if (document.visibilityState !== 'hidden') {
+      void refreshStatus()
+    }
+  }, statusPollIntervalMs)
+  document.addEventListener('visibilitychange', refreshVisibleDashboard)
+})
+
+onBeforeUnmount(() => {
+  if (runtimePollTimer !== undefined) {
+    window.clearInterval(runtimePollTimer)
+  }
+  if (statusPollTimer !== undefined) {
+    window.clearInterval(statusPollTimer)
+  }
+  if (runtimeEventTimer !== undefined) {
+    window.clearTimeout(runtimeEventTimer)
+  }
+  if (statusEventTimer !== undefined) {
+    window.clearTimeout(statusEventTimer)
+  }
+  document.removeEventListener('visibilitychange', refreshVisibleDashboard)
+})
 </script>
 
 <template>
@@ -180,7 +346,7 @@ onMounted(loadDashboard)
       </section>
       <section class="dashboard-metric dashboard-metric--queue panel">
         <span class="dashboard-metric__label">{{ t('dashboardQueueCount') }}</span>
-        <strong class="dashboard-metric__value">{{ status.queue_count }}</strong>
+        <strong class="dashboard-metric__value">{{ waitingTaskCount }}</strong>
       </section>
       <section class="dashboard-metric dashboard-metric--backup panel">
         <span class="dashboard-metric__label">{{ t('dashboardBackupUsage') }}</span>
@@ -192,7 +358,7 @@ onMounted(loadDashboard)
       </section>
     </div>
 
-    <section v-if="status" class="dashboard-task-panel panel" data-testid="dashboard-task-queue">
+    <section v-if="runtimeTasks" class="dashboard-task-panel panel" data-testid="dashboard-task-queue">
       <div class="dashboard-task-tabbar">
         <div class="dashboard-task-tabs" role="tablist">
           <button
@@ -234,7 +400,7 @@ onMounted(loadDashboard)
             <strong>{{ dashboardTaskFileName(task.path) }}</strong>
             <span>{{ dashboardTaskDirectory(task.path) }}</span>
           </div>
-          <span class="dashboard-task-chip" :class="dashboardTaskPhaseClass(task)">{{ dashboardTaskPhaseLabel(task.phase) }}</span>
+          <span class="dashboard-task-chip" :class="dashboardTaskPhaseClass()">{{ dashboardTaskPhaseLabel(task.phase) }}</span>
         </div>
       </div>
 
@@ -272,7 +438,7 @@ onMounted(loadDashboard)
       </div>
     </section>
 
-    <div v-if="status" class="dashboard-sections">
+    <div v-if="config" class="dashboard-sections">
       <section class="panel">
         <div class="panel-body">
           <h2>{{ t('dashboardMediaRoots') }}</h2>

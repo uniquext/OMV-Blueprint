@@ -1,5 +1,5 @@
 import { ref } from 'vue'
-import type { BackupRecord, EventCode, EventStreamStatus, JobPhase, JobStatus, SupportedLanguage } from '../lib/types'
+import type { BackupRecord, EventStreamStatus, JobStatus, SupportedLanguage } from '../lib/types'
 
 type Dictionary = Record<string, string>
 
@@ -53,7 +53,6 @@ export const dictionaries: Record<SupportedLanguage, Dictionary> = {
     dashboardTaskTotalPrefix: '共',
     dashboardTaskPageUnit: '页',
     dashboardTaskEmpty: '暂无任务',
-    dashboardPhasePending: '待处理',
     dashboardPhaseQueued: '排队中',
     dashboardPhaseRetryWait: '等待重试',
     dashboardPhaseChecking: '检查中',
@@ -196,39 +195,9 @@ export const dictionaries: Record<SupportedLanguage, Dictionary> = {
     jobStatusProcessed: '处理成功',
     jobStatusFailed: '处理失败',
     jobStatusRestored: '已恢复',
-    jobFailureCauseFailed: '失败',
-    jobFailureCauseUnsupported: '不支持',
-    jobFailureCauseFfprobeError: 'ffprobe 错误',
-    jobFailureCauseVerificationFailed: '验证失败',
-    jobFailureCauseTimeout: '超时',
-    jobFailureCauseRestoreStatError: '恢复后读取文件失败',
-    jobFailureCauseRestoreProbeError: '恢复后探测失败',
-    jobFailureCauseRestoredRequiresTranscoding: '恢复后仍需转码',
     jobDiscoverySourceScan: '扫描',
     jobDiscoverySourceWatchdog: '监听',
     jobDiscoverySourceManual: '手动',
-    jobPhasePending: '待处理',
-    jobPhaseQueued: '已排队',
-    jobPhaseChecking: '检查中',
-    jobPhaseTranscoding: '转码中',
-    jobPhaseVerifying: '验证中',
-    jobPhaseBackingUp: '备份中',
-    jobPhaseReplacing: '替换中',
-    jobPhaseRetryWait: '等待重试',
-    jobEventQueued: '任务已排队',
-    jobEventChecking: '任务检查中',
-    jobEventTranscoding: '任务转码中',
-    jobEventVerifying: '任务验证中',
-    jobEventBackingUp: '任务备份中',
-    jobEventReplacing: '任务替换中',
-    jobEventCompatible: '原本合规',
-    jobEventProcessed: '处理成功',
-    jobEventFailed: '处理失败',
-    jobEventIgnored: '任务已忽略',
-    jobEventRestored: '任务已恢复',
-    jobEventFfmpegDataStreamFallback: 'ffmpeg 数据流回退',
-    serviceEventRestarting: '服务重启中',
-    serviceEventRestartFailed: '服务重启失败',
     pagerPageSize: '每页',
     pagerPage: '第',
     pagerItems: '条',
@@ -295,7 +264,6 @@ export const dictionaries: Record<SupportedLanguage, Dictionary> = {
     dashboardTaskTotalPrefix: 'Total',
     dashboardTaskPageUnit: 'pages',
     dashboardTaskEmpty: 'No current tasks',
-    dashboardPhasePending: 'Pending',
     dashboardPhaseQueued: 'Queued',
     dashboardPhaseRetryWait: 'Waiting to retry',
     dashboardPhaseChecking: 'Checking',
@@ -438,39 +406,9 @@ export const dictionaries: Record<SupportedLanguage, Dictionary> = {
     jobStatusProcessed: 'Processed',
     jobStatusFailed: 'Failed',
     jobStatusRestored: 'Restored',
-    jobFailureCauseFailed: 'Failed',
-    jobFailureCauseUnsupported: 'Unsupported',
-    jobFailureCauseFfprobeError: 'ffprobe error',
-    jobFailureCauseVerificationFailed: 'Verification failed',
-    jobFailureCauseTimeout: 'Timeout',
-    jobFailureCauseRestoreStatError: 'Restore stat error',
-    jobFailureCauseRestoreProbeError: 'Restore probe error',
-    jobFailureCauseRestoredRequiresTranscoding: 'Restored file requires transcoding',
     jobDiscoverySourceScan: 'Scan',
     jobDiscoverySourceWatchdog: 'Watchdog',
     jobDiscoverySourceManual: 'Manual',
-    jobPhasePending: 'Pending',
-    jobPhaseQueued: 'Queued',
-    jobPhaseChecking: 'Checking',
-    jobPhaseTranscoding: 'Transcoding',
-    jobPhaseVerifying: 'Verifying',
-    jobPhaseBackingUp: 'Backing up',
-    jobPhaseReplacing: 'Replacing',
-    jobPhaseRetryWait: 'Waiting to retry',
-    jobEventQueued: 'Job queued',
-    jobEventChecking: 'Job checking',
-    jobEventTranscoding: 'Job transcoding',
-    jobEventVerifying: 'Job verifying',
-    jobEventBackingUp: 'Job backing up',
-    jobEventReplacing: 'Job replacing',
-    jobEventCompatible: 'Already compatible',
-    jobEventProcessed: 'Processed',
-    jobEventFailed: 'Failed',
-    jobEventIgnored: 'Job ignored',
-    jobEventRestored: 'Job restored',
-    jobEventFfmpegDataStreamFallback: 'ffmpeg data stream fallback',
-    serviceEventRestarting: 'Service restarting',
-    serviceEventRestartFailed: 'Service restart failed',
     pagerPageSize: 'Page size',
     pagerPage: 'Page',
     pagerItems: 'items',
@@ -525,43 +463,6 @@ export function serviceStatusLabel(status: string): string {
   }
   const key = keys[status]
   return key ? t(key) : status
-}
-
-export function jobPhaseLabel(phase: JobPhase | string): string {
-  const keys: Record<string, string> = {
-    pending: 'jobPhasePending',
-    queued: 'jobPhaseQueued',
-    checking: 'jobPhaseChecking',
-    transcoding: 'jobPhaseTranscoding',
-    verifying: 'jobPhaseVerifying',
-    backing_up: 'jobPhaseBackingUp',
-    replacing: 'jobPhaseReplacing',
-    retry_wait: 'jobPhaseRetryWait'
-  }
-  const key = keys[phase]
-  return key ? t(key) : phase
-}
-
-export function jobEventCodeLabel(eventCode: EventCode | string): string {
-  const keys: Record<string, string> = {
-    queued: 'jobEventQueued',
-    checking: 'jobEventChecking',
-    transcoding: 'jobEventTranscoding',
-    verifying: 'jobEventVerifying',
-    backing_up: 'jobEventBackingUp',
-    replacing: 'jobEventReplacing',
-    retry_wait: 'jobPhaseRetryWait',
-    compatible: 'jobEventCompatible',
-    processed: 'jobEventProcessed',
-    failed: 'jobEventFailed',
-    ignored: 'jobEventIgnored',
-    restore: 'jobEventRestored',
-    ffmpeg_data_stream_fallback: 'jobEventFfmpegDataStreamFallback',
-    'service.restarting': 'serviceEventRestarting',
-    'service.restart_failed': 'serviceEventRestartFailed'
-  }
-  const key = keys[eventCode]
-  return key ? t(key) : eventCode
 }
 
 export function backupAvailabilityLabel(availability: string): string {

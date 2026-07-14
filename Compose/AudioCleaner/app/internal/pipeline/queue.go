@@ -1,12 +1,23 @@
 package pipeline
 
-import "sync"
+import (
+	"context"
+	"sort"
+	"sync"
+	"time"
+)
 
-type Queue struct {
-	mu     sync.Mutex
-	jobs   []QueueJob
-	active map[string]struct{}
-}
+type RuntimePhase string
+
+const (
+	RuntimeQueued      RuntimePhase = "queued"
+	RuntimeRetryWait   RuntimePhase = "retry_wait"
+	RuntimeChecking    RuntimePhase = "checking"
+	RuntimeTranscoding RuntimePhase = "transcoding"
+	RuntimeVerifying   RuntimePhase = "verifying"
+	RuntimeBackingUp   RuntimePhase = "backing_up"
+	RuntimeReplacing   RuntimePhase = "replacing"
+)
 
 type JobSource string
 
@@ -18,14 +29,46 @@ const (
 )
 
 type QueueJob struct {
-	Path   string
-	Source JobSource
+	Path          string
+	Source        JobSource
+	JobID         int64
+	AttemptNumber int
+}
+
+type RuntimeTask struct {
+	Path   string       `json:"path"`
+	Source JobSource    `json:"source,omitempty"`
+	Phase  RuntimePhase `json:"phase"`
+}
+
+type RuntimeTaskSnapshot struct {
+	Waiting []RuntimeTask `json:"waiting_tasks"`
+	Active  []RuntimeTask `json:"active_tasks"`
+}
+
+type runtimeTask struct {
+	RuntimeTask
+	active          bool
+	queued          bool
+	cancel          context.CancelFunc
+	order           uint64
+	jobID           int64
+	retryCount      int
+	attemptNumber   int
+	retryTimer      *time.Timer
+	retryGeneration uint64
+	lastRetryError  string
+}
+
+type Queue struct {
+	mu        sync.Mutex
+	jobs      []QueueJob
+	tasks     map[string]*runtimeTask
+	nextOrder uint64
 }
 
 func NewQueue() *Queue {
-	return &Queue{
-		active: make(map[string]struct{}),
-	}
+	return &Queue{tasks: make(map[string]*runtimeTask)}
 }
 
 func (q *Queue) Enqueue(path string) bool {
@@ -36,10 +79,16 @@ func (q *Queue) EnqueueWithSource(path string, source JobSource) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	if _, ok := q.active[path]; ok {
+	if _, exists := q.tasks[path]; exists {
 		return false
 	}
-	q.active[path] = struct{}{}
+	task := &runtimeTask{
+		RuntimeTask:   RuntimeTask{Path: path, Source: source, Phase: RuntimeQueued},
+		queued:        true,
+		order:         q.nextTaskOrder(),
+		attemptNumber: 1,
+	}
+	q.tasks[path] = task
 	q.jobs = append(q.jobs, QueueJob{Path: path, Source: source})
 	return true
 }
@@ -50,37 +99,212 @@ func (q *Queue) Next() (string, bool) {
 }
 
 func (q *Queue) NextJob() (QueueJob, bool) {
+	return q.ClaimNext(nil)
+}
+
+func (q *Queue) ClaimNext(cancel context.CancelFunc) (QueueJob, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	if len(q.jobs) == 0 {
-		return QueueJob{}, false
+	for len(q.jobs) > 0 {
+		queued := q.jobs[0]
+		copy(q.jobs, q.jobs[1:])
+		q.jobs[len(q.jobs)-1] = QueueJob{}
+		q.jobs = q.jobs[:len(q.jobs)-1]
+
+		task, ok := q.tasks[queued.Path]
+		if !ok || !task.queued {
+			continue
+		}
+		task.queued = false
+		task.active = true
+		task.cancel = cancel
+		task.Phase = RuntimeChecking
+		task.order = q.nextTaskOrder()
+		return QueueJob{
+			Path:          task.Path,
+			Source:        task.Source,
+			JobID:         task.jobID,
+			AttemptNumber: task.attemptNumber,
+		}, true
 	}
-	job := q.jobs[0]
-	copy(q.jobs, q.jobs[1:])
-	q.jobs[len(q.jobs)-1] = QueueJob{}
-	q.jobs = q.jobs[:len(q.jobs)-1]
-	return job, true
+	return QueueJob{}, false
+}
+
+func (q *Queue) BindJob(path string, jobID int64) bool {
+	if jobID <= 0 {
+		return false
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	task, ok := q.tasks[path]
+	if !ok || (task.jobID != 0 && task.jobID != jobID) {
+		return false
+	}
+	task.jobID = jobID
+	return true
+}
+
+func (q *Queue) ScheduleRetry(path string, delay time.Duration, lastError string, maxRetries int) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	task, ok := q.tasks[path]
+	if !ok || !task.active || task.retryCount >= maxRetries {
+		return false
+	}
+	if task.retryTimer != nil {
+		task.retryTimer.Stop()
+	}
+	task.active = false
+	task.queued = false
+	task.cancel = nil
+	task.Phase = RuntimeRetryWait
+	task.retryCount++
+	task.attemptNumber = task.retryCount + 1
+	task.lastRetryError = lastError
+	task.retryGeneration++
+	task.order = q.nextTaskOrder()
+	generation := task.retryGeneration
+	task.retryTimer = time.AfterFunc(delay, func() {
+		q.activateRetry(path, generation)
+	})
+	return true
+}
+
+func (q *Queue) activateRetry(path string, generation uint64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	task, ok := q.tasks[path]
+	if !ok || task.retryGeneration != generation || task.Phase != RuntimeRetryWait {
+		return
+	}
+	task.retryTimer = nil
+	task.queued = true
+	task.Phase = RuntimeQueued
+	task.order = q.nextTaskOrder()
+	q.jobs = append(q.jobs, QueueJob{Path: task.Path, Source: task.Source})
 }
 
 func (q *Queue) Done(path string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-
-	delete(q.active, path)
+	task, ok := q.tasks[path]
+	if !ok {
+		return
+	}
+	if task.retryTimer != nil {
+		task.retryTimer.Stop()
+	}
+	task.retryGeneration++
+	delete(q.tasks, path)
 }
 
 func (q *Queue) Contains(path string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-
-	_, ok := q.active[path]
+	_, ok := q.tasks[path]
 	return ok
 }
 
 func (q *Queue) Len() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	count := 0
+	for _, task := range q.tasks {
+		if !task.active {
+			count++
+		}
+	}
+	return count
+}
 
-	return len(q.jobs)
+func (q *Queue) UpdatePhase(path string, phase RuntimePhase) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	task, ok := q.tasks[path]
+	if !ok || !task.active || !isActivePhase(phase) {
+		return
+	}
+	task.Phase = phase
+}
+
+func (q *Queue) Snapshot() RuntimeTaskSnapshot {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	type orderedTask struct {
+		task  RuntimeTask
+		order uint64
+	}
+	waiting := make([]orderedTask, 0)
+	active := make([]orderedTask, 0)
+	for _, task := range q.tasks {
+		item := orderedTask{task: task.RuntimeTask, order: task.order}
+		if task.active {
+			active = append(active, item)
+		} else {
+			waiting = append(waiting, item)
+		}
+	}
+	sort.Slice(waiting, func(i, j int) bool { return waiting[i].order < waiting[j].order })
+	sort.Slice(active, func(i, j int) bool { return active[i].order < active[j].order })
+
+	snapshot := RuntimeTaskSnapshot{
+		Waiting: make([]RuntimeTask, len(waiting)),
+		Active:  make([]RuntimeTask, len(active)),
+	}
+	for index, item := range waiting {
+		snapshot.Waiting[index] = item.task
+	}
+	for index, item := range active {
+		snapshot.Active[index] = item.task
+	}
+	return snapshot
+}
+
+func (q *Queue) CancelActive(includeCritical bool) {
+	q.mu.Lock()
+	cancels := make([]context.CancelFunc, 0)
+	for _, task := range q.tasks {
+		if !task.active || task.cancel == nil {
+			continue
+		}
+		if includeCritical || !isCriticalPhase(task.Phase) {
+			cancels = append(cancels, task.cancel)
+		}
+	}
+	q.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (q *Queue) HasCriticalActive() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, task := range q.tasks {
+		if task.active && isCriticalPhase(task.Phase) {
+			return true
+		}
+	}
+	return false
+}
+
+func (q *Queue) nextTaskOrder() uint64 {
+	q.nextOrder++
+	return q.nextOrder
+}
+
+func isActivePhase(phase RuntimePhase) bool {
+	switch phase {
+	case RuntimeChecking, RuntimeTranscoding, RuntimeVerifying, RuntimeBackingUp, RuntimeReplacing:
+		return true
+	default:
+		return false
+	}
+}
+
+func isCriticalPhase(phase RuntimePhase) bool {
+	return phase == RuntimeBackingUp || phase == RuntimeReplacing
 }

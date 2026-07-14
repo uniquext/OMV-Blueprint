@@ -5,70 +5,15 @@ import (
 	"time"
 )
 
-type Status string
 type DiscoverySource string
-type PipelinePhase string
-type FailureCause string
-type EventKind string
-type EventCode string
-type EventOutcome string
 type BackupAvailability string
 type JobKind string
 type JobResult string
 
 const (
-	StatusCompatible Status = "compatible"
-	StatusProcessing Status = "processing"
-	StatusProcessed  Status = "processed"
-	StatusFailed     Status = "failed"
-	StatusRestored   Status = "restored"
-	StatusIgnored    Status = "ignored"
-
 	DiscoveryScan     DiscoverySource = "scan"
 	DiscoveryWatchdog DiscoverySource = "watchdog"
 	DiscoveryManual   DiscoverySource = "manual"
-
-	PipelinePhasePending     PipelinePhase = "pending"
-	PipelinePhaseQueued      PipelinePhase = "queued"
-	PipelinePhaseRetryWait   PipelinePhase = "retry_wait"
-	PipelinePhaseChecking    PipelinePhase = "checking"
-	PipelinePhaseTranscoding PipelinePhase = "transcoding"
-	PipelinePhaseVerifying   PipelinePhase = "verifying"
-	PipelinePhaseBackingUp   PipelinePhase = "backing_up"
-	PipelinePhaseReplacing   PipelinePhase = "replacing"
-
-	CauseFailed                      FailureCause = "failed"
-	CauseUnsupported                 FailureCause = "unsupported"
-	CauseFFProbeError                FailureCause = "ffprobe_error"
-	CauseVerificationFailed          FailureCause = "verification_failed"
-	CauseTimeout                     FailureCause = "timeout"
-	CauseRestoreStatError            FailureCause = "restore_stat_error"
-	CauseRestoreProbeError           FailureCause = "restore_probe_error"
-	CauseRestoredRequiresTranscoding FailureCause = "restored_requires_transcoding"
-
-	EventKindPhaseTransition EventKind = "phase_transition"
-	EventKindStatusChange    EventKind = "status_change"
-	EventKindOperation       EventKind = "operation"
-	EventKindDiagnostic      EventKind = "diagnostic"
-
-	EventCodeQueued                   EventCode = "queued"
-	EventCodeChecking                 EventCode = "checking"
-	EventCodeTranscoding              EventCode = "transcoding"
-	EventCodeVerifying                EventCode = "verifying"
-	EventCodeBackingUp                EventCode = "backing_up"
-	EventCodeReplacing                EventCode = "replacing"
-	EventCodeRetryWait                EventCode = "retry_wait"
-	EventCodeCompatible               EventCode = "compatible"
-	EventCodeProcessed                EventCode = "processed"
-	EventCodeFailed                   EventCode = "failed"
-	EventCodeIgnored                  EventCode = "ignored"
-	EventCodeRestore                  EventCode = "restore"
-	EventCodeFfmpegDataStreamFallback EventCode = "ffmpeg_data_stream_fallback"
-
-	OutcomeTranscoded  EventOutcome = "transcoded"
-	OutcomeFailed      EventOutcome = "failed"
-	OutcomeUnsupported EventOutcome = "unsupported"
-	OutcomeRestored    EventOutcome = "restored"
 
 	BackupAvailable BackupAvailability = "available"
 	BackupMissing   BackupAvailability = "missing"
@@ -84,82 +29,20 @@ const (
 	JobResultFailed     JobResult = "failed"
 )
 
-type FileRecord struct {
-	ID              int64           `json:"id"`
-	Path            string          `json:"path"`
-	Status          Status          `json:"status"`
-	DiscoverySource DiscoverySource `json:"discovery_source"`
-	FailureCause    FailureCause    `json:"failure_cause"`
-	PipelinePhase   PipelinePhase   `json:"pipeline_phase"`
-	Fingerprint     string          `json:"fingerprint"`
-	Size            int64           `json:"size"`
-	MTimeNS         int64           `json:"mtime_ns"`
-	AudioSignature  string          `json:"audio_signature"`
-	VideoSignature  string          `json:"video_signature"`
-	Attempts        int             `json:"attempts"`
-	LastError       string          `json:"last_error"`
-	CreatedAt       time.Time       `json:"created_at"`
-	UpdatedAt       time.Time       `json:"updated_at"`
+type FileFacts struct {
+	ID             int64     `json:"id"`
+	Path           string    `json:"path"`
+	Size           int64     `json:"size"`
+	MTimeNS        int64     `json:"mtime_ns"`
+	AudioSignature string    `json:"audio_signature"`
+	VideoSignature string    `json:"video_signature"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
-type HistoryRecord struct {
-	ID              int64           `json:"id"`
-	Path            string          `json:"path"`
-	Status          Status          `json:"status"`
-	DiscoverySource DiscoverySource `json:"discovery_source"`
-	AudioSignature  string          `json:"audio_signature"`
-	VideoSignature  string          `json:"video_signature"`
-	LastError       string          `json:"last_error"`
-	UpdatedAt       time.Time       `json:"updated_at"`
-}
-
-type JobEvent struct {
-	ID         int64         `json:"id"`
-	FileID     int64         `json:"file_id"`
-	EventKind  EventKind     `json:"event_kind"`
-	EventCode  EventCode     `json:"event_code"`
-	Phase      PipelinePhase `json:"phase"`
-	Status     Status        `json:"status"`
-	Outcome    EventOutcome  `json:"outcome"`
-	Attempt    int           `json:"attempt"`
-	Command    string        `json:"command"`
-	Message    string        `json:"message"`
-	Error      string        `json:"error"`
-	StartedAt  time.Time     `json:"started_at"`
-	FinishedAt time.Time     `json:"finished_at"`
-}
-
-func (e JobEvent) MarshalJSON() ([]byte, error) {
-	type jobEventJSON struct {
-		ID         int64   `json:"id"`
-		FileID     int64   `json:"file_id"`
-		EventKind  string  `json:"event_kind"`
-		EventCode  string  `json:"event_code"`
-		Phase      *string `json:"phase"`
-		Status     *string `json:"status"`
-		Outcome    *string `json:"outcome"`
-		Attempt    int     `json:"attempt"`
-		Command    string  `json:"command"`
-		Message    string  `json:"message"`
-		Error      string  `json:"error"`
-		StartedAt  string  `json:"started_at"`
-		FinishedAt string  `json:"finished_at"`
-	}
-	return json.Marshal(jobEventJSON{
-		ID:         e.ID,
-		FileID:     e.FileID,
-		EventKind:  string(e.EventKind),
-		EventCode:  string(e.EventCode),
-		Phase:      optionalString(e.Phase),
-		Status:     optionalString(e.Status),
-		Outcome:    optionalString(e.Outcome),
-		Attempt:    e.Attempt,
-		Command:    e.Command,
-		Message:    e.Message,
-		Error:      e.Error,
-		StartedAt:  formatTime(e.StartedAt),
-		FinishedAt: formatTime(e.FinishedAt),
-	})
+type FileBaseline struct {
+	File      FileFacts
+	LatestJob *JobRecord
 }
 
 type JobRecord struct {
@@ -187,6 +70,43 @@ func (j JobRecord) MarshalJSON() ([]byte, error) {
 	return json.Marshal(jobRecordJSON{
 		ID:            j.ID,
 		FileID:        j.FileID,
+		Kind:          j.Kind,
+		TriggerSource: string(j.TriggerSource),
+		Result:        string(j.Result),
+		FinalError:    j.FinalError,
+		StartedAt:     formatTime(j.StartedAt),
+		FinishedAt:    formatTime(j.FinishedAt),
+	})
+}
+
+type JobHistoryRecord struct {
+	ID            int64           `json:"id"`
+	FileID        int64           `json:"file_id"`
+	Path          string          `json:"path"`
+	Kind          JobKind         `json:"kind"`
+	TriggerSource DiscoverySource `json:"trigger_source"`
+	Result        JobResult       `json:"result"`
+	FinalError    string          `json:"final_error"`
+	StartedAt     time.Time       `json:"started_at"`
+	FinishedAt    time.Time       `json:"finished_at"`
+}
+
+func (j JobHistoryRecord) MarshalJSON() ([]byte, error) {
+	type jobHistoryJSON struct {
+		ID            int64   `json:"id"`
+		FileID        int64   `json:"file_id"`
+		Path          string  `json:"path"`
+		Kind          JobKind `json:"kind"`
+		TriggerSource string  `json:"trigger_source"`
+		Result        string  `json:"result"`
+		FinalError    string  `json:"final_error"`
+		StartedAt     string  `json:"started_at"`
+		FinishedAt    string  `json:"finished_at"`
+	}
+	return json.Marshal(jobHistoryJSON{
+		ID:            j.ID,
+		FileID:        j.FileID,
+		Path:          j.Path,
 		Kind:          j.Kind,
 		TriggerSource: string(j.TriggerSource),
 		Result:        string(j.Result),
@@ -259,15 +179,14 @@ func (b BackupView) MarshalJSON() ([]byte, error) {
 	})
 }
 
-func optionalString[T ~string](value T) *string {
-	if value == "" {
-		return nil
-	}
-	text := string(value)
-	return &text
+type OutcomeCounts struct {
+	Compatible int
+	Processed  int
+	Failed     int
+	Restored   int
 }
 
-type TranscodeStats struct {
+type ProcessJobStats struct {
 	Succeeded int
 	Failed    int
 }

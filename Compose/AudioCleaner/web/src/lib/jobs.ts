@@ -1,4 +1,4 @@
-import type { HistoryRecord, JobRecord } from './types'
+import type { HistoryRecord } from './types'
 import type { PageResult } from './types'
 
 export type JobFilter = 'all' | 'compatible' | 'processing' | 'processed' | 'failed' | 'restored'
@@ -19,14 +19,7 @@ export interface HistoryJobSummary {
   successRate: number
 }
 
-export interface JobsRequestPlan {
-  page: number
-  pageSize: number
-  localPagination: boolean
-}
-
 type JobLike = Partial<HistoryRecord>
-type FailureCauseLike = Partial<Pick<JobRecord, 'failure_cause'>>
 
 export function jobID(job: JobLike): number {
   return job.id ?? 0
@@ -52,15 +45,23 @@ export function jobDirectory(job: JobLike): string {
 }
 
 export function jobStatus(job: JobLike): string {
-  return job.status ?? ''
+  if (job.kind === 'restore' && job.result === 'succeeded') {
+    return 'restored'
+  }
+  switch (job.result) {
+    case 'succeeded':
+      return 'processed'
+    case 'compatible':
+    case 'processing':
+    case 'failed':
+      return job.result
+    default:
+      return job.result ?? ''
+  }
 }
 
 export function jobDiscoverySource(job: JobLike): string {
-  return job.discovery_source ?? ''
-}
-
-export function jobFailureCause(job: FailureCauseLike): string {
-  return job.failure_cause ?? ''
+  return job.trigger_source ?? ''
 }
 
 export function jobFilterKey(job: JobLike): Exclude<JobFilter, 'all'> | null {
@@ -75,20 +76,6 @@ export function jobFilterKey(job: JobLike): Exclude<JobFilter, 'all'> | null {
     return status
   }
   return null
-}
-
-export function jobFailureCauseLabelKey(cause: string): string | null {
-  const keys: Record<string, string> = {
-    failed: 'jobFailureCauseFailed',
-    unsupported: 'jobFailureCauseUnsupported',
-    ffprobe_error: 'jobFailureCauseFfprobeError',
-    verification_failed: 'jobFailureCauseVerificationFailed',
-    timeout: 'jobFailureCauseTimeout',
-    restore_stat_error: 'jobFailureCauseRestoreStatError',
-    restore_probe_error: 'jobFailureCauseRestoreProbeError',
-    restored_requires_transcoding: 'jobFailureCauseRestoredRequiresTranscoding'
-  }
-  return keys[cause] ?? null
 }
 
 export function jobDiscoverySourceLabelKey(source: string): string | null {
@@ -106,15 +93,6 @@ export function jobDiscoverySourceDisplay(source: string, translate: (key: strin
   }
   const key = jobDiscoverySourceLabelKey(source)
   return key ? translate(key) : source
-}
-
-export function filterJobs<T extends JobLike>(jobs: T[], filter: JobFilter, keyword: string): T[] {
-  const normalizedKeyword = keyword.trim().toLowerCase()
-  return jobs.filter((job) => {
-    const matchesFilter = filter === 'all' || jobFilterKey(job) === filter
-    const matchesKeyword = !normalizedKeyword || jobPath(job).toLowerCase().includes(normalizedKeyword)
-    return matchesFilter && matchesKeyword
-  })
 }
 
 export function historyJobSummary(jobs: JobLike[]): HistoryJobSummary {
@@ -139,7 +117,7 @@ export function filterHistoryJobs<T extends JobLike>(jobs: T[], filter: HistoryF
   return jobs.filter((job) => {
     const matchesResult = filter.result === 'all' || jobFilterKey(job) === filter.result
     const matchesSource = filter.source === 'all' || jobDiscoverySource(job) === filter.source
-    const updatedDate = datePart(job.updated_at)
+    const updatedDate = datePart(job.finished_at || job.started_at)
     const matchesDateFrom = !filter.dateFrom || (!!updatedDate && updatedDate >= filter.dateFrom)
     const matchesDateTo = !filter.dateTo || (!!updatedDate && updatedDate <= filter.dateTo)
     const searchable = `${jobID(job)} ${jobPath(job)} ${jobBasename(job)}`.toLowerCase()
@@ -191,14 +169,5 @@ export async function loadAllJobPages<T>(
     page: 1,
     page_size: pageSize,
     total: lastResult ? total : 0
-  }
-}
-
-export function jobsRequestPlan(page: number, pageSize: number, filter: JobFilter, keyword: string): JobsRequestPlan {
-  const localPagination = filter !== 'all' || keyword.trim().length > 0
-  return {
-    page: localPagination ? 1 : page,
-    pageSize: localPagination ? 1000 : pageSize,
-    localPagination
   }
 }

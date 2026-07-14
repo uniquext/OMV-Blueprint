@@ -1,5 +1,3 @@
-import type { JobPhase } from './types'
-
 export type SemanticTone = 'success' | 'danger' | 'info' | 'warning' | 'restored' | 'muted' | 'backup'
 
 export function semanticBadgeClass(tone: SemanticTone): string {
@@ -32,25 +30,6 @@ export function backupAvailabilityTone(availability: string): SemanticTone {
       return 'danger'
     case 'expired':
       return 'warning'
-    default:
-      return 'muted'
-  }
-}
-
-export function jobPhaseTone(phase: JobPhase | string): SemanticTone {
-  switch (phase) {
-    case 'pending':
-      return 'muted'
-    case 'queued':
-    case 'retry_wait':
-      return 'warning'
-    case 'checking':
-    case 'transcoding':
-    case 'verifying':
-    case 'replacing':
-      return 'info'
-    case 'backing_up':
-      return 'backup'
     default:
       return 'muted'
   }
