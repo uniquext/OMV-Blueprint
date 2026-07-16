@@ -27,6 +27,7 @@ type MediaConfig struct {
 }
 
 type AudioConfig struct {
+	Version            int      `json:"version"`
 	IncompatibleCodecs []string `json:"incompatible_codecs"`
 }
 
@@ -71,6 +72,7 @@ func Default() Config {
 			ExcludePatterns: []string{},
 		},
 		Audio: AudioConfig{
+			Version:            1,
 			IncompatibleCodecs: []string{"dts", "truehd", "eac3", "ac3", "dca", "dtshd"},
 		},
 		Pipeline: PipelineConfig{
@@ -113,6 +115,9 @@ func (c Config) Validate() error {
 		if len(ext) == 0 || ext[0] != '.' {
 			return fmt.Errorf("media extension %q must start with dot", ext)
 		}
+	}
+	if c.Audio.Version < 1 {
+		return errors.New("audio version must be at least 1")
 	}
 	if c.Pipeline.Workers < 1 {
 		return errors.New("pipeline workers must be at least 1")

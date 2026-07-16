@@ -45,13 +45,16 @@ func (r *Repository) Close() error {
 }
 
 func (r *Repository) UpsertFile(ctx context.Context, file FileFacts) (FileFacts, error) {
-	now := time.Now().UTC()
+	now := time.Now()
 	return upsertFile(ctx, r.db, file, now)
 }
 
 func upsertFile(ctx context.Context, queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, file FileFacts, now time.Time) (FileFacts, error) {
+	if err := validateFileCompliance(file); err != nil {
+		return FileFacts{}, err
+	}
 	createdAt := file.CreatedAt
 	if createdAt.IsZero() {
 		createdAt = now
@@ -67,18 +70,23 @@ INSERT INTO files (
   mtime_ns,
   audio_signature,
   video_signature,
+  compliance_status,
+  audio_policy_version,
   created_at,
   updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(file_path) DO UPDATE SET
   size = excluded.size,
   mtime_ns = excluded.mtime_ns,
   audio_signature = excluded.audio_signature,
   video_signature = excluded.video_signature,
+  compliance_status = excluded.compliance_status,
+  audio_policy_version = excluded.audio_policy_version,
   updated_at = ?
 RETURNING `+fileSelectColumns, file.Path,
 		file.Size, file.MTimeNS, nullableString(file.AudioSignature),
-		nullableString(file.VideoSignature), formatTime(createdAt), formatTime(updatedAt),
+		nullableString(file.VideoSignature), nullableString(string(file.ComplianceStatus)),
+		nullableInt64(int64(file.AudioPolicyVersion)), formatTime(createdAt), formatTime(updatedAt),
 		formatTime(now))
 
 	persisted, err := scanFileFacts(row)
@@ -88,28 +96,25 @@ RETURNING `+fileSelectColumns, file.Path,
 	return persisted, nil
 }
 
+func validateFileCompliance(file FileFacts) error {
+	switch file.ComplianceStatus {
+	case ComplianceUnknown:
+		if file.AudioPolicyVersion != 0 {
+			return errors.New("unknown compliance status requires an unknown audio policy version")
+		}
+	case ComplianceCompliant, ComplianceNoncompliant:
+		if file.AudioPolicyVersion < 1 {
+			return errors.New("known compliance status requires a positive audio policy version")
+		}
+	default:
+		return fmt.Errorf("invalid compliance status %q", file.ComplianceStatus)
+	}
+	return nil
+}
+
 func (r *Repository) FileByPath(ctx context.Context, path string) (FileFacts, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT `+fileSelectColumns+` FROM files WHERE file_path = ?`, path)
 	return scanFileFacts(row)
-}
-
-func (r *Repository) FileBaselineByPath(ctx context.Context, path string) (FileBaseline, error) {
-	file, err := r.FileByPath(ctx, path)
-	if err != nil {
-		return FileBaseline{}, err
-	}
-	job, err := scanJob(r.db.QueryRowContext(ctx, `SELECT `+jobSelectColumns+`
-		FROM jobs
-		WHERE file_id = ?
-		ORDER BY started_at DESC, id DESC
-		LIMIT 1`, file.ID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return FileBaseline{File: file}, nil
-	}
-	if err != nil {
-		return FileBaseline{}, err
-	}
-	return FileBaseline{File: file, LatestJob: &job}, nil
 }
 
 func (r *Repository) History(ctx context.Context) ([]JobHistoryRecord, error) {
@@ -146,24 +151,17 @@ func (r *Repository) HistoryPage(ctx context.Context, req PageRequest) (PageResu
 	return PageResult[JobHistoryRecord]{Items: items, Page: req.Page, PageSize: req.PageSize, Total: total}, nil
 }
 
-func (r *Repository) LatestOutcomeCounts(ctx context.Context) (OutcomeCounts, error) {
+func (r *Repository) JobOutcomeCounts(ctx context.Context) (OutcomeCounts, error) {
 	var counts OutcomeCounts
 	err := r.db.QueryRowContext(ctx, `
 	SELECT
-	  COALESCE(SUM(CASE WHEN jobs.result = 'compatible' THEN 1 ELSE 0 END), 0),
-	  COALESCE(SUM(CASE WHEN jobs.kind = 'process' AND jobs.result = 'succeeded' THEN 1 ELSE 0 END), 0),
-	  COALESCE(SUM(CASE WHEN jobs.result = 'failed' THEN 1 ELSE 0 END), 0),
-	  COALESCE(SUM(CASE WHEN jobs.kind = 'restore' AND jobs.result = 'succeeded' THEN 1 ELSE 0 END), 0)
-	FROM jobs
-	WHERE jobs.id = (
-	  SELECT latest_jobs.id
-	  FROM jobs AS latest_jobs
-	  WHERE latest_jobs.file_id = jobs.file_id
-	  ORDER BY latest_jobs.started_at DESC, latest_jobs.id DESC
-	  LIMIT 1
-	)`).Scan(&counts.Compatible, &counts.Processed, &counts.Failed, &counts.Restored)
+	  COALESCE(SUM(CASE WHEN kind = 'process' AND result = 'compatible' THEN 1 ELSE 0 END), 0),
+	  COALESCE(SUM(CASE WHEN kind = 'process' AND result = 'succeeded' THEN 1 ELSE 0 END), 0),
+	  COALESCE(SUM(CASE WHEN result = 'failed' THEN 1 ELSE 0 END), 0),
+	  COALESCE(SUM(CASE WHEN kind = 'restore' AND result = 'succeeded' THEN 1 ELSE 0 END), 0)
+	FROM jobs`).Scan(&counts.Compatible, &counts.Processed, &counts.Failed, &counts.Restored)
 	if err != nil {
-		return OutcomeCounts{}, fmt.Errorf("query latest outcome counts: %w", err)
+		return OutcomeCounts{}, fmt.Errorf("query job outcome counts: %w", err)
 	}
 	return counts, nil
 }
@@ -183,7 +181,34 @@ func (r *Repository) ProcessJobStats(ctx context.Context) (ProcessJobStats, erro
 }
 
 func (r *Repository) AddJob(ctx context.Context, job JobRecord) (JobRecord, error) {
-	return addJob(ctx, r.db, job, time.Now().UTC())
+	return addJob(ctx, r.db, job, time.Now())
+}
+
+func (r *Repository) StartProcessJob(ctx context.Context, file FileFacts, source DiscoverySource) (FileFacts, JobRecord, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return FileFacts{}, JobRecord{}, fmt.Errorf("begin process job transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now()
+	persisted, err := upsertFile(ctx, tx, file, now)
+	if err != nil {
+		return FileFacts{}, JobRecord{}, err
+	}
+	job, err := addJob(ctx, tx, JobRecord{
+		FileID:        persisted.ID,
+		Kind:          JobKindProcess,
+		TriggerSource: source,
+		Result:        JobResultProcessing,
+	}, now)
+	if err != nil {
+		return FileFacts{}, JobRecord{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return FileFacts{}, JobRecord{}, fmt.Errorf("commit process job transaction: %w", err)
+	}
+	return persisted, job, nil
 }
 
 func addJob(ctx context.Context, queryer interface {
@@ -228,16 +253,91 @@ RETURNING `+jobSelectColumns,
 }
 
 func (r *Repository) FinishJob(ctx context.Context, id int64, result JobResult, finalError string) (JobRecord, error) {
-	row := r.db.QueryRowContext(ctx, `
+	return finishJob(ctx, r.db, id, result, finalError, time.Now())
+}
+
+func finishJob(ctx context.Context, queryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, id int64, result JobResult, finalError string, now time.Time) (JobRecord, error) {
+	row := queryer.QueryRowContext(ctx, `
 UPDATE jobs
 SET result = ?, final_error = ?, finished_at = ?
 WHERE id = ?
 RETURNING `+jobSelectColumns,
 		string(result),
 		nullableString(finalError),
-		formatTime(time.Now().UTC()),
+		formatTime(now),
 		id)
 	return scanJob(row)
+}
+
+func (r *Repository) FinishProcessJob(ctx context.Context, id int64, file FileFacts, result JobResult, finalError string, backup *BackupRecord) (FileFacts, JobRecord, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return FileFacts{}, JobRecord{}, fmt.Errorf("begin finish process job transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now()
+	persisted, err := upsertFile(ctx, tx, file, now)
+	if err != nil {
+		return FileFacts{}, JobRecord{}, err
+	}
+	var jobFileID int64
+	if err := tx.QueryRowContext(ctx, `SELECT file_id FROM jobs WHERE id = ?`, id).Scan(&jobFileID); err != nil {
+		return FileFacts{}, JobRecord{}, fmt.Errorf("load process job file: %w", err)
+	}
+	if jobFileID != persisted.ID {
+		return FileFacts{}, JobRecord{}, fmt.Errorf("process job %d belongs to file %d, not %d", id, jobFileID, persisted.ID)
+	}
+	if backup != nil {
+		record := *backup
+		record.CreatedByJobID = id
+		if err := addBackup(ctx, tx, record, now); err != nil {
+			return FileFacts{}, JobRecord{}, err
+		}
+	}
+	job, err := finishJob(ctx, tx, id, result, finalError, now)
+	if err != nil {
+		return FileFacts{}, JobRecord{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return FileFacts{}, JobRecord{}, fmt.Errorf("commit finish process job transaction: %w", err)
+	}
+	return persisted, job, nil
+}
+
+func (r *Repository) FailProcessingJob(ctx context.Context, id int64, finalError string) (FileFacts, JobRecord, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return FileFacts{}, JobRecord{}, fmt.Errorf("begin fail processing job transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	file, err := scanFileFacts(tx.QueryRowContext(ctx, `SELECT `+qualifiedFileSelectColumns+`
+FROM files
+JOIN jobs ON jobs.file_id = files.id
+WHERE jobs.id = ? AND jobs.result = ?`, id, string(JobResultProcessing)))
+	if err != nil {
+		return FileFacts{}, JobRecord{}, fmt.Errorf("load processing job file: %w", err)
+	}
+	file.AudioSignature = ""
+	file.VideoSignature = ""
+	file.ComplianceStatus = ComplianceUnknown
+	file.AudioPolicyVersion = 0
+	now := time.Now()
+	persisted, err := upsertFile(ctx, tx, file, now)
+	if err != nil {
+		return FileFacts{}, JobRecord{}, err
+	}
+	job, err := finishJob(ctx, tx, id, JobResultFailed, finalError, now)
+	if err != nil {
+		return FileFacts{}, JobRecord{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return FileFacts{}, JobRecord{}, fmt.Errorf("commit fail processing job transaction: %w", err)
+	}
+	return persisted, job, nil
 }
 
 func (r *Repository) ProcessingJobs(ctx context.Context) ([]JobRecord, error) {
@@ -250,15 +350,21 @@ func (r *Repository) ProcessingJobs(ctx context.Context) ([]JobRecord, error) {
 }
 
 func (r *Repository) AddBackup(ctx context.Context, backup BackupRecord) error {
+	return addBackup(ctx, r.db, backup, time.Now())
+}
+
+func addBackup(ctx context.Context, execer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, backup BackupRecord, now time.Time) error {
 	createdAt := backup.CreatedAt
 	if createdAt.IsZero() {
-		createdAt = time.Now().UTC()
+		createdAt = now
 	}
 	if backup.CreatedByJobID == 0 {
 		return errors.New("created_by_job_id is required")
 	}
 
-	_, err := r.db.ExecContext(ctx, `
+	_, err := execer.ExecContext(ctx, `
 	INSERT INTO backups (
 	  created_by_job_id,
 	  backup_path,
@@ -326,7 +432,7 @@ func (r *Repository) RecordRestore(ctx context.Context, backupID int64, safetyPa
 	}
 	defer tx.Rollback()
 
-	now := time.Now().UTC()
+	now := time.Now()
 	persisted, err := upsertFile(ctx, tx, file, now)
 	if err != nil {
 		return FileFacts{}, JobRecord{}, err
@@ -386,28 +492,138 @@ func (r *Repository) init(ctx context.Context) error {
 		}
 	}
 
-	for _, stmt := range schemaStatements {
-		if _, err := r.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("initialize sqlite schema: %w", err)
+	var version int
+	if err := r.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		return fmt.Errorf("read sqlite schema version: %w", err)
+	}
+	hasFiles, err := tableExists(ctx, r.db, "files")
+	if err != nil {
+		return err
+	}
+	if !hasFiles {
+		if version != 0 {
+			return fmt.Errorf("unsupported sqlite schema version %d without files table", version)
 		}
+		for _, stmt := range schemaStatements {
+			if _, err := r.db.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("initialize sqlite schema: %w", err)
+			}
+		}
+		if err := r.validateSchema(ctx); err != nil {
+			return err
+		}
+		if _, err := r.db.ExecContext(ctx, `PRAGMA user_version = 2`); err != nil {
+			return fmt.Errorf("set sqlite schema version: %w", err)
+		}
+		return r.normalizeStoredTimes(ctx)
+	}
+
+	switch version {
+	case 1:
+		if err := r.validateSchemaColumns(ctx, schemaV1Columns); err != nil {
+			return err
+		}
+		if err := r.migrateV1ToV2(ctx); err != nil {
+			return err
+		}
+	case 2:
+		// Already current.
+	default:
+		if err := r.validateSchema(ctx); err != nil {
+			return err
+		}
+		return fmt.Errorf("unsupported sqlite schema version %d", version)
 	}
 	if err := r.validateSchema(ctx); err != nil {
 		return err
 	}
-	if _, err := r.db.ExecContext(ctx, `PRAGMA user_version = 1`); err != nil {
-		return fmt.Errorf("set sqlite schema version: %w", err)
-	}
+	return r.normalizeStoredTimes(ctx)
+}
 
+type storedTimeColumn struct {
+	table  string
+	column string
+}
+
+func (r *Repository) normalizeStoredTimes(ctx context.Context) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin stored time normalization: %w", err)
+	}
+	defer tx.Rollback()
+
+	columns := []storedTimeColumn{
+		{table: "files", column: "created_at"},
+		{table: "files", column: "updated_at"},
+		{table: "jobs", column: "started_at"},
+		{table: "jobs", column: "finished_at"},
+		{table: "backups", column: "created_at"},
+	}
+	for _, target := range columns {
+		if err := normalizeStoredTimeColumn(ctx, tx, target); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit stored time normalization: %w", err)
+	}
+	return nil
+}
+
+func normalizeStoredTimeColumn(ctx context.Context, tx *sql.Tx, target storedTimeColumn) error {
+	query := fmt.Sprintf("SELECT id, %s FROM %s", target.column, target.table)
+	rows, err := tx.QueryContext(ctx, query)
+	if err != nil {
+		return fmt.Errorf("load %s.%s timestamps: %w", target.table, target.column, err)
+	}
+	type storedTimeUpdate struct {
+		id    int64
+		value string
+	}
+	updates := make([]storedTimeUpdate, 0)
+	for rows.Next() {
+		var id int64
+		var raw sql.NullString
+		if err := rows.Scan(&id, &raw); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan %s.%s timestamp: %w", target.table, target.column, err)
+		}
+		if !raw.Valid {
+			continue
+		}
+		parsed, err := parseTime(raw.String)
+		if err != nil {
+			rows.Close()
+			return fmt.Errorf("parse %s.%s timestamp for id %d: %w", target.table, target.column, id, err)
+		}
+		formatted := formatTime(parsed)
+		if formatted != raw.String {
+			updates = append(updates, storedTimeUpdate{id: id, value: formatted})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate %s.%s timestamps: %w", target.table, target.column, err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close %s.%s timestamps: %w", target.table, target.column, err)
+	}
+	for _, update := range updates {
+		statement := fmt.Sprintf("UPDATE %s SET %s = ? WHERE id = ?", target.table, target.column)
+		if _, err := tx.ExecContext(ctx, statement, update.value, update.id); err != nil {
+			return fmt.Errorf("normalize %s.%s timestamp for id %d: %w", target.table, target.column, update.id, err)
+		}
+	}
 	return nil
 }
 
 func (r *Repository) validateSchema(ctx context.Context) error {
-	expected := map[string][]string{
-		"files":   {"id", "file_path", "size", "mtime_ns", "audio_signature", "video_signature", "created_at", "updated_at"},
-		"jobs":    {"id", "file_id", "kind", "trigger_source", "result", "final_error", "started_at", "finished_at"},
-		"backups": {"id", "created_by_job_id", "backup_path", "created_at", "restored_by_job_id", "restore_safety_path"},
-	}
-	for table, want := range expected {
+	return r.validateSchemaColumns(ctx, schemaV2Columns)
+}
+
+func (r *Repository) validateSchemaColumns(ctx context.Context, expected map[string][]string) error {
+	for _, table := range []string{"files", "jobs", "backups"} {
+		want := expected[table]
 		rows, err := r.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
 		if err != nil {
 			return fmt.Errorf("inspect %s schema: %w", table, err)
@@ -439,6 +655,62 @@ func (r *Repository) validateSchema(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (r *Repository) migrateV1ToV2(ctx context.Context) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin sqlite v1 to v2 migration: %w", err)
+	}
+	defer tx.Rollback()
+	statements := []string{
+		`ALTER TABLE files ADD COLUMN compliance_status TEXT NULL
+CHECK (compliance_status IS NULL OR compliance_status IN ('compliant', 'noncompliant'))`,
+		`ALTER TABLE files ADD COLUMN audio_policy_version INTEGER NULL
+CHECK (
+  (compliance_status IS NULL AND audio_policy_version IS NULL)
+  OR (
+    compliance_status IS NOT NULL
+    AND
+    compliance_status IN ('compliant', 'noncompliant')
+    AND typeof(audio_policy_version) = 'integer'
+    AND audio_policy_version >= 1
+  )
+)`,
+		`PRAGMA user_version = 2`,
+	}
+	for _, stmt := range statements {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("migrate sqlite v1 to v2: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit sqlite v1 to v2 migration: %w", err)
+	}
+	return nil
+}
+
+func tableExists(ctx context.Context, db *sql.DB, table string) (bool, error) {
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
+		return false, fmt.Errorf("inspect sqlite table %s: %w", table, err)
+	}
+	return count == 1, nil
+}
+
+var schemaV1Columns = map[string][]string{
+	"files":   {"id", "file_path", "size", "mtime_ns", "audio_signature", "video_signature", "created_at", "updated_at"},
+	"jobs":    {"id", "file_id", "kind", "trigger_source", "result", "final_error", "started_at", "finished_at"},
+	"backups": {"id", "created_by_job_id", "backup_path", "created_at", "restored_by_job_id", "restore_safety_path"},
+}
+
+var schemaV2Columns = map[string][]string{
+	"files": {
+		"id", "file_path", "size", "mtime_ns", "audio_signature", "video_signature",
+		"created_at", "updated_at", "compliance_status", "audio_policy_version",
+	},
+	"jobs":    {"id", "file_id", "kind", "trigger_source", "result", "final_error", "started_at", "finished_at"},
+	"backups": {"id", "created_by_job_id", "backup_path", "created_at", "restored_by_job_id", "restore_safety_path"},
 }
 
 func ensureParentDir(path string) error {
@@ -491,6 +763,8 @@ func scanFileFacts(row rowScanner) (FileFacts, error) {
 	var mtimeNS sql.NullInt64
 	var audioSignature sql.NullString
 	var videoSignature sql.NullString
+	var complianceStatus sql.NullString
+	var audioPolicyVersion sql.NullInt64
 	var createdAt string
 	var updatedAt string
 
@@ -501,6 +775,8 @@ func scanFileFacts(row rowScanner) (FileFacts, error) {
 		&mtimeNS,
 		&audioSignature,
 		&videoSignature,
+		&complianceStatus,
+		&audioPolicyVersion,
 		&createdAt,
 		&updatedAt,
 	)
@@ -521,6 +797,8 @@ func scanFileFacts(row rowScanner) (FileFacts, error) {
 	file.MTimeNS = nullableInt64Value(mtimeNS)
 	file.AudioSignature = nullableStringValue(audioSignature)
 	file.VideoSignature = nullableStringValue(videoSignature)
+	file.ComplianceStatus = ComplianceStatus(nullableStringValue(complianceStatus))
+	file.AudioPolicyVersion = int(nullableInt64Value(audioPolicyVersion))
 	return file, nil
 }
 
@@ -684,7 +962,7 @@ func formatTime(t time.Time) string {
 	if t.IsZero() {
 		return ""
 	}
-	return t.UTC().Format(time.RFC3339Nano)
+	return t.In(time.Local).Format(time.RFC3339Nano)
 }
 
 func parseTime(value string) (time.Time, error) {
@@ -743,8 +1021,22 @@ const fileSelectColumns = `
   mtime_ns,
   audio_signature,
   video_signature,
+  compliance_status,
+  audio_policy_version,
   created_at,
   updated_at`
+
+const qualifiedFileSelectColumns = `
+  files.id,
+  files.file_path,
+  files.size,
+  files.mtime_ns,
+  files.audio_signature,
+  files.video_signature,
+  files.compliance_status,
+  files.audio_policy_version,
+  files.created_at,
+  files.updated_at`
 
 const historySelectColumns = `
 	  jobs.id,
@@ -792,7 +1084,20 @@ var schemaStatements = []string{
   audio_signature TEXT,
   video_signature TEXT,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  compliance_status TEXT NULL CHECK (
+    compliance_status IS NULL
+    OR compliance_status IN ('compliant', 'noncompliant')
+  ),
+  audio_policy_version INTEGER NULL CHECK (
+    (compliance_status IS NULL AND audio_policy_version IS NULL)
+    OR (
+      compliance_status IS NOT NULL
+      AND compliance_status IN ('compliant', 'noncompliant')
+      AND typeof(audio_policy_version) = 'integer'
+      AND audio_policy_version >= 1
+    )
+  )
 );`,
 	`CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY,

@@ -20,6 +20,7 @@ import {
   loadAllJobPages
 } from '../lib/jobs'
 import { jobStatusTone, semanticBadgeClass } from '../lib/semantic'
+import { formatServiceTimestamp, serviceDatePart } from '../lib/time'
 import type { HistoryRecord } from '../lib/types'
 
 const emptyValue = computed(() => t('logsNoValue'))
@@ -125,7 +126,7 @@ function displayDate(value: string): string {
 
 function newestHistoryDate(): string {
   const dates = allJobs.value
-    .map((job) => (job.finished_at || job.started_at).slice(0, 10))
+    .map((job) => serviceDatePart(job.finished_at || job.started_at))
     .filter(Boolean)
     .sort()
   return dates.at(-1) ?? localToday()
@@ -259,23 +260,12 @@ function sourceFilterLabel(source: string): string {
   return source === 'all' ? t('historyFilterAllSources') : jobDiscoverySourceDisplay(source, t)
 }
 
-function historyDate(value: string, includeSeconds: boolean): string {
-  if (!value) {
-    return emptyValue.value
-  }
-  const normalized = value
-    .replace('T', ' ')
-    .replace(/\.\d+Z?$/, '')
-    .replace(/Z$/, '')
-  return includeSeconds ? normalized.slice(0, 19) : normalized.slice(0, 16)
-}
-
 function jobTableDate(job: HistoryRecord): string {
-  return historyDate(job.finished_at || job.started_at, false)
+  return formatServiceTimestamp(job.finished_at || job.started_at, true) || emptyValue.value
 }
 
 function jobDetailDate(job: HistoryRecord): string {
-  return historyDate(job.finished_at || job.started_at, true)
+  return formatServiceTimestamp(job.finished_at || job.started_at, true) || emptyValue.value
 }
 
 function jobErrorSummary(job: HistoryRecord): string {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -17,8 +18,7 @@ import (
 )
 
 var (
-	ErrProcessing            = errors.New("file is currently processing")
-	ErrConfigWriteInProgress = errors.New("config write already in progress")
+	ErrProcessing = errors.New("file is currently processing")
 )
 
 type invalidConfigError struct {
@@ -42,6 +42,7 @@ type Deps struct {
 	Config     config.Config
 	ConfigPath string
 	WebDir     string
+	Logf       func(string, ...any)
 	Events     *eventbus.Bus
 	EventBus   *eventbus.Bus
 
@@ -165,11 +166,13 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.updateConfig(cfg); err != nil {
+	updated, changed, err := s.updateConfig(cfg)
+	if err != nil {
 		writeDependencyResult(w, nil, err)
 		return
 	}
-	if s.deps.RequestRestart != nil {
+	cfg = updated
+	if changed && s.deps.RequestRestart != nil {
 		writeJSON(w, http.StatusOK, Response{
 			Code:    0,
 			Message: "restarting",
@@ -199,7 +202,7 @@ func (s *Server) handlePatchUIConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ui language must not be empty")
 		return
 	}
-	cfg, err := s.updateConfigBlock(func(cfg *config.Config) error {
+	cfg, _, err := s.updateConfigBlock(func(cfg *config.Config) error {
 		cfg.UI.Language = *payload.Language
 		return nil
 	})
@@ -223,7 +226,7 @@ func (s *Server) handlePatchBackupConfig(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "backup retention days is required")
 		return
 	}
-	cfg, err := s.updateConfigBlock(func(cfg *config.Config) error {
+	cfg, changed, err := s.updateConfigBlock(func(cfg *config.Config) error {
 		cfg.Backup.RetentionDays = *payload.RetentionDays
 		return nil
 	})
@@ -231,7 +234,7 @@ func (s *Server) handlePatchBackupConfig(w http.ResponseWriter, r *http.Request)
 		writeDependencyResult(w, nil, err)
 		return
 	}
-	if s.deps.RequestRestart != nil {
+	if changed && s.deps.RequestRestart != nil {
 		writeJSON(w, http.StatusOK, Response{
 			Code:    0,
 			Message: "restarting",
@@ -309,10 +312,6 @@ func writeDependencyResult(w http.ResponseWriter, data any, err error) {
 	}
 	if errors.Is(err, ErrProcessing) {
 		writeError(w, http.StatusConflict, ErrProcessing.Error())
-		return
-	}
-	if errors.Is(err, ErrConfigWriteInProgress) {
-		writeError(w, http.StatusConflict, ErrConfigWriteInProgress.Error())
 		return
 	}
 	var invalidConfig invalidConfigError
@@ -437,28 +436,17 @@ func (s *Server) config() config.Config {
 	return s.deps.Config
 }
 
-func (s *Server) updateConfig(cfg config.Config) error {
-	if !s.configWriteMu.TryLock() {
-		return ErrConfigWriteInProgress
-	}
+func (s *Server) updateConfig(cfg config.Config) (config.Config, bool, error) {
+	s.configWriteMu.Lock()
 	defer s.configWriteMu.Unlock()
 
 	s.configMu.Lock()
 	defer s.configMu.Unlock()
-
-	if s.deps.ConfigPath != "" {
-		if err := config.AtomicWriteJSON(s.deps.ConfigPath, cfg); err != nil {
-			return err
-		}
-	}
-	s.deps.Config = cfg
-	return nil
+	return s.persistConfigLocked(cfg)
 }
 
-func (s *Server) updateConfigBlock(mutate func(*config.Config) error) (config.Config, error) {
-	if !s.configWriteMu.TryLock() {
-		return config.Config{}, ErrConfigWriteInProgress
-	}
+func (s *Server) updateConfigBlock(mutate func(*config.Config) error) (config.Config, bool, error) {
+	s.configWriteMu.Lock()
 	defer s.configWriteMu.Unlock()
 
 	s.configMu.Lock()
@@ -466,17 +454,36 @@ func (s *Server) updateConfigBlock(mutate func(*config.Config) error) (config.Co
 
 	cfg := s.deps.Config
 	if err := mutate(&cfg); err != nil {
-		return config.Config{}, err
+		return config.Config{}, false, err
+	}
+	return s.persistConfigLocked(cfg)
+}
+
+func (s *Server) persistConfigLocked(cfg config.Config) (config.Config, bool, error) {
+	current := s.deps.Config
+	if cfg.Audio.Version != current.Audio.Version {
+		return config.Config{}, false, invalidConfigError{err: errors.New("audio version is read-only")}
+	}
+	if config.AudioContentEqual(current.Audio, cfg.Audio) {
+		cfg.Audio = current.Audio
+	} else {
+		cfg.Audio.Version = config.NextAudioVersion(current.Audio.Version)
 	}
 	cfg.Normalize()
 	if err := cfg.Validate(); err != nil {
-		return config.Config{}, invalidConfigError{err: err}
+		return config.Config{}, false, invalidConfigError{err: err}
+	}
+	if reflect.DeepEqual(current, cfg) {
+		return current, false, nil
 	}
 	if s.deps.ConfigPath != "" {
 		if err := config.AtomicWriteJSON(s.deps.ConfigPath, cfg); err != nil {
-			return config.Config{}, err
+			return config.Config{}, false, err
 		}
 	}
 	s.deps.Config = cfg
-	return cfg, nil
+	if cfg.Audio.Version != current.Audio.Version && s.deps.Logf != nil {
+		s.deps.Logf("audio config version %d -> %d", current.Audio.Version, cfg.Audio.Version)
+	}
+	return cfg, true, nil
 }

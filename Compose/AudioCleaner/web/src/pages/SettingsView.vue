@@ -121,6 +121,8 @@ onMounted(loadConfig)
           <h2>{{ t('settingsBlockAudio') }}</h2>
           <p class="muted">{{ t('settingsAudioDescription') }}</p>
           <dl class="settings-list">
+            <dt>{{ t('settingsAudioVersion') }}</dt>
+            <dd>{{ config.audio.version }}</dd>
             <dt>{{ t('settingsIncompatibleCodecs') }}</dt>
             <dd>{{ joinValue(config.audio.incompatible_codecs) }}</dd>
           </dl>

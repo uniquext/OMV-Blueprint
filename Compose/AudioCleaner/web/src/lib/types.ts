@@ -37,6 +37,7 @@ export interface MediaConfig {
 }
 
 export interface AudioConfig {
+  version: number
   incompatible_codecs: string[]
 }
 

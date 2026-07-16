@@ -9,6 +9,7 @@ type DiscoverySource string
 type BackupAvailability string
 type JobKind string
 type JobResult string
+type ComplianceStatus string
 
 const (
 	DiscoveryScan     DiscoverySource = "scan"
@@ -27,22 +28,23 @@ const (
 	JobResultCompatible JobResult = "compatible"
 	JobResultSucceeded  JobResult = "succeeded"
 	JobResultFailed     JobResult = "failed"
+
+	ComplianceUnknown      ComplianceStatus = ""
+	ComplianceCompliant    ComplianceStatus = "compliant"
+	ComplianceNoncompliant ComplianceStatus = "noncompliant"
 )
 
 type FileFacts struct {
-	ID             int64     `json:"id"`
-	Path           string    `json:"path"`
-	Size           int64     `json:"size"`
-	MTimeNS        int64     `json:"mtime_ns"`
-	AudioSignature string    `json:"audio_signature"`
-	VideoSignature string    `json:"video_signature"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
-}
-
-type FileBaseline struct {
-	File      FileFacts
-	LatestJob *JobRecord
+	ID                 int64            `json:"id"`
+	Path               string           `json:"path"`
+	Size               int64            `json:"size"`
+	MTimeNS            int64            `json:"mtime_ns"`
+	AudioSignature     string           `json:"audio_signature"`
+	VideoSignature     string           `json:"video_signature"`
+	ComplianceStatus   ComplianceStatus `json:"compliance_status"`
+	AudioPolicyVersion int              `json:"audio_policy_version"`
+	CreatedAt          time.Time        `json:"created_at"`
+	UpdatedAt          time.Time        `json:"updated_at"`
 }
 
 type JobRecord struct {

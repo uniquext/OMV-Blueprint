@@ -1,5 +1,6 @@
 import type { HistoryRecord } from './types'
 import type { PageResult } from './types'
+import { serviceDatePart } from './time'
 
 export type JobFilter = 'all' | 'compatible' | 'processing' | 'processed' | 'failed' | 'restored'
 export type HistorySourceFilter = 'all' | string
@@ -108,16 +109,12 @@ export function historyJobSummary(jobs: JobLike[]): HistoryJobSummary {
   }
 }
 
-function datePart(value: string | undefined): string {
-  return value ? value.slice(0, 10) : ''
-}
-
 export function filterHistoryJobs<T extends JobLike>(jobs: T[], filter: HistoryFilter): T[] {
   const normalizedKeyword = filter.keyword.trim().toLowerCase()
   return jobs.filter((job) => {
     const matchesResult = filter.result === 'all' || jobFilterKey(job) === filter.result
     const matchesSource = filter.source === 'all' || jobDiscoverySource(job) === filter.source
-    const updatedDate = datePart(job.finished_at || job.started_at)
+    const updatedDate = serviceDatePart(job.finished_at || job.started_at)
     const matchesDateFrom = !filter.dateFrom || (!!updatedDate && updatedDate >= filter.dateFrom)
     const matchesDateTo = !filter.dateTo || (!!updatedDate && updatedDate <= filter.dateTo)
     const searchable = `${jobID(job)} ${jobPath(job)} ${jobBasename(job)}`.toLowerCase()

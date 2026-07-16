@@ -28,8 +28,8 @@ type RestoreResult struct {
 var (
 	linkFile   = os.Link
 	removeFile = os.Remove
-	nowUTC     = func() time.Time {
-		return time.Now().UTC()
+	nowLocal   = func() time.Time {
+		return time.Now()
 	}
 )
 
@@ -57,7 +57,7 @@ func ReplaceWithBackup(originalPath string, outputPath string, backupRoot string
 	if _, err := regularFileInfo("output path", outputPath); err != nil {
 		return ReplaceResult{}, err
 	}
-	now := nowUTC()
+	now := nowLocal()
 	backupPath, err := backupPathForOriginal(backupRoot, originalPath, now)
 	if err != nil {
 		return ReplaceResult{}, err
@@ -100,7 +100,7 @@ func RestoreBackup(req RestoreRequest) (RestoreResult, error) {
 			return RestoreResult{}, fmt.Errorf("original path is not a regular file: %s", originalPath)
 		}
 		var pathErr error
-		safetyPath, pathErr = uniquePath(originalPath + ".restore-safety." + nowUTC().Format("20060102T150405Z"))
+		safetyPath, pathErr = uniquePath(originalPath + ".restore-safety." + nowLocal().In(time.Local).Format("20060102T150405-0700"))
 		if pathErr != nil {
 			return RestoreResult{}, pathErr
 		}
@@ -143,7 +143,7 @@ func backupPathForOriginal(backupRoot string, originalPath string, timestamp tim
 	cleanOriginal := filepath.Clean(originalPath)
 	relativeOriginal := strings.TrimPrefix(cleanOriginal, filepath.VolumeName(cleanOriginal))
 	relativeOriginal = strings.TrimPrefix(relativeOriginal, string(filepath.Separator))
-	return uniquePath(filepath.Join(backupRoot, timestamp.UTC().Format("20060102T150405Z"), relativeOriginal))
+	return uniquePath(filepath.Join(backupRoot, timestamp.In(time.Local).Format("20060102T150405-0700"), relativeOriginal))
 }
 
 func uniquePath(base string) (string, error) {

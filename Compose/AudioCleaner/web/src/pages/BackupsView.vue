@@ -15,6 +15,7 @@ import {
   type BackupFilter
 } from '../lib/backups'
 import { backupAvailabilityTone, semanticBadgeClass } from '../lib/semantic'
+import { formatServiceTimestamp } from '../lib/time'
 import type { BackupRecord } from '../lib/types'
 
 const backups = ref<BackupRecord[]>([])
@@ -169,6 +170,10 @@ function emptyValue(value: string): string {
   return value || t('backupsEmptyValue')
 }
 
+function backupDate(value: string): string {
+  return emptyValue(formatServiceTimestamp(value, true))
+}
+
 watch(page, () => {
   if (suppressNextPageLoad) {
     suppressNextPageLoad = false
@@ -243,8 +248,8 @@ onMounted(loadBackups)
             <td class="status-cell">
               <span :class="backupStateBadgeClass(backup)">{{ backupStateDisplay(backup) }}</span>
             </td>
-            <td class="date-cell">{{ emptyValue(backup.created_at) }}</td>
-            <td class="date-cell">{{ emptyValue(backupRestoredAt(backup)) }}</td>
+            <td class="date-cell">{{ backupDate(backup.created_at) }}</td>
+            <td class="date-cell">{{ backupDate(backupRestoredAt(backup)) }}</td>
             <td class="actions-cell">
               <div class="row-actions">
                 <button class="button" type="button" :disabled="busy" @click="askRestore(backup)">

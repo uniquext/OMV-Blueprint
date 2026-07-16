@@ -47,7 +47,7 @@ const (
 
 type RecoveryRepository interface {
 	ProcessingJobs(ctx context.Context) ([]repository.JobRecord, error)
-	FinishJob(ctx context.Context, id int64, result repository.JobResult, finalError string) (repository.JobRecord, error)
+	FailProcessingJob(ctx context.Context, id int64, finalError string) (repository.FileFacts, repository.JobRecord, error)
 }
 
 type Options struct {
@@ -120,7 +120,7 @@ func RecoverStartup(ctx context.Context, repo RecoveryRepository) error {
 		return err
 	}
 	for _, job := range jobs {
-		if _, err := repo.FinishJob(ctx, job.ID, repository.JobResultFailed, startupCriticalRecoveryPrefix+"processing; manual review required"); err != nil {
+		if _, _, err := repo.FailProcessingJob(ctx, job.ID, startupCriticalRecoveryPrefix+"processing; manual review required"); err != nil {
 			return err
 		}
 	}
@@ -325,15 +325,15 @@ func (s *Service) startWatcher() error {
 func (s *Service) startWorkers() {
 	for i := 0; i < s.cfg.Pipeline.Workers; i++ {
 		worker := pipeline.NewWorker(pipeline.WorkerDeps{
-			Config:     s.cfg,
-			Repository: s.db,
-			BindJob:    s.queue.BindJob,
-			Runner:     pipeline.ExecRunner{},
-			Prober:     s.prober,
-			Events:     workerEvents{service: s},
-			BackupRoot: s.backupRoot,
-			WorkRoot:   s.workRoot,
-			FFmpegName: s.ffmpegName,
+			ConfigProvider: s.config,
+			Repository:     s.db,
+			BindJob:        s.queue.BindJob,
+			Runner:         pipeline.ExecRunner{},
+			Prober:         s.prober,
+			Events:         workerEvents{service: s},
+			BackupRoot:     s.backupRoot,
+			WorkRoot:       s.workRoot,
+			FFmpegName:     s.ffmpegName,
 		})
 		s.workers.Add(1)
 		go s.workerLoop(worker)
@@ -388,7 +388,14 @@ func (s *Service) workerLoop(worker *pipeline.Worker) {
 						finalError = processErr.Error()
 					}
 					finishCtx, cancelFinish := context.WithTimeout(context.Background(), 30*time.Second)
-					_, finishErr := s.db.FinishJob(finishCtx, result.JobID, repository.JobResultFailed, finalError)
+					_, _, finishErr := s.db.FinishProcessJob(
+						finishCtx,
+						result.JobID,
+						result.FinalFile,
+						repository.JobResultFailed,
+						finalError,
+						result.Backup,
+					)
 					cancelFinish()
 					if finishErr != nil {
 						s.logf("finish failed job id=%d: %v", result.JobID, finishErr)
@@ -449,6 +456,7 @@ func (s *Service) prepareHTTPServer() (net.Listener, error) {
 		Config:         s.cfg,
 		ConfigPath:     s.configPath,
 		WebDir:         s.webDir,
+		Logf:           s.logf,
 		Events:         s.events,
 		ScanAll:        s.ScanAll,
 		RequestRestart: s.RequestRestart,
@@ -534,7 +542,7 @@ func (s *Service) Status(ctx context.Context) (any, error) {
 	case restartFailed:
 		status = "restart_failed"
 	}
-	outcomeCounts, err := s.db.LatestOutcomeCounts(ctx)
+	outcomeCounts, err := s.db.JobOutcomeCounts(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -553,7 +561,7 @@ func (s *Service) Status(ctx context.Context) (any, error) {
 		"restored":   outcomeCounts.Restored,
 	}
 	var backupUsage int64
-	now := time.Now().UTC()
+	now := time.Now()
 	retentionDays := cfg.Backup.RetentionDays
 	for _, record := range backups {
 		if backupAvailability(record, now, retentionDays) != repository.BackupAvailable {
@@ -604,7 +612,7 @@ func (s *Service) ListHistory(ctx context.Context, page *repository.PageRequest)
 }
 
 func (s *Service) ListBackups(ctx context.Context, page *repository.PageRequest) (any, error) {
-	now := time.Now().UTC()
+	now := time.Now()
 	retentionDays := s.config().Backup.RetentionDays
 	if page != nil {
 		result, err := s.db.BackupsPage(ctx, *page)
@@ -701,7 +709,7 @@ func (s *Service) CleanupBackups(ctx context.Context) (any, error) {
 		return nil, err
 	}
 	removed := 0
-	now := time.Now().UTC()
+	now := time.Now()
 	retentionDays := s.config().Backup.RetentionDays
 	for _, record := range records {
 		if !backupExpired(record, now, retentionDays) {
@@ -878,8 +886,10 @@ func (s *Service) persistRestoredFile(backupID int64, safetyPath string, file re
 		file.Size = info.Size()
 		file.MTimeNS = info.ModTime().UnixNano()
 	}
-	file.AudioSignature = probe.AudioSignature()
-	file.VideoSignature = probe.VideoSignature()
+	file.AudioSignature = ""
+	file.VideoSignature = ""
+	file.ComplianceStatus = repository.ComplianceUnknown
+	file.AudioPolicyVersion = 0
 
 	jobResult := repository.JobResultSucceeded
 	finalError := ""
@@ -892,6 +902,28 @@ func (s *Service) persistRestoredFile(backupID int64, safetyPath string, file re
 		jobResult = repository.JobResultFailed
 		status = "failed"
 		finalError = fmt.Sprintf("%s: probe restored file: %v", pipeline.CauseRestoreProbeError, probeErr)
+	} else {
+		file.AudioSignature = probe.AudioSignature()
+		file.VideoSignature = probe.VideoSignature()
+		analysisConfig := s.config()
+		decision := media.Decide(file.Path, probe, media.DecisionConfig{
+			Extensions:         analysisConfig.Media.Extensions,
+			IncompatibleCodecs: analysisConfig.Audio.IncompatibleCodecs,
+		})
+		switch decision.Action {
+		case media.ActionAlreadyCompatible:
+			file.ComplianceStatus = repository.ComplianceCompliant
+			file.AudioPolicyVersion = analysisConfig.Audio.Version
+		case media.ActionTranscode:
+			file.ComplianceStatus = repository.ComplianceNoncompliant
+			file.AudioPolicyVersion = analysisConfig.Audio.Version
+		default:
+			file.AudioSignature = ""
+			file.VideoSignature = ""
+			jobResult = repository.JobResultFailed
+			status = "failed"
+			finalError = fmt.Sprintf("%s: assess restored file: %s", pipeline.CauseUnsupported, decision.Reason)
+		}
 	}
 
 	persistCtx, cancelPersist := context.WithTimeout(context.Background(), s.restorePersistDeadline())
