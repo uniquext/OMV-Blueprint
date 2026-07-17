@@ -1,10 +1,9 @@
 import type {
   ApiEnvelope,
   AudioCleanerConfig,
-  BackupPatchResponse,
-  BackupRecord,
-  CleanupExpiredResponse,
+  FileRecord,
   HistoryRecord,
+  OperationStatusResponse,
   PageRequest,
   PageResult,
   RestoreResult,
@@ -91,12 +90,13 @@ export const api = {
   runtimeLogs: (lines = 100) => request<RuntimeLogResponse>(`/api/logs?lines=${encodeURIComponent(String(lines))}`),
   historyPage: async (page?: PageRequest) =>
     unwrapPage(await request<CollectionResponse<HistoryRecord>>(withPage('/api/history', page)), page),
-  backupsPage: async (page?: PageRequest) =>
-    unwrapPage(await request<CollectionResponse<BackupRecord>>(withPage('/api/backups', page)), page),
-  scan: () => request<ScanResponse>('/api/scan', post()),
-  restore: (id: number) => request<RestoreResult>(`/api/backups/${id}/restore`, post()),
-  cleanupExpired: () => request<CleanupExpiredResponse>('/api/backups/cleanup', post()),
-  patchUI: (language: SupportedLanguage) => request<UIConfig>('/api/config/ui', jsonPatch({ language })),
-  patchBackup: (retentionDays: number) =>
-    request<BackupPatchResponse>('/api/config/backup', jsonPatch({ retention_days: retentionDays }))
+	retryHistoryJob: (id: number) => request<OperationStatusResponse>(`/api/history/${id}/retry`, post()),
+	ignoreHistoryJob: (id: number) => request<OperationStatusResponse>(`/api/history/${id}/ignore`, post()),
+	filesPage: async (page?: PageRequest) =>
+		unwrapPage(await request<CollectionResponse<FileRecord>>(withPage('/api/files', page)), page),
+	processFile: (id: number) => request<ScanResponse>(`/api/files/${id}/process`, post()),
+	scan: () => request<ScanResponse>('/api/scan', post()),
+	restoreFileBackup: (id: number) => request<RestoreResult>(`/api/files/${id}/restore-backup`, post()),
+	deleteFileBackup: (id: number) => request<OperationStatusResponse>(`/api/files/${id}/backup`, { method: 'DELETE' }),
+	patchUI: (language: SupportedLanguage) => request<UIConfig>('/api/config/ui', jsonPatch({ language })),
 }

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,7 +55,11 @@ type WorkerRepository interface {
 	FileByPath(ctx context.Context, path string) (repository.FileFacts, error)
 	StartProcessJob(ctx context.Context, file repository.FileFacts, source repository.DiscoverySource) (repository.FileFacts, repository.JobRecord, error)
 	UpsertFile(ctx context.Context, file repository.FileFacts) (repository.FileFacts, error)
-	FinishProcessJob(ctx context.Context, id int64, file repository.FileFacts, result repository.JobResult, finalError string, backup *repository.BackupRecord) (repository.FileFacts, repository.JobRecord, error)
+	FinishProcessJob(ctx context.Context, id int64, file repository.FileFacts, result repository.JobResult, finalError string) (repository.FileFacts, repository.JobRecord, error)
+	AddReplacementJournal(ctx context.Context, journal repository.ReplacementJournal) error
+	UpdateReplacementPhase(ctx context.Context, jobID int64, phase repository.ReplacementPhase, lastError string) error
+	MarkReplacementBackupReady(ctx context.Context, jobID int64, size int64, mtimeNS int64, audioSignature string, videoSignature string) error
+	DeleteReplacementJournal(ctx context.Context, jobID int64) error
 }
 
 type WorkerProber interface {
@@ -64,7 +67,11 @@ type WorkerProber interface {
 }
 
 type WorkerBackupService interface {
-	Replace(ctx context.Context, originalPath string, outputPath string, backupRoot string) (backup.ReplaceResult, error)
+	TargetPath(req backup.CreateRequest) (string, error)
+	Create(ctx context.Context, req backup.CreateRequest) (backup.CreateResult, error)
+	Install(ctx context.Context, sourcePath string, destinationPath string) error
+	Restore(ctx context.Context, req backup.RestoreRequest) (backup.RestoreResult, error)
+	Remove(path string, backupRoot string) error
 }
 
 type WorkerStatProvider interface {
@@ -96,10 +103,6 @@ type WorkerTempAllocator interface {
 	Allocate(path string) (string, error)
 }
 
-type WorkerSourceCopier interface {
-	Copy(originalPath string, outputPath string) (string, error)
-}
-
 type WorkerDeps struct {
 	ConfigProvider func() config.Config
 	Repository     WorkerRepository
@@ -111,7 +114,6 @@ type WorkerDeps struct {
 	Stat           WorkerStatProvider
 	Stable         WorkerStableChecker
 	Temp           WorkerTempAllocator
-	Source         WorkerSourceCopier
 	BackupRoot     string
 	WorkRoot       string
 	FFmpegName     string
@@ -128,7 +130,6 @@ type Worker struct {
 	stat           WorkerStatProvider
 	stable         WorkerStableChecker
 	temp           WorkerTempAllocator
-	source         WorkerSourceCopier
 	backupRoot     string
 	workRoot       string
 	ffmpegName     string
@@ -138,7 +139,6 @@ type AttemptResult struct {
 	FileID         int64
 	JobID          int64
 	FinalFile      repository.FileFacts
-	Backup         *repository.BackupRecord
 	Retryable      bool
 	LastError      string
 	FinalError     string
@@ -166,10 +166,6 @@ func NewWorker(deps WorkerDeps) *Worker {
 	if temp == nil {
 		temp = defaultTempAllocator{workRoot: deps.WorkRoot}
 	}
-	source := deps.Source
-	if source == nil {
-		source = defaultSourceCopier{}
-	}
 	ffmpegName := deps.FFmpegName
 	if ffmpegName == "" {
 		ffmpegName = "ffmpeg"
@@ -185,7 +181,6 @@ func NewWorker(deps WorkerDeps) *Worker {
 		stat:           stat,
 		stable:         stable,
 		temp:           temp,
-		source:         source,
 		backupRoot:     deps.BackupRoot,
 		workRoot:       deps.WorkRoot,
 		ffmpegName:     ffmpegName,
@@ -212,6 +207,13 @@ func (w *Worker) ProcessAttempt(ctx context.Context, task QueueJob) (AttemptResu
 		file = repository.FileFacts{Path: task.Path}
 	} else if err != nil {
 		return AttemptResult{JobID: task.JobID}, err
+	}
+	if file.BackupFile != "" {
+		w.publish(ctx, WorkerEvent{
+			FileID: file.ID, Path: file.Path, Kind: "diagnostic", Code: "backup_blocked",
+			Attempt: task.AttemptNumber, Message: "skipped file with unresolved backup: " + file.BackupFile,
+		})
+		return AttemptResult{}, nil
 	}
 
 	var preflight *preflightResult
@@ -274,53 +276,97 @@ func (w *Worker) processFile(jobCtx context.Context, persistCtx context.Context,
 	file := result.FinalFile
 	jobID := result.JobID
 	w.publishPhase(persistCtx, file, RuntimeChecking, attempt)
+
 	var originalStat StableStat
-	var originalProbe media.ProbeData
 	if preflight != nil {
 		originalStat = preflight.stat
-		originalProbe = preflight.probe
-		file.Size = originalStat.Size
-		file.MTimeNS = originalStat.MTimeNS
-		file.AudioSignature = originalProbe.AudioSignature()
-		file.VideoSignature = originalProbe.VideoSignature()
-		file.ComplianceStatus = repository.ComplianceUnknown
-		file.AudioPolicyVersion = 0
-		persisted, err := w.repository.UpsertFile(persistCtx, file)
-		if err != nil {
-			return err
-		}
-		file = persisted
-		result.FinalFile = file
 	} else {
-		clearFileAssessment(&file)
-		persisted, err := w.repository.UpsertFile(persistCtx, file)
-		if err != nil {
-			return err
-		}
-		file = persisted
-		result.FinalFile = file
-
 		analysisConfig := w.currentConfig()
-		originalStat, err = w.stable.Wait(jobCtx, file.Path, analysisConfig.Pipeline.StatQuietDuration())
+		stable, err := w.stable.Wait(jobCtx, file.Path, analysisConfig.Pipeline.StatQuietDuration())
 		if err != nil {
 			return failure(err, causeForContextOr(CauseFailed, err))
 		}
-		file.Size = originalStat.Size
-		file.MTimeNS = originalStat.MTimeNS
-		result.FinalFile = file
-		originalProbe, err = w.prober.Probe(jobCtx, file.Path)
-		if err != nil {
-			return failure(err, causeForContextOr(CauseFFProbeError, err))
+		originalStat = stable
+	}
+	file.Size = originalStat.Size
+	file.MTimeNS = originalStat.MTimeNS
+	result.FinalFile = file
+
+	outputPath, err := w.temp.Allocate(file.Path)
+	if err != nil {
+		return failure(err, CauseFailed)
+	}
+	defer cleanupEmptyWorkDir(outputPath, w.workRoot)
+	createRequest := backup.CreateRequest{
+		OriginalPath: file.Path,
+		BackupRoot:   w.backupRoot,
+		FileID:       file.ID,
+		JobID:        jobID,
+	}
+	backupPath, err := w.backup.TargetPath(createRequest)
+	if err != nil {
+		return failure(err, CauseFailed)
+	}
+	journal := repository.ReplacementJournal{
+		JobID: jobID, FileID: file.ID, OriginalPath: file.Path,
+		TemporaryBackupPath: backupPath, OutputPath: outputPath,
+		Phase: repository.ReplacementPrepared, OriginalSize: originalStat.Size,
+		OriginalMTimeNS:        originalStat.MTimeNS,
+		OriginalAudioSignature: file.AudioSignature,
+		OriginalVideoSignature: file.VideoSignature,
+	}
+	if err := w.repository.AddReplacementJournal(persistCtx, journal); err != nil {
+		return failure(err, CauseFailed)
+	}
+	preserveBackup := false
+	defer func() {
+		if preserveBackup {
+			return
 		}
+		if cleanupErr := w.cleanupAttempt(persistCtx, jobID, backupPath, outputPath); cleanupErr != nil {
+			w.publish(persistCtx, WorkerEvent{
+				FileID: file.ID, Path: file.Path, Kind: "diagnostic", Code: "backup_cleanup_failed",
+				Attempt: attempt, Error: cleanupErr.Error(),
+			})
+		}
+	}()
+
+	w.publishPhase(persistCtx, file, RuntimeBackingUp, attempt)
+	created, err := w.backup.Create(jobCtx, createRequest)
+	if err != nil {
+		return failure(err, causeForContextOr(CauseFailed, err))
+	}
+	if created.BackupPath != backupPath {
+		return failure(fmt.Errorf("backup path changed: prepared=%s created=%s", backupPath, created.BackupPath), CauseFailed)
+	}
+	backupStat, err := w.stat.Stat(backupPath)
+	if err != nil {
+		return failure(fmt.Errorf("stat backup: %w", err), CauseVerificationFailed)
+	}
+	if backupStat.Size() != originalStat.Size {
+		return failure(fmt.Errorf("backup size mismatch: got %d want %d", backupStat.Size(), originalStat.Size), CauseVerificationFailed)
+	}
+	originalProbe, err := w.prober.Probe(jobCtx, backupPath)
+	if err != nil {
+		return failure(fmt.Errorf("probe backup: %w", err), causeForContextOr(CauseFFProbeError, err))
+	}
+	if preflight != nil && (preflight.probe.AudioSignature() != originalProbe.AudioSignature() ||
+		preflight.probe.VideoSignature() != originalProbe.VideoSignature()) {
+		return failure(errors.New("backup signature differs from preflight source"), CauseVerificationFailed)
 	}
 	file.AudioSignature = originalProbe.AudioSignature()
 	file.VideoSignature = originalProbe.VideoSignature()
 	result.FinalFile = file
+	if err := w.repository.MarkReplacementBackupReady(
+		persistCtx, jobID, backupStat.Size(), backupStat.ModTime().UnixNano(),
+		originalProbe.AudioSignature(), originalProbe.VideoSignature(),
+	); err != nil {
+		return err
+	}
 
 	decisionConfig := w.currentConfig()
 	decision := media.Decide(file.Path, originalProbe, media.DecisionConfig{
-		Extensions:         decisionConfig.Media.Extensions,
-		IncompatibleCodecs: decisionConfig.Audio.IncompatibleCodecs,
+		Extensions: decisionConfig.Media.Extensions, IncompatibleCodecs: decisionConfig.Audio.IncompatibleCodecs,
 	})
 	switch decision.Action {
 	case media.ActionUnsupported:
@@ -330,16 +376,7 @@ func (w *Worker) processFile(jobCtx context.Context, persistCtx context.Context,
 		if err := w.completeProcessJob(persistCtx, result, repository.JobResultFailed, finalError); err != nil {
 			return err
 		}
-		w.publish(persistCtx, WorkerEvent{
-			FileID:  file.ID,
-			Path:    file.Path,
-			Kind:    "status_change",
-			Code:    "failed",
-			Status:  "failed",
-			Outcome: "unsupported",
-			Attempt: attempt,
-			Error:   decision.Reason,
-		})
+		w.publish(persistCtx, WorkerEvent{FileID: file.ID, Path: file.Path, Kind: "status_change", Code: "failed", Status: "failed", Outcome: "unsupported", Attempt: attempt, Error: decision.Reason})
 		return nil
 	case media.ActionAlreadyCompatible:
 		file.ComplianceStatus = repository.ComplianceCompliant
@@ -348,16 +385,10 @@ func (w *Worker) processFile(jobCtx context.Context, persistCtx context.Context,
 		if err := w.completeProcessJob(persistCtx, result, repository.JobResultCompatible, ""); err != nil {
 			return err
 		}
-		w.publish(persistCtx, WorkerEvent{
-			FileID:  file.ID,
-			Path:    file.Path,
-			Kind:    "status_change",
-			Code:    "compatible",
-			Status:  "compatible",
-			Attempt: attempt,
-		})
+		w.publish(persistCtx, WorkerEvent{FileID: file.ID, Path: file.Path, Kind: "status_change", Code: "compatible", Status: "compatible", Attempt: attempt})
 		return nil
 	}
+
 	file.ComplianceStatus = repository.ComplianceNoncompliant
 	file.AudioPolicyVersion = decisionConfig.Audio.Version
 	persisted, err := w.repository.UpsertFile(persistCtx, file)
@@ -367,43 +398,15 @@ func (w *Worker) processFile(jobCtx context.Context, persistCtx context.Context,
 	file = persisted
 	result.FinalFile = file
 
-	outputPath, err := w.temp.Allocate(file.Path)
-	if err != nil {
-		return failure(err, CauseFailed)
-	}
-	sourcePath := ""
-	removeOutputOnFailure := true
-	defer func() {
-		if removeOutputOnFailure {
-			_ = os.Remove(outputPath)
-		}
-		if sourcePath != "" {
-			_ = os.Remove(sourcePath)
-		}
-		cleanupEmptyWorkDir(outputPath, w.workRoot)
-	}()
-	sourcePath, err = w.source.Copy(file.Path, outputPath)
-	if err != nil {
-		return failure(err, CauseFailed)
-	}
-
 	w.publishPhase(persistCtx, file, RuntimeTranscoding, attempt)
-	primaryArgs := media.BuildFFmpegArgs(sourcePath, outputPath, originalProbe, decision, true)
-	fallbackArgs := media.BuildFFmpegArgs(sourcePath, outputPath, originalProbe, decision, false)
+	primaryArgs := media.BuildFFmpegArgs(backupPath, outputPath, originalProbe, decision, true)
+	fallbackArgs := media.BuildFFmpegArgs(backupPath, outputPath, originalProbe, decision, false)
 	usedFallback, err := runFFmpegWithFallbackReport(jobCtx, w.runner, w.ffmpegName, primaryArgs, fallbackArgs)
 	if err != nil {
 		return failure(err, causeForContextOr(CauseFailed, err))
 	}
 	if usedFallback {
-		w.publish(persistCtx, WorkerEvent{
-			FileID:  file.ID,
-			Path:    file.Path,
-			Kind:    "diagnostic",
-			Code:    "ffmpeg_data_stream_fallback",
-			Phase:   RuntimeTranscoding,
-			Attempt: attempt,
-			Message: "ffmpeg fallback without data streams succeeded",
-		})
+		w.publish(persistCtx, WorkerEvent{FileID: file.ID, Path: file.Path, Kind: "diagnostic", Code: "ffmpeg_data_stream_fallback", Phase: RuntimeTranscoding, Attempt: attempt, Message: "ffmpeg fallback without data streams succeeded"})
 	}
 
 	w.publishPhase(persistCtx, file, RuntimeVerifying, attempt)
@@ -416,14 +419,7 @@ func (w *Worker) processFile(jobCtx context.Context, persistCtx context.Context,
 		return failure(err, causeForContextOr(CauseFFProbeError, err))
 	}
 	outputValidationConfig := w.currentConfig()
-	if err := media.ValidateOutput(originalProbe, outputProbe, decision, media.ValidationRules{
-		IncompatibleCodecs:       outputValidationConfig.Audio.IncompatibleCodecs,
-		DurationToleranceSeconds: outputValidationConfig.Validation.DurationToleranceSec,
-		MaxSizeRatio:             outputValidationConfig.Validation.MaxSizeRatio,
-		MaxSizeIncreaseBytes:     outputValidationConfig.Validation.MaxSizeIncreaseMegabyte * 1024 * 1024,
-		OriginalSize:             originalStat.Size,
-		OutputSize:               outputStat.Size(),
-	}); err != nil {
+	if err := media.ValidateOutput(originalProbe, outputProbe, decision, validationRules(outputValidationConfig, originalStat.Size, outputStat.Size())); err != nil {
 		return failure(err, CauseVerificationFailed)
 	}
 
@@ -432,71 +428,28 @@ func (w *Worker) processFile(jobCtx context.Context, persistCtx context.Context,
 		return failure(fmt.Errorf("stat original file before replace: %w", err), CauseFailed)
 	}
 	if currentOriginalStat.Size() != originalStat.Size || currentOriginalStat.ModTime().UnixNano() != originalStat.MTimeNS {
-		clearFileAssessment(&file)
-		result.FinalFile = file
-		return failure(fmt.Errorf(
-			"original file changed before replace: expected size=%d mtime_ns=%d, got size=%d mtime_ns=%d",
-			originalStat.Size,
-			originalStat.MTimeNS,
-			currentOriginalStat.Size(),
-			currentOriginalStat.ModTime().UnixNano(),
-		), CauseFailed)
+		return failure(fmt.Errorf("original file changed before replace: expected size=%d mtime_ns=%d, got size=%d mtime_ns=%d", originalStat.Size, originalStat.MTimeNS, currentOriginalStat.Size(), currentOriginalStat.ModTime().UnixNano()), CauseFailed)
 	}
 
-	w.publishPhase(persistCtx, file, RuntimeBackingUp, attempt)
 	w.publishPhase(persistCtx, file, RuntimeReplacing, attempt)
-	replace, err := w.backup.Replace(jobCtx, file.Path, outputPath, w.backupRoot)
-	if err != nil {
+	if err := w.backup.Install(jobCtx, outputPath, file.Path); err != nil {
 		return failure(err, causeForContextOr(CauseFailed, err))
 	}
-	removeOutputOnFailure = false
-	result.Backup = &repository.BackupRecord{
-		CreatedByJobID: jobID,
-		BackupPath:     replace.BackupPath,
+	if err := w.repository.UpdateReplacementPhase(persistCtx, jobID, repository.ReplacementOutputInstalled, ""); err != nil {
+		return w.handleInstalledFailure(jobCtx, persistCtx, result, attempt, originalStat, originalProbe, decisionConfig.Audio.Version, backupPath, err, &preserveBackup)
 	}
 
-	finalStat, err := w.stat.Stat(file.Path)
-	if err != nil {
-		clearFileAssessment(&file)
-		result.FinalFile = file
-		return postReplacePersistenceError{err: fmt.Errorf("stat replaced original file: %w", err)}
-	}
-	finalProbe, err := w.prober.Probe(jobCtx, file.Path)
-	if err != nil {
-		clearFileAssessment(&file)
-		result.FinalFile = file
-		return postReplacePersistenceError{err: fmt.Errorf("probe replaced original file: %w", err)}
+	finalStat, finalProbe, finalErr := w.validateInstalled(jobCtx, file.Path, originalStat, originalProbe, decision)
+	if finalErr != nil {
+		return w.handleInstalledFailure(jobCtx, persistCtx, result, attempt, originalStat, originalProbe, decisionConfig.Audio.Version, backupPath, finalErr, &preserveBackup)
 	}
 	finalValidationConfig := w.currentConfig()
-	if err := media.ValidateOutput(originalProbe, finalProbe, decision, media.ValidationRules{
-		IncompatibleCodecs:       finalValidationConfig.Audio.IncompatibleCodecs,
-		DurationToleranceSeconds: finalValidationConfig.Validation.DurationToleranceSec,
-		MaxSizeRatio:             finalValidationConfig.Validation.MaxSizeRatio,
-		MaxSizeIncreaseBytes:     finalValidationConfig.Validation.MaxSizeIncreaseMegabyte * 1024 * 1024,
-		OriginalSize:             originalStat.Size,
-		OutputSize:               finalStat.Size(),
-	}); err != nil {
-		clearFileAssessment(&file)
-		result.FinalFile = file
-		return postReplacePersistenceError{err: fmt.Errorf("validate replaced original file: %w", err)}
-	}
 	finalDecision := media.Decide(file.Path, finalProbe, media.DecisionConfig{
-		Extensions:         finalValidationConfig.Media.Extensions,
-		IncompatibleCodecs: finalValidationConfig.Audio.IncompatibleCodecs,
+		Extensions: finalValidationConfig.Media.Extensions, IncompatibleCodecs: finalValidationConfig.Audio.IncompatibleCodecs,
 	})
 	if finalDecision.Action != media.ActionAlreadyCompatible {
-		file.Size = finalStat.Size()
-		file.MTimeNS = finalStat.ModTime().UnixNano()
-		file.AudioSignature = finalProbe.AudioSignature()
-		file.VideoSignature = finalProbe.VideoSignature()
-		if finalDecision.Action == media.ActionTranscode {
-			file.ComplianceStatus = repository.ComplianceNoncompliant
-			file.AudioPolicyVersion = finalValidationConfig.Audio.Version
-		} else {
-			clearFileAssessment(&file)
-		}
-		result.FinalFile = file
-		return postReplacePersistenceError{err: fmt.Errorf("replaced file is not compliant under audio policy version %d", finalValidationConfig.Audio.Version)}
+		err := fmt.Errorf("replaced file is not compliant under audio policy version %d", finalValidationConfig.Audio.Version)
+		return w.handleInstalledFailure(jobCtx, persistCtx, result, attempt, originalStat, originalProbe, decisionConfig.Audio.Version, backupPath, err, &preserveBackup)
 	}
 
 	file.Size = finalStat.Size()
@@ -507,22 +460,141 @@ func (w *Worker) processFile(jobCtx context.Context, persistCtx context.Context,
 	file.AudioPolicyVersion = finalValidationConfig.Audio.Version
 	result.FinalFile = file
 	if err := w.completeProcessJob(persistCtx, result, repository.JobResultSucceeded, ""); err != nil {
+		return w.handleInstalledFailure(jobCtx, persistCtx, result, attempt, originalStat, originalProbe, decisionConfig.Audio.Version, backupPath, err, &preserveBackup)
+	}
+	w.publish(persistCtx, WorkerEvent{FileID: file.ID, Path: file.Path, Kind: "status_change", Code: "processed", Status: "processed", Outcome: "transcoded", Attempt: attempt})
+	return nil
+}
+
+func (w *Worker) validateInstalled(ctx context.Context, path string, originalStat StableStat, originalProbe media.ProbeData, decision media.Decision) (os.FileInfo, media.ProbeData, error) {
+	finalStat, err := w.stat.Stat(path)
+	if err != nil {
+		return nil, media.ProbeData{}, failure(fmt.Errorf("stat installed file: %w", err), CauseVerificationFailed)
+	}
+	finalProbe, err := w.prober.Probe(ctx, path)
+	if err != nil {
+		return nil, media.ProbeData{}, failure(fmt.Errorf("probe installed file: %w", err), causeForContextOr(CauseFFProbeError, err))
+	}
+	validationConfig := w.currentConfig()
+	if err := media.ValidateOutput(originalProbe, finalProbe, decision, validationRules(validationConfig, originalStat.Size, finalStat.Size())); err != nil {
+		return nil, media.ProbeData{}, failure(fmt.Errorf("validate installed file: %w", err), CauseVerificationFailed)
+	}
+	return finalStat, finalProbe, nil
+}
+
+func (w *Worker) handleInstalledFailure(
+	jobCtx context.Context,
+	persistCtx context.Context,
+	result *AttemptResult,
+	attempt int,
+	originalStat StableStat,
+	originalProbe media.ProbeData,
+	audioPolicyVersion int,
+	backupPath string,
+	processingErr error,
+	preserveBackup *bool,
+) error {
+	file := result.FinalFile
+	phaseErr := w.repository.UpdateReplacementPhase(persistCtx, result.JobID, repository.ReplacementRestoring, processingErr.Error())
+	restoreConfig := w.currentConfig()
+	_, restoreErr := w.backup.Restore(jobCtx, backup.RestoreRequest{
+		OriginalPath: file.Path,
+		BackupPath:   backupPath,
+		BackupRoot:   w.backupRoot,
+		MediaRoots:   restoreConfig.Media.Roots,
+	})
+	var restoredStat os.FileInfo
+	var restoredProbe media.ProbeData
+	if restoreErr == nil {
+		restoredStat, restoreErr = w.stat.Stat(file.Path)
+		if restoreErr != nil {
+			restoreErr = fmt.Errorf("stat automatically restored file: %w", restoreErr)
+		}
+	}
+	if restoreErr == nil {
+		restoredProbe, restoreErr = w.prober.Probe(jobCtx, file.Path)
+		if restoreErr != nil {
+			restoreErr = fmt.Errorf("probe automatically restored file: %w", restoreErr)
+		}
+	}
+	if restoreErr == nil && (restoredStat.Size() != originalStat.Size ||
+		restoredProbe.AudioSignature() != originalProbe.AudioSignature() ||
+		restoredProbe.VideoSignature() != originalProbe.VideoSignature()) {
+		restoreErr = errors.New("automatically restored file does not match the temporary backup")
+	}
+	if phaseErr != nil {
+		if restoreErr == nil {
+			restoreErr = fmt.Errorf("record restoring phase: %w", phaseErr)
+		} else {
+			restoreErr = fmt.Errorf("%v; record restoring phase: %w", restoreErr, phaseErr)
+		}
+	}
+	if restoreErr == nil {
+		file.Size = restoredStat.Size()
+		file.MTimeNS = restoredStat.ModTime().UnixNano()
+		file.AudioSignature = restoredProbe.AudioSignature()
+		file.VideoSignature = restoredProbe.VideoSignature()
+		file.ComplianceStatus = repository.ComplianceNoncompliant
+		file.AudioPolicyVersion = audioPolicyVersion
+		file.BackupFile = ""
+		persisted, err := w.repository.UpsertFile(persistCtx, file)
+		if err != nil {
+			return err
+		}
+		result.FinalFile = persisted
+		return processingErr
+	}
+
+	*preserveBackup = true
+	file.BackupFile = backupPath
+	result.FinalFile = file
+	finalError := formatFinalError(causeForFailure(processingErr), fmt.Errorf("%v; automatic restore failed: %w", processingErr, restoreErr))
+	if err := w.completeProcessJob(persistCtx, result, repository.JobResultFailed, finalError); err != nil {
+		return postReplacePersistenceError{err: fmt.Errorf("persist unresolved backup %s: %w", backupPath, err)}
+	}
+	if err := w.repository.DeleteReplacementJournal(persistCtx, result.JobID); err != nil {
 		return postReplacePersistenceError{err: err}
 	}
 	w.publish(persistCtx, WorkerEvent{
-		FileID:  file.ID,
-		Path:    file.Path,
-		Kind:    "status_change",
-		Code:    "processed",
-		Status:  "processed",
-		Outcome: "transcoded",
-		Attempt: attempt,
+		FileID: file.ID, Path: file.Path, Kind: "status_change", Code: "file.backup_created",
+		Status: "blocked", Outcome: "restore_failed", Attempt: attempt, Error: finalError,
+	})
+	w.publish(persistCtx, WorkerEvent{
+		FileID: file.ID, Path: file.Path, Kind: "status_change", Code: "failed", Status: "failed",
+		Outcome: "restore_failed", Attempt: attempt, Error: finalError,
 	})
 	return nil
 }
 
+func validationRules(cfg config.Config, originalSize int64, outputSize int64) media.ValidationRules {
+	return media.ValidationRules{
+		IncompatibleCodecs:       cfg.Audio.IncompatibleCodecs,
+		DurationToleranceSeconds: cfg.Validation.DurationToleranceSec,
+		MaxSizeRatio:             cfg.Validation.MaxSizeRatio,
+		MaxSizeIncreaseBytes:     cfg.Validation.MaxSizeIncreaseMegabyte * 1024 * 1024,
+		OriginalSize:             originalSize,
+		OutputSize:               outputSize,
+	}
+}
+
+func (w *Worker) cleanupAttempt(ctx context.Context, jobID int64, backupPath string, outputPath string) error {
+	var cleanupErr error
+	if outputPath != "" {
+		if err := os.Remove(outputPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cleanupErr = fmt.Errorf("remove output: %w", err)
+		}
+	}
+	if err := w.backup.Remove(backupPath, w.backupRoot); err != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove temporary backup: %w", err))
+	}
+	if cleanupErr != nil {
+		return cleanupErr
+	}
+	return w.repository.DeleteReplacementJournal(ctx, jobID)
+}
+
 func (w *Worker) completeProcessJob(ctx context.Context, result *AttemptResult, jobResult repository.JobResult, finalError string) error {
-	file, _, err := w.repository.FinishProcessJob(ctx, result.JobID, result.FinalFile, jobResult, finalError, result.Backup)
+	file, _, err := w.repository.FinishProcessJob(ctx, result.JobID, result.FinalFile, jobResult, finalError)
 	if err != nil {
 		return err
 	}
@@ -613,11 +685,33 @@ func (w *Worker) validateDeps() error {
 
 type defaultBackupService struct{}
 
-func (defaultBackupService) Replace(ctx context.Context, originalPath string, outputPath string, backupRoot string) (backup.ReplaceResult, error) {
+func (defaultBackupService) TargetPath(req backup.CreateRequest) (string, error) {
+	return backup.TargetPath(req)
+}
+
+func (defaultBackupService) Create(ctx context.Context, req backup.CreateRequest) (backup.CreateResult, error) {
 	if err := ctx.Err(); err != nil {
-		return backup.ReplaceResult{}, err
+		return backup.CreateResult{}, err
 	}
-	return backup.ReplaceWithBackup(originalPath, outputPath, backupRoot)
+	return backup.Create(req)
+}
+
+func (defaultBackupService) Install(ctx context.Context, sourcePath string, destinationPath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return backup.Install(sourcePath, destinationPath)
+}
+
+func (defaultBackupService) Restore(ctx context.Context, req backup.RestoreRequest) (backup.RestoreResult, error) {
+	if err := ctx.Err(); err != nil {
+		return backup.RestoreResult{}, err
+	}
+	return backup.Restore(req)
+}
+
+func (defaultBackupService) Remove(path string, backupRoot string) error {
+	return backup.Remove(path, backupRoot)
 }
 
 type osStatProvider struct{}
@@ -654,52 +748,6 @@ func (a defaultTempAllocator) Allocate(path string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(jobDir, "output"+ext), nil
-}
-
-type defaultSourceCopier struct{}
-
-func (defaultSourceCopier) Copy(originalPath string, outputPath string) (string, error) {
-	ext := filepath.Ext(originalPath)
-	sourcePath := filepath.Join(filepath.Dir(outputPath), "source"+ext)
-	if err := copyFile(originalPath, sourcePath); err != nil {
-		return "", err
-	}
-	return sourcePath, nil
-}
-
-func copyFile(src string, dst string) error {
-	info, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
-	if err != nil {
-		return err
-	}
-	removeDst := true
-	defer func() {
-		if removeDst {
-			_ = os.Remove(dst)
-		}
-	}()
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return err
-	}
-	if err := out.Sync(); err != nil {
-		_ = out.Close()
-		return err
-	}
-	if err := out.Close(); err != nil {
-		return err
-	}
-	removeDst = false
-	return nil
 }
 
 func cleanupEmptyWorkDir(outputPath string, workRoot string) {

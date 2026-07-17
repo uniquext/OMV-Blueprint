@@ -78,7 +78,19 @@ func (q *Queue) Enqueue(path string) bool {
 func (q *Queue) EnqueueWithSource(path string, source JobSource) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	return q.enqueueLocked(path, source, 0)
+}
 
+func (q *Queue) EnqueueExistingJob(path string, source JobSource, jobID int64) bool {
+	if jobID < 1 {
+		return false
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.enqueueLocked(path, source, jobID)
+}
+
+func (q *Queue) enqueueLocked(path string, source JobSource, jobID int64) bool {
 	if _, exists := q.tasks[path]; exists {
 		return false
 	}
@@ -86,10 +98,11 @@ func (q *Queue) EnqueueWithSource(path string, source JobSource) bool {
 		RuntimeTask:   RuntimeTask{Path: path, Source: source, Phase: RuntimeQueued},
 		queued:        true,
 		order:         q.nextTaskOrder(),
+		jobID:         jobID,
 		attemptNumber: 1,
 	}
 	q.tasks[path] = task
-	q.jobs = append(q.jobs, QueueJob{Path: path, Source: source})
+	q.jobs = append(q.jobs, QueueJob{Path: path, Source: source, JobID: jobID, AttemptNumber: 1})
 	return true
 }
 

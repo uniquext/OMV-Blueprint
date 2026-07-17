@@ -12,7 +12,6 @@ type Config struct {
 	Media         MediaConfig         `json:"media"`
 	Audio         AudioConfig         `json:"audio"`
 	Pipeline      PipelineConfig      `json:"pipeline"`
-	Backup        BackupConfig        `json:"backup"`
 	Validation    ValidationConfig    `json:"validation"`
 	UI            UIConfig            `json:"ui"`
 	Scan          ScanConfig          `json:"scan"`
@@ -37,10 +36,6 @@ type PipelineConfig struct {
 	RetryDelaySeconds int `json:"retry_delay_seconds"`
 	StatQuietSeconds  int `json:"stat_quiet_seconds"`
 	JobTimeoutMinutes int `json:"job_timeout_minutes"`
-}
-
-type BackupConfig struct {
-	RetentionDays int `json:"retention_days"`
 }
 
 type ValidationConfig struct {
@@ -81,9 +76,6 @@ func Default() Config {
 			RetryDelaySeconds: 300,
 			StatQuietSeconds:  10,
 			JobTimeoutMinutes: 120,
-		},
-		Backup: BackupConfig{
-			RetentionDays: 7,
 		},
 		Validation: ValidationConfig{
 			MaxSizeRatio:            1.1,
@@ -133,9 +125,6 @@ func (c Config) Validate() error {
 	}
 	if c.Pipeline.JobTimeoutMinutes < 1 {
 		return errors.New("pipeline job timeout minutes must be at least 1")
-	}
-	if c.Backup.RetentionDays < 0 {
-		return errors.New("backup retention days must not be negative")
 	}
 	if c.Validation.MaxSizeRatio < 1 {
 		return errors.New("validation max size ratio must be at least 1")

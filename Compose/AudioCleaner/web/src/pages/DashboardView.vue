@@ -26,8 +26,12 @@ const eventRefreshDelayMs = 100
 const statusInvalidationEvents = new Set([
   'compatible',
   'processed',
-  'failed',
-  'job.restored',
+	'failed',
+	'file.backup_created',
+	'file.backup_restored',
+	'file.backup_deleted',
+  'job.retry_queued',
+  'job.ignored',
   'service.restarting',
   'service.restart_failed'
 ])
@@ -348,10 +352,14 @@ onBeforeUnmount(() => {
         <span class="dashboard-metric__label">{{ t('dashboardQueueCount') }}</span>
         <strong class="dashboard-metric__value">{{ waitingTaskCount }}</strong>
       </section>
-      <section class="dashboard-metric dashboard-metric--backup panel">
-        <span class="dashboard-metric__label">{{ t('dashboardBackupUsage') }}</span>
-        <strong class="dashboard-metric__value">{{ formatBytes(status.backup_usage_bytes) }}</strong>
-      </section>
+		<section class="dashboard-metric dashboard-metric--backup panel">
+			<span class="dashboard-metric__label">{{ t('dashboardBackupUsage') }}</span>
+			<strong class="dashboard-metric__value">{{ formatBytes(status.backup_usage_bytes) }}</strong>
+		</section>
+		<section class="dashboard-metric dashboard-metric--backup panel">
+			<span class="dashboard-metric__label">{{ t('dashboardUnresolvedBackups') }}</span>
+			<strong class="dashboard-metric__value">{{ status.unresolved_backup_count }}</strong>
+		</section>
       <section class="dashboard-metric dashboard-metric--success panel">
         <span class="dashboard-metric__label">{{ t('dashboardSuccessRate') }}</span>
         <strong class="dashboard-metric__value">{{ successRate }}</strong>

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,7 +19,9 @@ import (
 )
 
 var (
-	ErrProcessing = errors.New("file is currently processing")
+	ErrProcessing         = errors.New("file is currently processing")
+	ErrFileNotProcessable = errors.New("file is not eligible for processing")
+	ErrJobNotActionable   = errors.New("job is not eligible for this operation")
 )
 
 type invalidConfigError struct {
@@ -52,7 +55,7 @@ type Deps struct {
 	Status       StatusProvider
 	RuntimeTasks RuntimeTaskProvider
 	History      HistoryStore
-	Backups      BackupStore
+	Files        FilesStore
 	RuntimeLogs  RuntimeLogStore
 }
 
@@ -66,12 +69,15 @@ type RuntimeTaskProvider interface {
 
 type HistoryStore interface {
 	ListHistory(ctx context.Context, page *repository.PageRequest) (any, error)
+	RetryHistoryJob(ctx context.Context, id int64) (any, error)
+	IgnoreHistoryJob(ctx context.Context, id int64) (any, error)
 }
 
-type BackupStore interface {
-	ListBackups(ctx context.Context, page *repository.PageRequest) (any, error)
-	RestoreBackup(ctx context.Context, id int64) (any, error)
-	CleanupBackups(ctx context.Context) (any, error)
+type FilesStore interface {
+	ListFiles(ctx context.Context, page *repository.PageRequest) (any, error)
+	ProcessFile(ctx context.Context, id int64) (any, error)
+	RestoreFileBackup(ctx context.Context, id int64) (any, error)
+	DeleteFileBackup(ctx context.Context, id int64) (any, error)
 }
 
 type RuntimeLogStore interface {
@@ -85,10 +91,6 @@ type RuntimeLogResult struct {
 
 type patchUIConfigRequest struct {
 	Language *string `json:"language"`
-}
-
-type patchBackupConfigRequest struct {
-	RetentionDays *int `json:"retention_days"`
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -125,6 +127,32 @@ func (s *Server) handleListHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	history, err := s.deps.History.ListHistory(r.Context(), page)
 	writeDependencyResult(w, history, err)
+}
+
+func (s *Server) handleRetryHistoryJob(w http.ResponseWriter, r *http.Request) {
+	id, ok := parsePathID(w, r, "job_id")
+	if !ok {
+		return
+	}
+	if s.deps.History == nil {
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	}
+	result, err := s.deps.History.RetryHistoryJob(r.Context(), id)
+	writeDependencyResult(w, result, err)
+}
+
+func (s *Server) handleIgnoreHistoryJob(w http.ResponseWriter, r *http.Request) {
+	id, ok := parsePathID(w, r, "job_id")
+	if !ok {
+		return
+	}
+	if s.deps.History == nil {
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	}
+	result, err := s.deps.History.IgnoreHistoryJob(r.Context(), id)
+	writeDependencyResult(w, result, err)
 }
 
 func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
@@ -213,40 +241,6 @@ func (s *Server) handlePatchUIConfig(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, cfg.UI)
 }
 
-func (s *Server) handlePatchBackupConfig(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close()
-
-	var payload patchBackupConfigRequest
-	body := http.MaxBytesReader(w, r.Body, configRequestBodyLimit)
-	if err := json.NewDecoder(body).Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid config JSON")
-		return
-	}
-	if payload.RetentionDays == nil {
-		writeError(w, http.StatusBadRequest, "backup retention days is required")
-		return
-	}
-	cfg, changed, err := s.updateConfigBlock(func(cfg *config.Config) error {
-		cfg.Backup.RetentionDays = *payload.RetentionDays
-		return nil
-	})
-	if err != nil {
-		writeDependencyResult(w, nil, err)
-		return
-	}
-	if changed && s.deps.RequestRestart != nil {
-		writeJSON(w, http.StatusOK, Response{
-			Code:    0,
-			Message: "restarting",
-			Data:    map[string]string{"status": "restarting"},
-		})
-		_ = http.NewResponseController(w).Flush()
-		go s.deps.RequestRestart(cfg)
-		return
-	}
-	writeOK(w, cfg.Backup)
-}
-
 func (s *Server) handleRuntimeLogs(w http.ResponseWriter, r *http.Request) {
 	if s.deps.RuntimeLogs == nil {
 		writeOK(w, RuntimeLogResult{})
@@ -261,9 +255,9 @@ func (s *Server) handleRuntimeLogs(w http.ResponseWriter, r *http.Request) {
 	writeDependencyResult(w, logs, err)
 }
 
-func (s *Server) handleListBackups(w http.ResponseWriter, r *http.Request) {
-	if s.deps.Backups == nil {
-		writeOK(w, []repository.BackupView{})
+func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Files == nil {
+		writeOK(w, []repository.FileFacts{})
 		return
 	}
 	page, err := parsePageRequest(r)
@@ -271,29 +265,46 @@ func (s *Server) handleListBackups(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	backups, err := s.deps.Backups.ListBackups(r.Context(), page)
-	writeDependencyResult(w, backups, err)
+	files, err := s.deps.Files.ListFiles(r.Context(), page)
+	writeDependencyResult(w, files, err)
 }
 
-func (s *Server) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
-	id, ok := parseID(w, r)
+func (s *Server) handleProcessFile(w http.ResponseWriter, r *http.Request) {
+	id, ok := parsePathID(w, r, "file_id")
 	if !ok {
 		return
 	}
-	if s.deps.Backups == nil {
-		writeError(w, http.StatusNotFound, "backup not found")
+	if s.deps.Files == nil {
+		writeError(w, http.StatusNotFound, "file not found")
 		return
 	}
-	result, err := s.deps.Backups.RestoreBackup(r.Context(), id)
+	result, err := s.deps.Files.ProcessFile(r.Context(), id)
 	writeDependencyResult(w, result, err)
 }
 
-func (s *Server) handleCleanupBackups(w http.ResponseWriter, r *http.Request) {
-	if s.deps.Backups == nil {
-		writeOK(w, map[string]int{"removed": 0})
+func (s *Server) handleRestoreFileBackup(w http.ResponseWriter, r *http.Request) {
+	id, ok := parsePathID(w, r, "file_id")
+	if !ok {
 		return
 	}
-	result, err := s.deps.Backups.CleanupBackups(r.Context())
+	if s.deps.Files == nil {
+		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	result, err := s.deps.Files.RestoreFileBackup(r.Context(), id)
+	writeDependencyResult(w, result, err)
+}
+
+func (s *Server) handleDeleteFileBackup(w http.ResponseWriter, r *http.Request) {
+	id, ok := parsePathID(w, r, "file_id")
+	if !ok {
+		return
+	}
+	if s.deps.Files == nil {
+		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	result, err := s.deps.Files.DeleteFileBackup(r.Context(), id)
 	writeDependencyResult(w, result, err)
 }
 
@@ -314,6 +325,18 @@ func writeDependencyResult(w http.ResponseWriter, data any, err error) {
 		writeError(w, http.StatusConflict, ErrProcessing.Error())
 		return
 	}
+	if errors.Is(err, ErrFileNotProcessable) {
+		writeError(w, http.StatusConflict, ErrFileNotProcessable.Error())
+		return
+	}
+	if errors.Is(err, ErrJobNotActionable) {
+		writeError(w, http.StatusConflict, ErrJobNotActionable.Error())
+		return
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
 	var invalidConfig invalidConfigError
 	if errors.As(err, &invalidConfig) {
 		writeError(w, http.StatusBadRequest, invalidConfig.Error())
@@ -323,7 +346,11 @@ func writeDependencyResult(w http.ResponseWriter, data any, err error) {
 }
 
 func parseID(w http.ResponseWriter, r *http.Request) (int64, bool) {
-	value := chi.URLParam(r, "id")
+	return parsePathID(w, r, "id")
+}
+
+func parsePathID(w http.ResponseWriter, r *http.Request, name string) (int64, bool) {
+	value := chi.URLParam(r, name)
 	id, err := strconv.ParseInt(value, 10, 64)
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid id %q", value))

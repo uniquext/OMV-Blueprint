@@ -6,82 +6,88 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
-	"syscall"
-	"time"
 )
 
-type ReplaceResult struct {
-	BackupPath string
+type CreateRequest struct {
+	OriginalPath string
+	BackupRoot   string
+	FileID       int64
+	JobID        int64
+}
+
+type CreateResult struct {
+	BackupPath string `json:"backup_path"`
 }
 
 type RestoreRequest struct {
 	OriginalPath string
 	BackupPath   string
+	BackupRoot   string
 	MediaRoots   []string
 }
 
 type RestoreResult struct {
-	SafetyPath string `json:"safety_path"`
+	BackupPath string `json:"backup_path"`
 }
 
-var (
-	linkFile   = os.Link
-	removeFile = os.Remove
-	nowLocal   = func() time.Time {
-		return time.Now()
-	}
-)
-
-func ReplaceWithBackup(originalPath string, outputPath string, backupRoot string) (ReplaceResult, error) {
-	originalPath = filepath.Clean(originalPath)
-	outputPath = filepath.Clean(outputPath)
+func Create(req CreateRequest) (CreateResult, error) {
+	originalPath := filepath.Clean(req.OriginalPath)
+	backupRoot := filepath.Clean(req.BackupRoot)
 	if !filepath.IsAbs(originalPath) {
-		return ReplaceResult{}, errors.New("original path must be absolute")
-	}
-	if !filepath.IsAbs(outputPath) {
-		return ReplaceResult{}, errors.New("output path must be absolute")
-	}
-	if backupRoot == "" {
-		return ReplaceResult{}, errors.New("backup root must not be empty")
+		return CreateResult{}, errors.New("original path must be absolute")
 	}
 	if !filepath.IsAbs(backupRoot) {
-		return ReplaceResult{}, errors.New("backup root must be absolute")
+		return CreateResult{}, errors.New("backup root must be absolute")
 	}
-	if originalPath == outputPath {
-		return ReplaceResult{}, errors.New("original path and output path must differ")
+	if req.FileID < 1 || req.JobID < 1 {
+		return CreateResult{}, errors.New("file_id and job_id must be positive")
 	}
 	if _, err := regularFileInfo("original path", originalPath); err != nil {
-		return ReplaceResult{}, err
+		return CreateResult{}, err
 	}
-	if _, err := regularFileInfo("output path", outputPath); err != nil {
-		return ReplaceResult{}, err
-	}
-	now := nowLocal()
-	backupPath, err := backupPathForOriginal(backupRoot, originalPath, now)
+	backupPath, err := TargetPath(req)
 	if err != nil {
-		return ReplaceResult{}, err
+		return CreateResult{}, err
 	}
 	if err := os.MkdirAll(filepath.Dir(backupPath), 0o755); err != nil {
-		return ReplaceResult{}, err
+		return CreateResult{}, fmt.Errorf("create backup directory: %w", err)
 	}
-	if err := moveFileNoOverwrite(originalPath, backupPath); err != nil {
-		return ReplaceResult{}, err
+	if err := copyFileExclusive(originalPath, backupPath); err != nil {
+		return CreateResult{}, fmt.Errorf("create backup: %w", err)
 	}
-	if err := moveFileNoOverwrite(outputPath, originalPath); err != nil {
-		if rollbackErr := moveFileNoOverwrite(backupPath, originalPath); rollbackErr != nil {
-			return ReplaceResult{}, fmt.Errorf("replace output failed: %w; rollback failed: %v", err, rollbackErr)
-		}
-		return ReplaceResult{}, fmt.Errorf("replace output failed: %w", err)
-	}
-	return ReplaceResult{
-		BackupPath: backupPath,
-	}, nil
+	return CreateResult{BackupPath: backupPath}, nil
 }
 
-func RestoreBackup(req RestoreRequest) (RestoreResult, error) {
+func TargetPath(req CreateRequest) (string, error) {
+	originalPath := filepath.Clean(req.OriginalPath)
+	backupRoot := filepath.Clean(req.BackupRoot)
+	if !filepath.IsAbs(originalPath) {
+		return "", errors.New("original path must be absolute")
+	}
+	if !filepath.IsAbs(backupRoot) {
+		return "", errors.New("backup root must be absolute")
+	}
+	if req.FileID < 1 || req.JobID < 1 {
+		return "", errors.New("file_id and job_id must be positive")
+	}
+	backupPath := filepath.Join(
+		backupRoot,
+		strconv.FormatInt(req.FileID, 10),
+		strconv.FormatInt(req.JobID, 10),
+		filepath.Base(originalPath),
+	)
+	if !insideRoot(backupPath, backupRoot) {
+		return "", errors.New("backup path escapes backup root")
+	}
+	return backupPath, nil
+}
+
+func Restore(req RestoreRequest) (RestoreResult, error) {
 	originalPath := filepath.Clean(req.OriginalPath)
 	backupPath := filepath.Clean(req.BackupPath)
+	backupRoot := filepath.Clean(req.BackupRoot)
 	if !filepath.IsAbs(originalPath) {
 		return RestoreResult{}, errors.New("original path must be absolute")
 	}
@@ -91,73 +97,111 @@ func RestoreBackup(req RestoreRequest) (RestoreResult, error) {
 	if !insideAnyRoot(originalPath, req.MediaRoots) {
 		return RestoreResult{}, errors.New("original path is outside configured media roots")
 	}
-	if _, err := regularFileInfo("backup path", backupPath); err != nil {
-		return RestoreResult{}, err
+	if !filepath.IsAbs(backupRoot) || !insideRoot(backupPath, backupRoot) {
+		return RestoreResult{}, errors.New("backup path is outside configured backup root")
 	}
-	safetyPath := ""
-	if info, err := os.Lstat(originalPath); err == nil {
-		if !info.Mode().IsRegular() {
-			return RestoreResult{}, fmt.Errorf("original path is not a regular file: %s", originalPath)
-		}
-		var pathErr error
-		safetyPath, pathErr = uniquePath(originalPath + ".restore-safety." + nowLocal().In(time.Local).Format("20060102T150405-0700"))
-		if pathErr != nil {
-			return RestoreResult{}, pathErr
-		}
-		if err := moveFileNoOverwrite(originalPath, safetyPath); err != nil {
-			return RestoreResult{}, err
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return RestoreResult{}, fmt.Errorf("original path: %w", err)
+	if err := Install(backupPath, originalPath); err != nil {
+		return RestoreResult{}, fmt.Errorf("restore backup: %w", err)
 	}
-	if err := moveFileNoOverwrite(backupPath, originalPath); err != nil {
-		if safetyPath != "" {
-			if rollbackErr := moveFileNoOverwrite(safetyPath, originalPath); rollbackErr != nil {
-				return RestoreResult{}, fmt.Errorf("restore backup failed: %w; rollback failed: %v", err, rollbackErr)
-			}
-		}
-		return RestoreResult{}, fmt.Errorf("restore backup failed: %w", err)
-	}
-	return RestoreResult{SafetyPath: safetyPath}, nil
+	return RestoreResult{BackupPath: backupPath}, nil
 }
 
-func insideAnyRoot(path string, roots []string) bool {
+func Install(sourcePath string, destinationPath string) error {
+	sourcePath = filepath.Clean(sourcePath)
+	destinationPath = filepath.Clean(destinationPath)
+	if !filepath.IsAbs(sourcePath) || !filepath.IsAbs(destinationPath) {
+		return errors.New("source and destination paths must be absolute")
+	}
+	info, err := regularFileInfo("source path", sourcePath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(destinationPath), 0o755); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(destinationPath), ".audiocleaner-install-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	removeTemporary := true
+	defer func() {
+		_ = temporary.Close()
+		if removeTemporary {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if err := copyIntoFile(sourcePath, temporary, info); err != nil {
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, destinationPath); err != nil {
+		return err
+	}
+	removeTemporary = false
+	return syncDirectory(filepath.Dir(destinationPath))
+}
+
+func Remove(path string, backupRoot string) error {
 	cleanPath := filepath.Clean(path)
-	for _, root := range roots {
-		cleanRoot := filepath.Clean(root)
-		rel, err := filepath.Rel(cleanRoot, cleanPath)
-		if err != nil {
-			continue
-		}
-		if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
-			return true
-		}
+	cleanRoot := filepath.Clean(backupRoot)
+	if !filepath.IsAbs(cleanRoot) || !insideRoot(cleanPath, cleanRoot) {
+		return errors.New("backup path is outside configured backup root")
 	}
-	return false
+	if err := os.Remove(cleanPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	removeEmptyParents(filepath.Dir(cleanPath), cleanRoot)
+	return nil
 }
 
-func backupPathForOriginal(backupRoot string, originalPath string, timestamp time.Time) (string, error) {
-	if !filepath.IsAbs(originalPath) {
-		return "", errors.New("original path must be absolute")
+func copyFileExclusive(sourcePath string, destinationPath string) error {
+	info, err := regularFileInfo("source path", sourcePath)
+	if err != nil {
+		return err
 	}
-	cleanOriginal := filepath.Clean(originalPath)
-	relativeOriginal := strings.TrimPrefix(cleanOriginal, filepath.VolumeName(cleanOriginal))
-	relativeOriginal = strings.TrimPrefix(relativeOriginal, string(filepath.Separator))
-	return uniquePath(filepath.Join(backupRoot, timestamp.In(time.Local).Format("20060102T150405-0700"), relativeOriginal))
+	destination, err := os.OpenFile(destinationPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	removeDestination := true
+	defer func() {
+		_ = destination.Close()
+		if removeDestination {
+			_ = os.Remove(destinationPath)
+		}
+	}()
+	if err := copyIntoFile(sourcePath, destination, info); err != nil {
+		return err
+	}
+	if err := destination.Close(); err != nil {
+		return err
+	}
+	removeDestination = false
+	return syncDirectory(filepath.Dir(destinationPath))
 }
 
-func uniquePath(base string) (string, error) {
-	for suffix := 0; ; suffix++ {
-		path := base
-		if suffix > 0 {
-			path = fmt.Sprintf("%s.%d", base, suffix)
-		}
-		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
-			return path, nil
-		} else if err != nil {
-			return "", err
-		}
+func copyIntoFile(sourcePath string, destination *os.File, info os.FileInfo) error {
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return err
 	}
+	defer source.Close()
+	if _, err := io.Copy(destination, source); err != nil {
+		return err
+	}
+	if err := destination.Chmod(info.Mode().Perm()); err != nil {
+		return err
+	}
+	if err := destination.Sync(); err != nil {
+		return err
+	}
+	if err := os.Chtimes(destination.Name(), info.ModTime(), info.ModTime()); err != nil {
+		return err
+	}
+	return destination.Sync()
 }
 
 func regularFileInfo(label string, path string) (os.FileInfo, error) {
@@ -171,69 +215,39 @@ func regularFileInfo(label string, path string) (os.FileInfo, error) {
 	return info, nil
 }
 
-func moveFileNoOverwrite(src string, dst string) error {
-	if err := linkFile(src, dst); err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("destination already exists: %s: %w", dst, os.ErrExist)
+func insideAnyRoot(path string, roots []string) bool {
+	for _, root := range roots {
+		if insideRoot(path, root) {
+			return true
 		}
-		if !canFallbackFromLinkError(err) {
-			return err
-		}
-		return copyFileThenRemove(src, dst)
 	}
-	if err := removeFile(src); err != nil {
-		_ = removeFile(dst)
-		return fmt.Errorf("remove source after linking %s: %w", src, err)
-	}
-	return nil
+	return false
 }
 
-func canFallbackFromLinkError(err error) bool {
-	return errors.Is(err, syscall.EXDEV) ||
-		errors.Is(err, syscall.ENOTSUP) ||
-		errors.Is(err, syscall.EOPNOTSUPP) ||
-		errors.Is(err, syscall.EPERM)
+func insideRoot(path string, root string) bool {
+	cleanPath := filepath.Clean(path)
+	cleanRoot := filepath.Clean(root)
+	relative, err := filepath.Rel(cleanRoot, cleanPath)
+	if err != nil {
+		return false
+	}
+	return relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))
 }
 
-func copyFileThenRemove(src string, dst string) error {
-	info, err := regularFileInfo("source path", src)
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
 	if err != nil {
 		return err
 	}
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
+	defer directory.Close()
+	return directory.Sync()
+}
 
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
-	if err != nil {
-		return err
-	}
-	removeDst := true
-	defer func() {
-		if removeDst {
-			_ = removeFile(dst)
+func removeEmptyParents(path string, root string) {
+	for insideRoot(path, root) && filepath.Clean(path) != filepath.Clean(root) {
+		if err := os.Remove(path); err != nil {
+			return
 		}
-	}()
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return err
+		path = filepath.Dir(path)
 	}
-	if err := out.Chmod(info.Mode().Perm()); err != nil {
-		_ = out.Close()
-		return err
-	}
-	if err := out.Sync(); err != nil {
-		_ = out.Close()
-		return err
-	}
-	if err := out.Close(); err != nil {
-		return err
-	}
-	if err := removeFile(src); err != nil {
-		return err
-	}
-	removeDst = false
-	return nil
 }

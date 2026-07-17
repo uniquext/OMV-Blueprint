@@ -8,11 +8,8 @@ const config = ref<AudioCleanerConfig | null>(null)
 const loading = ref(false)
 const error = ref('')
 const languageDraft = ref<SupportedLanguage>('zh-CN')
-const retentionDraft = ref(0)
 const savingLanguage = ref(false)
-const savingRetention = ref(false)
 const languageMessage = ref('')
-const retentionMessage = ref('')
 
 const notificationsState = computed(() => {
   if (!config.value?.notifications.enabled) {
@@ -34,9 +31,8 @@ async function loadConfig(): Promise<void> {
   error.value = ''
   try {
     const nextConfig = await api.config()
-    config.value = nextConfig
-    languageDraft.value = nextConfig.ui.language
-    retentionDraft.value = nextConfig.backup.retention_days
+		config.value = nextConfig
+		languageDraft.value = nextConfig.ui.language
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : String(caught)
   } finally {
@@ -59,28 +55,6 @@ async function saveLanguage(): Promise<void> {
     error.value = caught instanceof Error ? caught.message : String(caught)
   } finally {
     savingLanguage.value = false
-  }
-}
-
-async function saveRetention(): Promise<void> {
-  savingRetention.value = true
-  retentionMessage.value = ''
-  error.value = ''
-  try {
-    const nextBackup = await api.patchBackup(retentionDraft.value)
-    if (config.value) {
-      if ('retention_days' in nextBackup) {
-        config.value.backup = nextBackup
-      } else {
-        config.value.backup.retention_days = retentionDraft.value
-      }
-    }
-    retentionMessage.value =
-      'status' in nextBackup ? `${t('settingsBackupSavedRestarting')} (${nextBackup.status})` : t('settingsBackupSaved')
-  } catch (caught) {
-    error.value = caught instanceof Error ? caught.message : String(caught)
-  } finally {
-    savingRetention.value = false
   }
 }
 
@@ -139,23 +113,6 @@ onMounted(loadConfig)
             <dt>{{ t('settingsWatchdog') }}</dt>
             <dd>{{ booleanValue(config.scan.watchdog_enabled) }}</dd>
           </dl>
-        </div>
-      </section>
-
-      <section class="panel settings-panel">
-        <div class="panel-body">
-          <h2>{{ t('settingsBlockBackup') }}</h2>
-          <p class="muted">{{ t('settingsBackupDescription') }}</p>
-          <form class="settings-form" @submit.prevent="saveRetention">
-            <label class="field">
-              <span>{{ t('settingsRetentionDays') }}</span>
-              <input name="retention_days" type="number" min="0" v-model.number="retentionDraft" />
-            </label>
-            <div class="row-actions">
-              <button class="button primary" type="submit" :disabled="savingRetention">{{ t('settingsSaveBackup') }}</button>
-              <span v-if="retentionMessage" class="muted">{{ retentionMessage }}</span>
-            </div>
-          </form>
         </div>
       </section>
 

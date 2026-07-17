@@ -35,17 +35,15 @@ Hash 路由：
 
 - `/#/`：概览；Dashboard 不包含 Scan All。
 - `/#/history`：历史记录。
-- `/#/backups`：备份恢复、清理过期备份。
-- `/#/settings`：配置只读展示，允许修改语言和备份保留天数。
+- `/#/files`：文件列表、未解决备份还原和删除。
+- `/#/settings`：配置只读展示，允许修改语言。
 - `/#/logs`：最近日志和 SSE 状态。
 
 `ui.language` 支持 `zh-CN` 和 `en-US`，通过 WebUI 保存到 `/app/config/config.json` 后热生效。
 
-`backup.retention_days` 可通过 WebUI 保存，但当前版本保存后会触发服务重启。
+备份采用固定的 `safety_only` 策略，不提供保留期或模式配置。
 
 `media.roots` 在 V1.1 WebUI 只读。
-
-Jobs 和 Backups 的路径搜索是前端本地搜索，可能临时请求 `page_size=1000`。
 
 ## 集成验证
 
@@ -63,5 +61,5 @@ bash test/scripts/run-integration.sh
 
 - `latest-status.json` 保存最近一次 `/api/status` 响应。
 - `latest-history.json` 保存最近一次 `/api/history` 响应。
-- `latest-backups.json` 保存最近一次 `/api/backups` 响应。
+- `latest-files.json` 保存最近一次 `/api/files` 响应。
 - `source-probe-summary.jsonl` 和 `output-probe-summary.jsonl` 保存源媒体和处理后媒体的 ffprobe 摘要。

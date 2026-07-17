@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { useEventStream } from './composables/useEventStream'
-import { eventStreamStatusLabel, t } from './i18n'
+import { eventStreamStatusLabel, setLanguage, t } from './i18n'
+import { api } from './lib/api'
 
 type TranslationKey = Parameters<typeof t>[0]
 
@@ -12,14 +13,27 @@ const sidebarCollapsed = ref(false)
 
 const navigation = computed(() => [
   { to: '/', label: t('navDashboard'), icon: 'dashboard' },
+  { to: '/files', label: t('navFiles'), icon: 'files' },
   { to: '/history', label: t('navHistory'), icon: 'history' },
-  { to: '/backups', label: t('navBackups'), icon: 'backups' },
   { to: '/settings', label: t('navSettings'), icon: 'settings' },
   { to: '/logs', label: t('navLogs'), icon: 'logs' }
 ])
 const pageTitle = computed(() => {
   const titleKey = route.meta.titleKey
   return typeof titleKey === 'string' ? t(titleKey as TranslationKey) : t('appName')
+})
+
+async function loadSavedLanguage(): Promise<void> {
+  try {
+    const config = await api.config()
+    setLanguage(config.ui.language)
+  } catch {
+    // Keep the default language when configuration is temporarily unavailable.
+  }
+}
+
+onMounted(() => {
+  void loadSavedLanguage()
 })
 </script>
 
@@ -84,9 +98,9 @@ const pageTitle = computed(() => {
               <path d="M5 5v14h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
               <path d="M8 15h2m3 0h3M8 11h8M8 7h5" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
             </svg>
-            <svg v-else-if="item.icon === 'backups'" viewBox="0 0 24 24" fill="none">
-              <path d="M6 8h12v11H6V8Z" stroke="currentColor" stroke-width="2" />
-              <path d="M8 5h8v3H8V5Z" fill="currentColor" />
+			<svg v-else-if="item.icon === 'files'" viewBox="0 0 24 24" fill="none">
+				<path d="M6 3h8l4 4v14H6V3Z" stroke="currentColor" stroke-width="2" />
+				<path d="M14 3v5h5M9 12h6M9 16h6" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
             </svg>
             <svg v-else-if="item.icon === 'settings'" viewBox="0 0 24 24" fill="none">
               <path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" stroke="currentColor" stroke-width="2" />
@@ -101,7 +115,7 @@ const pageTitle = computed(() => {
         </RouterLink>
       </nav>
 
-      <div class="sidebar-version">{{ t('sidebarFooter') }}</div>
+      <div class="sidebar-version" data-testid="sidebar-version">{{ t('sidebarFooter') }}</div>
     </aside>
 
     <main class="content-shell">

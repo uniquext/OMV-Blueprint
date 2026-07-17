@@ -20,10 +20,9 @@ export interface PageRequest {
 
 export interface AudioCleanerConfig {
   media: MediaConfig
-  audio: AudioConfig
-  pipeline: PipelineConfig
-  backup: BackupConfig
-  validation: ValidationConfig
+	audio: AudioConfig
+	pipeline: PipelineConfig
+	validation: ValidationConfig
   ui: UIConfig
   scan: ScanConfig
   notifications: NotificationsConfig
@@ -49,15 +48,9 @@ export interface PipelineConfig {
   job_timeout_minutes: number
 }
 
-export interface BackupConfig {
-  retention_days: number
-}
-
 export interface OperationStatusResponse {
-  status: string
+	status: string
 }
-
-export type BackupPatchResponse = BackupConfig | OperationStatusResponse
 
 export interface ValidationConfig {
   max_size_ratio: number
@@ -79,9 +72,8 @@ export interface NotificationsConfig {
   targets: string[]
 }
 
-export type JobStatus = 'compatible' | 'processing' | 'processed' | 'failed' | 'restored' | string
+export type JobStatus = 'compatible' | 'processing' | 'processed' | 'failed' | string
 export type DiscoverySource = 'scan' | 'watchdog' | 'manual' | string
-export type JobKind = 'process' | 'restore'
 export type JobResult = 'processing' | 'compatible' | 'succeeded' | 'failed'
 export type RuntimePhase =
   | 'queued'
@@ -91,13 +83,10 @@ export type RuntimePhase =
   | 'verifying'
   | 'backing_up'
   | 'replacing'
-export type BackupAvailability = 'available' | 'missing' | 'restored' | 'expired' | string
-
 export interface HistoryRecord {
   id: number
   file_id: number
   path: string
-  kind: JobKind
   trigger_source: DiscoverySource
   result: JobResult
   final_error: string
@@ -110,21 +99,25 @@ export interface RuntimeLogResponse {
   lines: number
 }
 
-export interface BackupRecord {
-  id: number
-  file_id: number
-  original_path: string
-  backup_path: string
-  created_at: string
-  restored_at: string
-  restore_safety_path: string
-  availability: BackupAvailability
+export interface FileRecord {
+	id: number
+	path: string
+	size: number
+	mtime_ns: number
+	audio_signature: string
+	video_signature: string
+	compliance_status: 'compliant' | 'noncompliant' | '' | string
+	audio_policy_version: number
+	backup_file: string
+	created_at: string
+	updated_at: string
 }
 
 export interface ServiceStatus {
   status: 'running' | 'restarting' | 'restart_failed' | string
   counts: Record<string, number>
-  backup_usage_bytes: number
+	backup_usage_bytes: number
+	unresolved_backup_count: number
   transcode_success_rate: TranscodeSuccessRate
 }
 
@@ -149,12 +142,8 @@ export interface ScanResponse {
   status: 'queued' | string
 }
 
-export interface CleanupExpiredResponse {
-  removed: number
-}
-
 export interface RestoreResult {
-  safety_path: string
+	backup_path: string
 }
 
 export type EventStreamStatus = 'connecting' | 'connected' | 'disconnected' | 'error'

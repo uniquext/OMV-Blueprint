@@ -37,7 +37,6 @@ const (
 	defaultWorkRoot   = "/app/work"
 	defaultWebDir     = "/app/web/dist"
 
-	defaultBackupCleanupInterval  = time.Hour
 	startupCriticalRecoveryPrefix = "startup recovered interrupted critical phase "
 
 	restartRunning int32 = iota
@@ -93,7 +92,6 @@ type Service struct {
 
 	restoreProbeTimeout   time.Duration
 	restorePersistTimeout time.Duration
-	backupCleanupInterval time.Duration
 
 	workerCtx      context.Context
 	cancelWorker   context.CancelFunc
@@ -164,26 +162,25 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 
 	workerCtx, cancelWorker := context.WithCancel(context.Background())
 	service := &Service{
-		cfg:                   cfg,
-		configPath:            opts.ConfigPath,
-		db:                    repo,
-		events:                eventbus.New(),
-		queue:                 pipeline.NewQueue(),
-		logger:                opts.Logger,
-		logCloser:             opts.logCloser,
-		logPath:               opts.LogPath,
-		backupRoot:            opts.BackupRoot,
-		workRoot:              opts.WorkRoot,
-		webDir:                opts.WebDir,
-		httpAddr:              opts.HTTPAddr,
-		ffmpegName:            opts.FFmpegName,
-		ffprobeName:           opts.FFprobeName,
-		prober:                opts.Prober,
-		restart:               opts.Restart,
-		backupCleanupInterval: defaultBackupCleanupInterval,
-		workerCtx:             workerCtx,
-		cancelWorker:          cancelWorker,
-		pathMutationPaths:     make(map[string]struct{}),
+		cfg:               cfg,
+		configPath:        opts.ConfigPath,
+		db:                repo,
+		events:            eventbus.New(),
+		queue:             pipeline.NewQueue(),
+		logger:            opts.Logger,
+		logCloser:         opts.logCloser,
+		logPath:           opts.LogPath,
+		backupRoot:        opts.BackupRoot,
+		workRoot:          opts.WorkRoot,
+		webDir:            opts.WebDir,
+		httpAddr:          opts.HTTPAddr,
+		ffmpegName:        opts.FFmpegName,
+		ffprobeName:       opts.FFprobeName,
+		prober:            opts.Prober,
+		restart:           opts.Restart,
+		workerCtx:         workerCtx,
+		cancelWorker:      cancelWorker,
+		pathMutationPaths: make(map[string]struct{}),
 	}
 	service.accepting.Store(true)
 	service.restartState.Store(restartRunning)
@@ -197,6 +194,13 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 	}
 	if opts.afterHTTPBind != nil {
 		opts.afterHTTPBind()
+	}
+	if err := service.recoverReplacementJournals(ctx); err != nil {
+		_ = listener.Close()
+		_ = repo.Close()
+		closeOptionsLog(opts)
+		cancelWorker()
+		return nil, fmt.Errorf("recover interrupted replacements: %w", err)
 	}
 	if err := RecoverStartup(ctx, repo); err != nil {
 		_ = listener.Close()
@@ -218,10 +222,105 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 			service.logf("watcher start failed: %v", err)
 		}
 	}
-	service.startBackupCleanup()
 	service.startWorkers()
 	service.serveHTTP(listener)
 	return service, nil
+}
+
+func (s *Service) recoverReplacementJournals(ctx context.Context) error {
+	journals, err := s.db.ReplacementJournals(ctx)
+	if err != nil {
+		return err
+	}
+	for _, journal := range journals {
+		if journal.Phase == repository.ReplacementCommitted {
+			file, fileErr := s.db.FileByID(ctx, journal.FileID)
+			if fileErr == nil && file.BackupFile == journal.TemporaryBackupPath {
+				if err := s.db.DeleteReplacementJournal(ctx, journal.JobID); err != nil {
+					return err
+				}
+				continue
+			}
+			if fileErr != nil && !errors.Is(fileErr, sql.ErrNoRows) {
+				return fileErr
+			}
+			if err := s.cleanupReplacementJournal(ctx, journal); err != nil {
+				return err
+			}
+			continue
+		}
+		file, err := s.db.FileByID(ctx, journal.FileID)
+		if err != nil {
+			return err
+		}
+		finalError := startupCriticalRecoveryPrefix + string(journal.Phase)
+		if journal.Phase == repository.ReplacementOutputInstalled || journal.Phase == repository.ReplacementRestoring {
+			restoreErr := s.restoreJournalBackup(ctx, journal, &file)
+			if restoreErr != nil {
+				file.BackupFile = journal.TemporaryBackupPath
+				finalError += "; automatic restore failed: " + restoreErr.Error()
+				if _, _, err := s.db.FinishProcessJob(ctx, journal.JobID, file, repository.JobResultFailed, finalError); err != nil {
+					return err
+				}
+				if err := s.db.DeleteReplacementJournal(ctx, journal.JobID); err != nil {
+					return err
+				}
+				s.logf("startup preserved unresolved backup file_id=%d path=%s backup_file=%s error=%v", file.ID, file.Path, file.BackupFile, restoreErr)
+				continue
+			}
+		}
+		if _, _, err := s.db.FinishProcessJob(ctx, journal.JobID, file, repository.JobResultFailed, finalError); err != nil {
+			return err
+		}
+		if err := s.cleanupReplacementJournal(ctx, journal); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) restoreJournalBackup(ctx context.Context, journal repository.ReplacementJournal, file *repository.FileFacts) error {
+	cfg := s.config()
+	if _, err := backup.Restore(backup.RestoreRequest{
+		OriginalPath: journal.OriginalPath,
+		BackupPath:   journal.TemporaryBackupPath,
+		BackupRoot:   s.backupRoot,
+		MediaRoots:   cfg.Media.Roots,
+	}); err != nil {
+		return err
+	}
+	info, err := os.Stat(journal.OriginalPath)
+	if err != nil {
+		return err
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, s.restoreProbeDeadline())
+	defer cancel()
+	probe, err := s.prober.Probe(probeCtx, journal.OriginalPath)
+	if err != nil {
+		return err
+	}
+	if info.Size() != journal.OriginalSize ||
+		(journal.OriginalAudioSignature != "" && probe.AudioSignature() != journal.OriginalAudioSignature) ||
+		(journal.OriginalVideoSignature != "" && probe.VideoSignature() != journal.OriginalVideoSignature) {
+		return errors.New("restored file does not match replacement journal")
+	}
+	file.Size = info.Size()
+	file.MTimeNS = info.ModTime().UnixNano()
+	file.AudioSignature = probe.AudioSignature()
+	file.VideoSignature = probe.VideoSignature()
+	return nil
+}
+
+func (s *Service) cleanupReplacementJournal(ctx context.Context, journal repository.ReplacementJournal) error {
+	if journal.OutputPath != "" {
+		if err := os.Remove(journal.OutputPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if err := backup.Remove(journal.TemporaryBackupPath, s.backupRoot); err != nil {
+		return err
+	}
+	return s.db.DeleteReplacementJournal(ctx, journal.JobID)
 }
 
 func withDefaults(opts Options) Options {
@@ -394,12 +493,25 @@ func (s *Service) workerLoop(worker *pipeline.Worker) {
 						result.FinalFile,
 						repository.JobResultFailed,
 						finalError,
-						result.Backup,
 					)
 					cancelFinish()
 					if finishErr != nil {
 						s.logf("finish failed job id=%d: %v", result.JobID, finishErr)
 					} else {
+						if result.FinalFile.BackupFile != "" {
+							journalCtx, cancelJournal := context.WithTimeout(context.Background(), 30*time.Second)
+							err := s.db.DeleteReplacementJournal(journalCtx, result.JobID)
+							cancelJournal()
+							if err != nil {
+								s.logf("delete unresolved backup journal job_id=%d: %v", result.JobID, err)
+							}
+							if s.events != nil {
+								s.events.Publish("file.backup_created", map[string]any{
+									"file_id": result.FinalFile.ID, "path": result.FinalFile.Path,
+									"backup_file": result.FinalFile.BackupFile,
+								})
+							}
+						}
 						outcome := result.FailureOutcome
 						if outcome == "" {
 							outcome = "failed"
@@ -463,7 +575,7 @@ func (s *Service) prepareHTTPServer() (net.Listener, error) {
 		Status:         s,
 		RuntimeTasks:   s,
 		History:        s,
-		Backups:        s,
+		Files:          s,
 		RuntimeLogs:    s,
 	})
 	s.server = &http.Server{
@@ -534,7 +646,6 @@ func (s *Service) waitForCriticalPhaseClear() {
 }
 
 func (s *Service) Status(ctx context.Context) (any, error) {
-	cfg := s.config()
 	status := "running"
 	switch s.restartState.Load() {
 	case restartPending:
@@ -546,7 +657,7 @@ func (s *Service) Status(ctx context.Context) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	backups, err := s.db.Backups(ctx)
+	filesWithBackup, err := s.db.FilesWithBackup(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -558,26 +669,21 @@ func (s *Service) Status(ctx context.Context) (any, error) {
 		"compatible": outcomeCounts.Compatible,
 		"processed":  outcomeCounts.Processed,
 		"failed":     outcomeCounts.Failed,
-		"restored":   outcomeCounts.Restored,
 	}
 	var backupUsage int64
-	now := time.Now()
-	retentionDays := cfg.Backup.RetentionDays
-	for _, record := range backups {
-		if backupAvailability(record, now, retentionDays) != repository.BackupAvailable {
-			continue
-		}
-		info, err := os.Stat(record.BackupPath)
+	for _, file := range filesWithBackup {
+		info, err := os.Stat(file.BackupFile)
 		if err != nil {
 			continue
 		}
 		backupUsage += info.Size()
 	}
 	return map[string]any{
-		"status":                 status,
-		"counts":                 counts,
-		"backup_usage_bytes":     backupUsage,
-		"transcode_success_rate": transcodeSuccessRate(transcodeStats),
+		"status":                  status,
+		"counts":                  counts,
+		"backup_usage_bytes":      backupUsage,
+		"unresolved_backup_count": len(filesWithBackup),
+		"transcode_success_rate":  transcodeSuccessRate(transcodeStats),
 	}, nil
 }
 
@@ -611,80 +717,145 @@ func (s *Service) ListHistory(ctx context.Context, page *repository.PageRequest)
 	return s.db.History(ctx)
 }
 
-func (s *Service) ListBackups(ctx context.Context, page *repository.PageRequest) (any, error) {
-	now := time.Now()
-	retentionDays := s.config().Backup.RetentionDays
-	if page != nil {
-		result, err := s.db.BackupsPage(ctx, *page)
+func (s *Service) RetryHistoryJob(ctx context.Context, id int64) (any, error) {
+	var retried repository.JobRecord
+	var path string
+	err := func() error {
+		s.workerIntakeMu.Lock()
+		defer s.workerIntakeMu.Unlock()
+
+		job, err := s.db.JobByID(ctx, id)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		result.Items = backupsWithAvailability(result.Items, now, retentionDays)
-		return result, nil
-	}
-	records, err := s.db.Backups(ctx)
+		if job.Ignored || job.Result != repository.JobResultFailed {
+			return api.ErrJobNotActionable
+		}
+		file, err := s.db.FileByID(ctx, job.FileID)
+		if err != nil {
+			return err
+		}
+		if file.BackupFile != "" {
+			return api.ErrJobNotActionable
+		}
+		if _, err := s.db.ReplacementJournalByJob(ctx, job.ID); err == nil {
+			return api.ErrJobNotActionable
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if !s.canEnqueueLocked(file.Path) || s.queue.Contains(file.Path) {
+			return api.ErrProcessing
+		}
+		if !s.queue.EnqueueExistingJob(file.Path, pipeline.JobSourceManual, job.ID) {
+			return api.ErrProcessing
+		}
+		retried, err = s.db.RestartJob(ctx, job.ID)
+		if err != nil {
+			s.queue.Done(file.Path)
+			if errors.Is(err, sql.ErrNoRows) {
+				return api.ErrJobNotActionable
+			}
+			return err
+		}
+		path = file.Path
+		return nil
+	}()
 	if err != nil {
 		return nil, err
 	}
-	return backupsWithAvailability(records, now, retentionDays), nil
+	s.logf("history job retry queued job_id=%d file_id=%d path=%s", retried.ID, retried.FileID, path)
+	if s.events != nil {
+		s.events.Publish("job.retry_queued", map[string]any{
+			"job_id": retried.ID, "file_id": retried.FileID, "path": path,
+		})
+	}
+	return map[string]any{"status": "queued", "job_id": retried.ID, "file_id": retried.FileID, "path": path}, nil
 }
 
-func backupsWithAvailability(records []repository.BackupView, now time.Time, retentionDays int) []repository.BackupView {
-	for i := range records {
-		records[i].Availability = backupAvailability(records[i], now, retentionDays)
-	}
-	return records
-}
-
-func backupAvailability(record repository.BackupView, now time.Time, retentionDays int) repository.BackupAvailability {
-	if _, err := os.Stat(record.BackupPath); errors.Is(err, os.ErrNotExist) {
-		return repository.BackupMissing
-	} else if err != nil {
-		return repository.BackupMissing
-	}
-	if !record.RestoredAt.IsZero() {
-		return repository.BackupRestored
-	}
-	if backupExpired(record, now, retentionDays) {
-		return repository.BackupExpired
-	}
-	return repository.BackupAvailable
-}
-
-func backupExpired(record repository.BackupView, now time.Time, retentionDays int) bool {
-	if record.CreatedAt.IsZero() {
-		return false
-	}
-	expiresAt := record.CreatedAt.AddDate(0, 0, retentionDays)
-	return !expiresAt.After(now)
-}
-
-func (s *Service) RestoreBackup(ctx context.Context, id int64) (any, error) {
-	record, err := s.db.BackupByID(ctx, id)
+func (s *Service) IgnoreHistoryJob(ctx context.Context, id int64) (any, error) {
+	job, err := s.db.JobByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if !s.beginPathMutation(record.OriginalPath) {
+	if job.Ignored || job.Result != repository.JobResultFailed {
+		return nil, api.ErrJobNotActionable
+	}
+	ignored, err := s.db.IgnoreJob(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, api.ErrJobNotActionable
+	}
+	if err != nil {
+		return nil, err
+	}
+	s.logf("history job ignored job_id=%d file_id=%d", ignored.ID, ignored.FileID)
+	if s.events != nil {
+		s.events.Publish("job.ignored", map[string]any{"job_id": ignored.ID, "file_id": ignored.FileID})
+	}
+	return map[string]any{"status": "ignored", "job_id": ignored.ID, "file_id": ignored.FileID}, nil
+}
+
+func (s *Service) ListFiles(ctx context.Context, page *repository.PageRequest) (any, error) {
+	if page != nil {
+		return s.db.FilesPage(ctx, *page)
+	}
+	return s.db.Files(ctx)
+}
+
+func (s *Service) ProcessFile(ctx context.Context, id int64) (any, error) {
+	file, err := s.db.FileByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if file.ComplianceStatus != repository.ComplianceNoncompliant || file.BackupFile != "" {
+		return nil, api.ErrFileNotProcessable
+	}
+	if !s.enqueueWithSource(file.Path, pipeline.JobSourceManual) {
 		return nil, api.ErrProcessing
 	}
-	defer s.finishPathMutation(record.OriginalPath)
+	s.logf("manual process queued file_id=%d path=%s", file.ID, file.Path)
+	return map[string]any{
+		"status":  "queued",
+		"file_id": file.ID,
+		"path":    file.Path,
+	}, nil
+}
 
-	file, err := s.db.FileByPath(ctx, record.OriginalPath)
+func (s *Service) RestoreFileBackup(ctx context.Context, id int64) (any, error) {
+	file, err := s.db.FileByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
+	if file.BackupFile == "" {
+		return nil, sql.ErrNoRows
+	}
+	if !s.beginPathMutation(file.Path) {
+		return nil, api.ErrProcessing
+	}
+	defer s.finishPathMutation(file.Path)
+
+	file, err = s.db.FileByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if file.BackupFile == "" {
+		return nil, sql.ErrNoRows
+	}
+	backupPath := file.BackupFile
 	cfg := s.config()
-	result, err := backup.RestoreBackup(backup.RestoreRequest{
-		OriginalPath: record.OriginalPath,
-		BackupPath:   record.BackupPath,
+	result, err := backup.Restore(backup.RestoreRequest{
+		OriginalPath: file.Path,
+		BackupPath:   backupPath,
+		BackupRoot:   s.backupRoot,
 		MediaRoots:   cfg.Media.Roots,
 	})
 	if err != nil {
 		return nil, err
 	}
-
-	if err := s.persistRestoredFile(record.ID, result.SafetyPath, file); err != nil {
+	if err := s.persistRestoredFile(file, backupPath); err != nil {
 		return nil, err
+	}
+	if s.events != nil {
+		s.events.Publish("file.backup_restored", map[string]any{"file_id": file.ID, "path": file.Path})
 	}
 	return result, nil
 }
@@ -703,51 +874,33 @@ func (s *Service) restorePersistDeadline() time.Duration {
 	return 30 * time.Second
 }
 
-func (s *Service) CleanupBackups(ctx context.Context) (any, error) {
-	records, err := s.db.UnrestoredBackups(ctx)
+func (s *Service) DeleteFileBackup(ctx context.Context, id int64) (any, error) {
+	file, err := s.db.FileByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	removed := 0
-	now := time.Now()
-	retentionDays := s.config().Backup.RetentionDays
-	for _, record := range records {
-		if !backupExpired(record, now, retentionDays) {
-			continue
-		}
-		didRemove, err := s.cleanupBackupRecord(ctx, record)
-		if err != nil {
+	if !s.beginPathMutation(file.Path) {
+		return nil, api.ErrProcessing
+	}
+	defer s.finishPathMutation(file.Path)
+
+	file, err = s.db.FileByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if file.BackupFile != "" {
+		if err := backup.Remove(file.BackupFile, s.backupRoot); err != nil {
 			return nil, err
 		}
-		if didRemove {
-			removed++
+		if err := s.db.ClearFileBackup(ctx, file.ID); err != nil {
+			return nil, err
 		}
 	}
-	return map[string]int{"removed": removed}, nil
-}
-
-func (s *Service) startBackupCleanup() {
-	interval := s.backupCleanupInterval
-	if interval <= 0 || s.db == nil || s.workerCtx == nil {
-		return
+	s.logf("backup cleared file_id=%d path=%s backup_file=%s", file.ID, file.Path, file.BackupFile)
+	if s.events != nil {
+		s.events.Publish("file.backup_deleted", map[string]any{"file_id": file.ID, "path": file.Path})
 	}
-
-	s.workers.Add(1)
-	go func() {
-		defer s.workers.Done()
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-s.workerCtx.Done():
-				return
-			case <-ticker.C:
-				if _, err := s.CleanupBackups(context.Background()); err != nil {
-					s.logf("backup cleanup failed: %v", err)
-				}
-			}
-		}
-	}()
+	return map[string]string{"status": "deleted"}, nil
 }
 
 func (s *Service) cleanupOrphanTempOutputs(ctx context.Context) error {
@@ -782,28 +935,6 @@ func (s *Service) cleanupOrphanTempOutputs(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) cleanupBackupRecord(ctx context.Context, record repository.BackupView) (bool, error) {
-	if !s.beginPathMutation(record.OriginalPath) {
-		return false, nil
-	}
-	defer s.finishPathMutation(record.OriginalPath)
-
-	current, err := s.db.BackupByID(ctx, record.ID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if !current.RestoredAt.IsZero() {
-		return false, nil
-	}
-	if err := os.Remove(current.BackupPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return false, err
-	}
-	return s.db.DeleteUnrestoredBackup(ctx, current.ID)
-}
-
 func (s *Service) RuntimeLogs(ctx context.Context, lines int) (any, error) {
 	content, count, err := tailLogFile(ctx, s.logPath, lines)
 	if err != nil {
@@ -816,6 +947,15 @@ func (s *Service) enqueueWithSource(path string, source pipeline.JobSource) bool
 	s.workerIntakeMu.Lock()
 	defer s.workerIntakeMu.Unlock()
 	if !s.canEnqueueLocked(path) {
+		return false
+	}
+	file, err := s.db.FileByPath(context.Background(), path)
+	if err == nil && file.BackupFile != "" {
+		s.logf("skip unresolved backup path=%s backup_file=%s source=%s", path, file.BackupFile, source)
+		return false
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		s.logf("skip enqueue because file backup state could not be read path=%s source=%s error=%v", path, source, err)
 		return false
 	}
 	return s.queue.EnqueueWithSource(path, source)
@@ -872,7 +1012,7 @@ func (s *Service) isPathMutating(path string) bool {
 	return ok
 }
 
-func (s *Service) persistRestoredFile(backupID int64, safetyPath string, file repository.FileFacts) error {
+func (s *Service) persistRestoredFile(file repository.FileFacts, backupPath string) error {
 	info, statErr := os.Stat(file.Path)
 	prober := s.prober
 	if prober == nil {
@@ -891,54 +1031,39 @@ func (s *Service) persistRestoredFile(backupID int64, safetyPath string, file re
 	file.ComplianceStatus = repository.ComplianceUnknown
 	file.AudioPolicyVersion = 0
 
-	jobResult := repository.JobResultSucceeded
-	finalError := ""
-	status := "restored"
 	if statErr != nil {
-		jobResult = repository.JobResultFailed
-		status = "failed"
-		finalError = fmt.Sprintf("%s: stat restored file: %v", pipeline.CauseRestoreStatError, statErr)
-	} else if probeErr != nil {
-		jobResult = repository.JobResultFailed
-		status = "failed"
-		finalError = fmt.Sprintf("%s: probe restored file: %v", pipeline.CauseRestoreProbeError, probeErr)
-	} else {
-		file.AudioSignature = probe.AudioSignature()
-		file.VideoSignature = probe.VideoSignature()
-		analysisConfig := s.config()
-		decision := media.Decide(file.Path, probe, media.DecisionConfig{
-			Extensions:         analysisConfig.Media.Extensions,
-			IncompatibleCodecs: analysisConfig.Audio.IncompatibleCodecs,
-		})
-		switch decision.Action {
-		case media.ActionAlreadyCompatible:
-			file.ComplianceStatus = repository.ComplianceCompliant
-			file.AudioPolicyVersion = analysisConfig.Audio.Version
-		case media.ActionTranscode:
-			file.ComplianceStatus = repository.ComplianceNoncompliant
-			file.AudioPolicyVersion = analysisConfig.Audio.Version
-		default:
-			file.AudioSignature = ""
-			file.VideoSignature = ""
-			jobResult = repository.JobResultFailed
-			status = "failed"
-			finalError = fmt.Sprintf("%s: assess restored file: %s", pipeline.CauseUnsupported, decision.Reason)
-		}
+		return fmt.Errorf("%s: stat restored file: %w", pipeline.CauseRestoreStatError, statErr)
 	}
+	if probeErr != nil {
+		return fmt.Errorf("%s: probe restored file: %w", pipeline.CauseRestoreProbeError, probeErr)
+	}
+	file.AudioSignature = probe.AudioSignature()
+	file.VideoSignature = probe.VideoSignature()
+	analysisConfig := s.config()
+	decision := media.Decide(file.Path, probe, media.DecisionConfig{
+		Extensions:         analysisConfig.Media.Extensions,
+		IncompatibleCodecs: analysisConfig.Audio.IncompatibleCodecs,
+	})
+	switch decision.Action {
+	case media.ActionAlreadyCompatible:
+		file.ComplianceStatus = repository.ComplianceCompliant
+		file.AudioPolicyVersion = analysisConfig.Audio.Version
+	case media.ActionTranscode:
+		file.ComplianceStatus = repository.ComplianceNoncompliant
+		file.AudioPolicyVersion = analysisConfig.Audio.Version
+	default:
+		return fmt.Errorf("%s: assess restored file: %s", pipeline.CauseUnsupported, decision.Reason)
+	}
+	if err := backup.Remove(backupPath, s.backupRoot); err != nil {
+		return fmt.Errorf("delete restored backup: %w", err)
+	}
+	file.BackupFile = ""
 
 	persistCtx, cancelPersist := context.WithTimeout(context.Background(), s.restorePersistDeadline())
 	defer cancelPersist()
-	persisted, _, err := s.db.RecordRestore(persistCtx, backupID, safetyPath, file, jobResult, finalError)
+	_, err := s.db.PersistRestoredFile(persistCtx, file)
 	if err != nil {
 		return err
-	}
-	if s.events != nil {
-		s.events.Publish("job.restored", map[string]any{
-			"file_id": persisted.ID,
-			"path":    persisted.Path,
-			"status":  status,
-			"error":   finalError,
-		})
 	}
 	return nil
 }

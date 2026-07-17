@@ -2,7 +2,7 @@ import type { HistoryRecord } from './types'
 import type { PageResult } from './types'
 import { serviceDatePart } from './time'
 
-export type JobFilter = 'all' | 'compatible' | 'processing' | 'processed' | 'failed' | 'restored'
+export type JobFilter = 'all' | 'compatible' | 'processing' | 'processed' | 'failed'
 export type HistorySourceFilter = 'all' | string
 
 export interface HistoryFilter {
@@ -46,9 +46,6 @@ export function jobDirectory(job: JobLike): string {
 }
 
 export function jobStatus(job: JobLike): string {
-  if (job.kind === 'restore' && job.result === 'succeeded') {
-    return 'restored'
-  }
   switch (job.result) {
     case 'succeeded':
       return 'processed'
@@ -71,8 +68,7 @@ export function jobFilterKey(job: JobLike): Exclude<JobFilter, 'all'> | null {
     status === 'compatible' ||
     status === 'processing' ||
     status === 'processed' ||
-    status === 'failed' ||
-    status === 'restored'
+    status === 'failed'
   ) {
     return status
   }

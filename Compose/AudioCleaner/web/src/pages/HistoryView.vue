@@ -1,6 +1,9 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { EyeOff, RotateCcw } from '@lucide/vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import ConfirmDialog from '../components/ConfirmDialog.vue'
 import DataPager from '../components/DataPager.vue'
+import { eventStreamState } from '../composables/useEventStream'
 import { jobStatusLabel, t } from '../i18n'
 import { api } from '../lib/api'
 import {
@@ -11,7 +14,6 @@ import {
   jobDirectory,
   jobDiscoverySource,
   jobDiscoverySourceDisplay,
-  jobErrorSummaryLabelKey,
   type JobFilter,
   jobFilterKey,
   jobID,
@@ -20,7 +22,7 @@ import {
   loadAllJobPages
 } from '../lib/jobs'
 import { jobStatusTone, semanticBadgeClass } from '../lib/semantic'
-import { formatServiceTimestamp, serviceDatePart } from '../lib/time'
+import { formatServiceTimestamp, serviceDatePart, serviceDurationMilliseconds } from '../lib/time'
 import type { HistoryRecord } from '../lib/types'
 
 const emptyValue = computed(() => t('logsNoValue'))
@@ -32,7 +34,10 @@ const selectedError = ref<{ path: string; message: string } | null>(null)
 const errorDialog = ref<HTMLDialogElement | null>(null)
 const historyRoot = ref<HTMLElement | null>(null)
 const loading = ref(false)
+const operationPending = ref(false)
 const error = ref('')
+const pendingAction = ref<'retry' | 'ignore' | null>(null)
+const selectedJob = ref<HistoryRecord | null>(null)
 const resultFilter = ref<JobFilter>('all')
 const sourceFilter = ref<HistorySourceFilter>('all')
 const dateFrom = ref('')
@@ -42,7 +47,7 @@ const openFilter = ref<'result' | 'source' | 'dateFrom' | 'dateTo' | null>(null)
 const calendarDraft = ref('')
 const calendarMonth = ref('')
 
-const resultFilters: JobFilter[] = ['all', 'processed', 'compatible', 'failed', 'processing', 'restored']
+const resultFilters: JobFilter[] = ['all', 'processed', 'compatible', 'failed', 'processing']
 const sourceFilters: HistorySourceFilter[] = ['all', 'scan', 'watchdog', 'manual']
 const filteredJobs = computed(() =>
   filterHistoryJobs(allJobs.value, {
@@ -66,6 +71,17 @@ const calendarTitle = computed(() => {
 })
 const calendarDays = computed(() => buildCalendarDays(calendarMonth.value))
 const calendarWeekdays = ['日', '一', '二', '三', '四', '五', '六']
+const actionDialogOpen = computed(() => pendingAction.value !== null)
+const actionDialogTitle = computed(() =>
+  pendingAction.value === 'retry' ? t('historyConfirmRetryTitle') : t('historyConfirmIgnoreTitle')
+)
+const actionDialogMessage = computed(() => {
+  const message = pendingAction.value === 'retry' ? t('historyConfirmRetryMessage') : t('historyConfirmIgnoreMessage')
+  return `${message} ${selectedJob.value?.path || ''}`
+})
+const busy = computed(() => loading.value || operationPending.value)
+const historyRefreshEvents = new Set(['compatible', 'processed', 'failed', 'job.retry_queued', 'job.ignored'])
+let loadScheduled = false
 
 interface CalendarDay {
   date: string
@@ -95,6 +111,43 @@ async function loadHistory(): Promise<void> {
     allJobs.value = []
   } finally {
     loading.value = false
+  }
+}
+
+function scheduleHistoryLoad(): void {
+  if (loadScheduled) return
+  loadScheduled = true
+  void nextTick(async () => {
+    loadScheduled = false
+    await loadHistory()
+  })
+}
+
+function askJobAction(action: 'retry' | 'ignore', job: HistoryRecord): void {
+  pendingAction.value = action
+  selectedJob.value = job
+}
+
+function closeActionDialog(): void {
+  pendingAction.value = null
+  selectedJob.value = null
+}
+
+async function confirmJobAction(): Promise<void> {
+  if (operationPending.value || !pendingAction.value || !selectedJob.value) return
+  const action = pendingAction.value
+  const id = selectedJob.value.id
+  closeActionDialog()
+  operationPending.value = true
+  error.value = ''
+  try {
+    if (action === 'retry') await api.retryHistoryJob(id)
+    else await api.ignoreHistoryJob(id)
+    await loadHistory()
+  } catch (caught) {
+    error.value = caught instanceof Error ? caught.message : String(caught)
+  } finally {
+    operationPending.value = false
   }
 }
 
@@ -264,21 +317,35 @@ function jobTableDate(job: HistoryRecord): string {
   return formatServiceTimestamp(job.finished_at || job.started_at, true) || emptyValue.value
 }
 
-function jobDetailDate(job: HistoryRecord): string {
-  return formatServiceTimestamp(job.finished_at || job.started_at, true) || emptyValue.value
+function jobStartedDate(job: HistoryRecord): string {
+  return formatServiceTimestamp(job.started_at, true) || emptyValue.value
 }
 
-function jobErrorSummary(job: HistoryRecord): string {
-  const labelKey = jobErrorSummaryLabelKey(job.final_error)
-  return labelKey ? t(labelKey) : ''
+function jobFinishedDate(job: HistoryRecord): string {
+  return formatServiceTimestamp(job.finished_at, true) || emptyValue.value
 }
 
-function jobErrorDetail(job: HistoryRecord): string {
-  const labelKey = jobErrorSummaryLabelKey(job.final_error)
-  if (!labelKey) {
-    return ''
+function jobDurationDisplay(job: HistoryRecord): string {
+  if (!job.finished_at) {
+    return t('historyDetailDurationPending')
   }
-  return t(`${labelKey}Detail`)
+  const duration = serviceDurationMilliseconds(job.started_at, job.finished_at)
+  if (duration === null) {
+    return emptyValue.value
+  }
+  const hours = Math.floor(duration / 3_600_000)
+  const minutes = Math.floor((duration % 3_600_000) / 60_000)
+  const secondsWithMilliseconds = (duration % 60_000) / 1000
+  const seconds = secondsWithMilliseconds.toFixed(3).replace(/\.?0+$/, '')
+  const parts: string[] = []
+  if (hours > 0) {
+    parts.push(`${hours} ${t('historyDurationHour')}`)
+  }
+  if (hours > 0 || minutes > 0) {
+    parts.push(`${minutes} ${t('historyDurationMinute')}`)
+  }
+  parts.push(`${seconds} ${t('historyDurationSecond')}`)
+  return parts.join(' ')
 }
 
 function openErrorDialog(job: HistoryRecord): void {
@@ -287,7 +354,7 @@ function openErrorDialog(job: HistoryRecord): void {
   }
   selectedError.value = {
     path: jobPath(job),
-    message: jobErrorDetail(job)
+    message: job.final_error
   }
 }
 
@@ -328,6 +395,12 @@ watch(
     showDialog(element)
   },
   { flush: 'post' }
+)
+watch(
+  () => eventStreamState.lastEvent,
+  (event) => {
+    if (event && historyRefreshEvents.has(event.type)) scheduleHistoryLoad()
+  }
 )
 
 onMounted(() => {
@@ -522,11 +595,12 @@ onBeforeUnmount(() => {
             <th>{{ t('jobsColumnSource') }}</th>
             <th>{{ t('historyColumnResult') }}</th>
             <th>{{ t('tableUpdated') }}</th>
+            <th>{{ t('jobsColumnActions') }}</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="!loading && jobs.length === 0">
-            <td colspan="6" class="muted">{{ t('jobsNoData') }}</td>
+            <td colspan="7" class="muted">{{ t('jobsNoData') }}</td>
           </tr>
           <template v-for="job in jobs" :key="jobID(job)">
             <tr>
@@ -545,21 +619,49 @@ onBeforeUnmount(() => {
                 <span :class="jobStatusBadgeClass(job)">{{ jobStatusDisplay(job) }}</span>
               </td>
               <td class="date-cell">{{ jobTableDate(job) }}</td>
+              <td class="actions-cell history-actions-cell">
+                <div class="row-actions">
+                  <button
+                    class="button"
+                    type="button"
+                    :data-testid="`history-retry-${job.id}`"
+                    :disabled="busy || job.result !== 'failed'"
+                    @click="askJobAction('retry', job)"
+                  >
+                    <RotateCcw :size="14" aria-hidden="true" />
+                    {{ t('historyRetry') }}
+                  </button>
+                  <button
+                    class="button danger"
+                    type="button"
+                    :data-testid="`history-ignore-${job.id}`"
+                    :disabled="busy || job.result !== 'failed'"
+                    @click="askJobAction('ignore', job)"
+                  >
+                    <EyeOff :size="14" aria-hidden="true" />
+                    {{ t('historyIgnore') }}
+                  </button>
+                </div>
+              </td>
             </tr>
             <tr v-if="isExpanded(job)" class="history-detail-row">
-              <td class="history-detail-cell" colspan="6">
+              <td class="history-detail-cell" colspan="7">
                 <div class="history-detail-grid">
                   <div class="history-detail-field">
-                    <span class="history-detail-key">JobID:</span>
+                    <span class="history-detail-key">{{ t('historyDetailJobID') }}:</span>
                     <span class="history-detail-value">{{ jobID(job) }}</span>
+                  </div>
+                  <div class="history-detail-field">
+                    <span class="history-detail-key">{{ t('historyDetailStartedAt') }}:</span>
+                    <span class="history-detail-value">{{ jobStartedDate(job) }}</span>
                   </div>
                   <div class="history-detail-field">
                     <span class="history-detail-key">{{ t('jobsColumnSource') }}:</span>
                     <span class="history-detail-value">{{ jobDiscoverySourceLabel(job) }}</span>
                   </div>
                   <div class="history-detail-field">
-                    <span class="history-detail-key">{{ t('tableUpdated') }}:</span>
-                    <span class="history-detail-value">{{ jobDetailDate(job) }}</span>
+                    <span class="history-detail-key">{{ t('historyDetailFinishedAt') }}:</span>
+                    <span class="history-detail-value">{{ jobFinishedDate(job) }}</span>
                   </div>
                   <div class="history-detail-field">
                     <span class="history-detail-key">{{ t('historyColumnResult') }}:</span>
@@ -567,15 +669,22 @@ onBeforeUnmount(() => {
                       <span :class="jobStatusBadgeClass(job)">{{ jobStatusDisplay(job) }}</span>
                     </span>
                   </div>
+                  <div class="history-detail-field">
+                    <span class="history-detail-key">{{ t('historyDetailDuration') }}:</span>
+                    <span class="history-detail-value">{{ jobDurationDisplay(job) }}</span>
+                  </div>
                   <div class="history-detail-field history-detail-field--wide">
-                    <span class="history-detail-key">Media path:</span>
+                    <span class="history-detail-key">{{ t('historyDetailPath') }}:</span>
                     <span class="history-detail-value">{{ jobPath(job) }}</span>
                   </div>
-                  <div v-if="job.final_error" class="history-detail-field history-detail-field--wide">
-                    <span class="history-detail-key">{{ t('dashboardError') }}:</span>
-                    <button class="history-error-link" type="button" @click="openErrorDialog(job)">
-                      {{ jobErrorSummary(job) }}
-                    </button>
+                  <div class="history-detail-field history-detail-field--wide">
+                    <span class="history-detail-key">{{ t('historyDetailFinalError') }}:</span>
+                    <span class="history-detail-value">
+                      <button v-if="job.final_error" class="history-error-link" type="button" @click="openErrorDialog(job)">
+                        {{ job.final_error }}
+                      </button>
+                      <span v-else>{{ emptyValue }}</span>
+                    </span>
                   </div>
                 </div>
               </td>
@@ -591,6 +700,16 @@ onBeforeUnmount(() => {
         @update:page-size="updatePageSize"
       />
     </div>
+
+    <ConfirmDialog
+      :open="actionDialogOpen"
+      :title="actionDialogTitle"
+      :message="actionDialogMessage"
+      :confirm-text="t('confirmConfirm')"
+      :cancel-text="t('confirmCancel')"
+      @confirm="confirmJobAction"
+      @cancel="closeActionDialog"
+    />
 
     <dialog
       v-if="selectedError"

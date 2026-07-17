@@ -1,4 +1,4 @@
-export type SemanticTone = 'success' | 'danger' | 'info' | 'warning' | 'restored' | 'muted' | 'backup'
+export type SemanticTone = 'success' | 'danger' | 'info' | 'warning' | 'muted' | 'backup'
 
 export function semanticBadgeClass(tone: SemanticTone): string {
   return `semantic-badge semantic-badge--${tone}`
@@ -13,23 +13,6 @@ export function jobStatusTone(status: string): SemanticTone {
       return 'danger'
     case 'processing':
       return 'info'
-    case 'restored':
-      return 'restored'
-    default:
-      return 'muted'
-  }
-}
-
-export function backupAvailabilityTone(availability: string): SemanticTone {
-  switch (availability) {
-    case 'available':
-      return 'success'
-    case 'restored':
-      return 'restored'
-    case 'missing':
-      return 'danger'
-    case 'expired':
-      return 'warning'
     default:
       return 'muted'
   }
