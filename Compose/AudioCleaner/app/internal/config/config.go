@@ -9,13 +9,12 @@ import (
 )
 
 type Config struct {
-	Media         MediaConfig         `json:"media"`
-	Audio         AudioConfig         `json:"audio"`
-	Pipeline      PipelineConfig      `json:"pipeline"`
-	Validation    ValidationConfig    `json:"validation"`
-	UI            UIConfig            `json:"ui"`
-	Scan          ScanConfig          `json:"scan"`
-	Notifications NotificationsConfig `json:"notifications"`
+	Media      MediaConfig      `json:"media"`
+	Audio      AudioConfig      `json:"audio"`
+	Pipeline   PipelineConfig   `json:"pipeline"`
+	Validation ValidationConfig `json:"validation"`
+	UI         UIConfig         `json:"ui"`
+	Scan       ScanConfig       `json:"scan"`
 }
 
 type MediaConfig struct {
@@ -53,11 +52,6 @@ type ScanConfig struct {
 	WatchdogEnabled    bool `json:"watchdog_enabled"`
 }
 
-type NotificationsConfig struct {
-	Enabled bool     `json:"enabled"`
-	Targets []string `json:"targets"`
-}
-
 func Default() Config {
 	return Config{
 		Media: MediaConfig{
@@ -88,10 +82,6 @@ func Default() Config {
 		Scan: ScanConfig{
 			StartupScanEnabled: true,
 			WatchdogEnabled:    true,
-		},
-		Notifications: NotificationsConfig{
-			Enabled: false,
-			Targets: []string{},
 		},
 	}
 }

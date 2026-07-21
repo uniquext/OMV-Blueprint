@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { setLanguage, supportedLanguages, t } from '../i18n'
 import { api } from '../lib/api'
 import type { AudioCleanerConfig, SupportedLanguage } from '../lib/types'
@@ -10,13 +10,6 @@ const error = ref('')
 const languageDraft = ref<SupportedLanguage>('zh-CN')
 const savingLanguage = ref(false)
 const languageMessage = ref('')
-
-const notificationsState = computed(() => {
-  if (!config.value?.notifications.enabled) {
-    return `${t('settingsReserved')}, ${t('settingsInactive')}`
-  }
-  return `${t('settingsReserved')}, ${t('settingsActive')}`
-})
 
 function joinValue(values: unknown[] | undefined): string {
   return values && values.length > 0 ? values.join(', ') : t('settingsEmptyValue')
@@ -166,19 +159,6 @@ onMounted(loadConfig)
               <span v-if="languageMessage" class="muted">{{ languageMessage }}</span>
             </div>
           </form>
-        </div>
-      </section>
-
-      <section class="panel settings-panel">
-        <div class="panel-body">
-          <h2>{{ t('settingsBlockNotifications') }}</h2>
-          <p class="muted">{{ t('settingsNotificationsDescription') }}</p>
-          <dl class="settings-list">
-            <dt>{{ t('settingsState') }}</dt>
-            <dd>{{ notificationsState }}</dd>
-            <dt>{{ t('settingsTargets') }}</dt>
-            <dd>{{ joinValue(config.notifications.targets) }}</dd>
-          </dl>
         </div>
       </section>
     </div>

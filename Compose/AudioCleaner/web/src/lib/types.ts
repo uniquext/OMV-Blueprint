@@ -25,7 +25,6 @@ export interface AudioCleanerConfig {
 	validation: ValidationConfig
   ui: UIConfig
   scan: ScanConfig
-  notifications: NotificationsConfig
 }
 
 export interface MediaConfig {
@@ -65,11 +64,6 @@ export interface UIConfig {
 export interface ScanConfig {
   startup_scan_enabled: boolean
   watchdog_enabled: boolean
-}
-
-export interface NotificationsConfig {
-  enabled: boolean
-  targets: string[]
 }
 
 export type JobStatus = 'compatible' | 'processing' | 'processed' | 'failed' | string
