@@ -26,7 +26,7 @@ const pageTitle = computed(() => {
 async function loadSavedLanguage(): Promise<void> {
   try {
     const config = await api.config()
-    setLanguage(config.ui.language)
+    setLanguage(config.modules.ui.language)
   } catch {
     // Keep the default language when configuration is temporarily unavailable.
   }

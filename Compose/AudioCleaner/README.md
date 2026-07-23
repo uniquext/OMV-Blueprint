@@ -36,30 +36,30 @@ Hash 路由：
 - `/#/`：概览；Dashboard 不包含 Scan All。
 - `/#/history`：历史记录。
 - `/#/files`：文件列表、未解决备份还原和删除。
-- `/#/settings`：配置只读展示，允许修改语言。
+- `/#/settings`：Scan、Media、Pipeline、Audio、Validation、UI 六模块独立编辑、校验、确认和保存。
 - `/#/logs`：最近日志和 SSE 状态。
 
-`ui.language` 支持 `zh-CN` 和 `en-US`，通过 WebUI 保存到 `/app/config/config.json` 后热生效。
+模块更新使用 `If-Match` revision 和独立 `PATCH /api/config/{module}`。Audio、Validation、UI 热更新；Media 重载 Watcher；Pipeline 重载 Worker 池；Scan 保存后立即强制重启服务。配置始终以完整 `config.json` 原子写入，应用或重启失败时回滚。
+
+`ui.language` 支持 `zh-CN` 和 `en-US`，保存后在当前浏览器热生效。Notifications 和整份 Config PUT 已从 Settings 合同移除。
 
 备份采用固定的 `safety_only` 策略，不提供保留期或模式配置。
 
-`media.roots` 在 V1.1 WebUI 只读。
+运行单元测试：
+
+```bash
+cd app && go test -race ./...
+cd ../web && npm test && npm run build
+```
 
 ## 集成验证
 
-在当前目录运行端到端集成测试：
+针对已经启动在 9830 且容器名为 `audiocleaner-settings-it` 的隔离测试实例，运行设置系统集成测试：
 
 ```bash
-bash test/scripts/run-integration.sh
+BASE_URL=http://127.0.0.1:9830 \
+CONTAINER_NAME=audiocleaner-settings-it \
+bash test/scripts/run-settings-integration.sh
 ```
 
-测试矩阵的原始物料保留在 `${RESOURCE}/AudioCleanerTestMatrix/source`。如果原始物料不存在，脚本会先生成一份；每次集成测试开始前，脚本会把这份原始物料复制到 `${RESOURCE}/Media/AudioCleanerTestMatrix`，然后只扫描容器内的 `/media/AudioCleanerTestMatrix`。这样 AudioCleaner 处理的是实际 `/media` 挂载下的运行副本，原始矩阵不会被修改。
-
-该测试脚本会清理本地 AudioCleaner 测试状态。它会停止本地 AudioCleaner compose 服务并重新构建，替换 `${RESOURCE}/Media/AudioCleanerTestMatrix`，清空 `data`、`logs`、`backups` 和 `work`，并写入一个测试用的 `config/config.json`。容器内部仍只知道 `/media`，不知道哪些文件是测试数据。
-
-生成的报告会写入 `test/reports`：
-
-- `latest-status.json` 保存最近一次 `/api/status` 响应。
-- `latest-history.json` 保存最近一次 `/api/history` 响应。
-- `latest-files.json` 保存最近一次 `/api/files` 响应。
-- `source-probe-summary.jsonl` 和 `output-probe-summary.jsonl` 保存源媒体和处理后媒体的 ffprobe 摘要。
+脚本覆盖六模块合同、严格校验、revision 冲突、三种生效方式、Scan 强制重启、重启后健康与 SSE 恢复、原子持久化和 Notifications 构建资产扫描。结果写入 `test/reports/settings-integration-results.jsonl`。测试会修改配置，必须使用隔离 bind mount，不得直接针对正式数据目录运行。

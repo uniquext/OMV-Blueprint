@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"reflect"
 	"strconv"
 	"strings"
 
@@ -16,6 +15,7 @@ import (
 	"omv-blueprint/compose/audiocleaner/internal/config"
 	"omv-blueprint/compose/audiocleaner/internal/eventbus"
 	"omv-blueprint/compose/audiocleaner/internal/repository"
+	"omv-blueprint/compose/audiocleaner/internal/settings"
 )
 
 var (
@@ -23,18 +23,6 @@ var (
 	ErrFileNotProcessable = errors.New("file is not eligible for processing")
 	ErrJobNotActionable   = errors.New("job is not eligible for this operation")
 )
-
-type invalidConfigError struct {
-	err error
-}
-
-func (e invalidConfigError) Error() string {
-	return e.err.Error()
-}
-
-func (e invalidConfigError) Unwrap() error {
-	return e.err
-}
 
 const (
 	scanRequestBodyLimit   int64 = 1024
@@ -49,8 +37,9 @@ type Deps struct {
 	Events     *eventbus.Bus
 	EventBus   *eventbus.Bus
 
-	ScanAll        func(context.Context) error
-	RequestRestart func(config.Config)
+	ScanAll          func(context.Context) error
+	RequestRestart   func(config.Config, config.Config) error
+	ConfigApplicator settings.Applicator
 
 	Status       StatusProvider
 	RuntimeTasks RuntimeTaskProvider
@@ -87,10 +76,6 @@ type RuntimeLogStore interface {
 type RuntimeLogResult struct {
 	Content string `json:"content"`
 	Lines   int    `json:"lines"`
-}
-
-type patchUIConfigRequest struct {
-	Language *string `json:"language"`
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -173,72 +158,60 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	cfg := s.config()
-	if len(cfg.Media.Roots) == 0 {
-		cfg = config.Default()
-	}
-	writeOK(w, cfg)
+	writeOK(w, s.settings.View())
 }
 
-func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close()
+func (s *Server) handleGetConfigDefaults(w http.ResponseWriter, r *http.Request) {
+	writeOK(w, s.settings.Defaults())
+}
 
-	cfg := config.Default()
-	body := http.MaxBytesReader(w, r.Body, configRequestBodyLimit)
-	if err := json.NewDecoder(body).Decode(&cfg); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid config JSON")
-		return
-	}
-	cfg.Normalize()
-	if err := cfg.Validate(); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	updated, changed, err := s.updateConfig(cfg)
-	if err != nil {
-		writeDependencyResult(w, nil, err)
-		return
-	}
-	cfg = updated
-	if changed && s.deps.RequestRestart != nil {
-		writeJSON(w, http.StatusOK, Response{
-			Code:    0,
-			Message: "restarting",
-			Data:    map[string]string{"status": "restarting"},
-		})
+func (s *Server) handlePatchConfig(module settings.Module) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		expectedRevision := strings.Trim(strings.TrimSpace(r.Header.Get("If-Match")), `"`)
+		if expectedRevision == "" {
+			writeCodedError(w, http.StatusPreconditionRequired, "revision_required", "If-Match module revision is required", map[string]any{"module": module})
+			return
+		}
+		body := http.MaxBytesReader(w, r.Body, configRequestBodyLimit)
+		payload, err := io.ReadAll(body)
+		if err != nil {
+			writeCodedError(w, http.StatusBadRequest, "invalid_json", "invalid configuration JSON", map[string]any{"module": module})
+			return
+		}
+		result, err := s.settings.Update(r.Context(), module, expectedRevision, payload)
+		if err != nil {
+			var conflict *settings.ConflictError
+			var validation *settings.ValidationError
+			var apply *settings.ApplyError
+			switch {
+			case errors.As(err, &conflict):
+				writeCodedError(w, http.StatusConflict, "config_changed", conflict.Error(), conflict)
+			case errors.As(err, &validation):
+				writeCodedError(w, http.StatusBadRequest, "validation_failed", validation.Error(), validation)
+			case errors.As(err, &apply):
+				writeCodedError(w, http.StatusInternalServerError, "apply_failed", apply.Error(), map[string]any{"module": module, "status": "apply_failed"})
+			default:
+				writeCodedError(w, http.StatusInternalServerError, "config_update_failed", err.Error(), map[string]any{"module": module})
+			}
+			return
+		}
+		message := "configuration applied"
+		if result.Status == settings.Restarting {
+			message = "restarting"
+		}
+		writeJSON(w, http.StatusOK, Response{Code: 0, Message: message, Data: result})
 		_ = http.NewResponseController(w).Flush()
-		go s.deps.RequestRestart(cfg)
-		return
+		if result.Changed && result.ApplyMode == settings.ServiceRestart && s.deps.RequestRestart != nil {
+			go func() {
+				if err := s.deps.RequestRestart(result.BeforeConfig, result.FullConfig); err != nil {
+					if restoreErr := s.settings.Restore(result.BeforeConfig); restoreErr != nil && s.deps.Logf != nil {
+						s.deps.Logf("restore settings snapshot after restart failure: %v", restoreErr)
+					}
+				}
+			}()
+		}
 	}
-	writeOK(w, cfg)
-}
-
-func (s *Server) handlePatchUIConfig(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close()
-
-	var payload patchUIConfigRequest
-	body := http.MaxBytesReader(w, r.Body, configRequestBodyLimit)
-	if err := json.NewDecoder(body).Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid config JSON")
-		return
-	}
-	if payload.Language == nil {
-		writeError(w, http.StatusBadRequest, "ui language is required")
-		return
-	}
-	if *payload.Language == "" {
-		writeError(w, http.StatusBadRequest, "ui language must not be empty")
-		return
-	}
-	cfg, _, err := s.updateConfigBlock(func(cfg *config.Config) error {
-		cfg.UI.Language = *payload.Language
-		return nil
-	})
-	if err != nil {
-		writeDependencyResult(w, nil, err)
-		return
-	}
-	writeOK(w, cfg.UI)
 }
 
 func (s *Server) handleRuntimeLogs(w http.ResponseWriter, r *http.Request) {
@@ -335,11 +308,6 @@ func writeDependencyResult(w http.ResponseWriter, data any, err error) {
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "not found")
-		return
-	}
-	var invalidConfig invalidConfigError
-	if errors.As(err, &invalidConfig) {
-		writeError(w, http.StatusBadRequest, invalidConfig.Error())
 		return
 	}
 	writeError(w, http.StatusInternalServerError, err.Error())
@@ -455,62 +423,4 @@ func isPathLikeKey(key string) bool {
 			strings.HasSuffix(normalized, "root") ||
 			strings.HasSuffix(normalized, "roots")
 	}
-}
-
-func (s *Server) config() config.Config {
-	s.configMu.RLock()
-	defer s.configMu.RUnlock()
-	return s.deps.Config
-}
-
-func (s *Server) updateConfig(cfg config.Config) (config.Config, bool, error) {
-	s.configWriteMu.Lock()
-	defer s.configWriteMu.Unlock()
-
-	s.configMu.Lock()
-	defer s.configMu.Unlock()
-	return s.persistConfigLocked(cfg)
-}
-
-func (s *Server) updateConfigBlock(mutate func(*config.Config) error) (config.Config, bool, error) {
-	s.configWriteMu.Lock()
-	defer s.configWriteMu.Unlock()
-
-	s.configMu.Lock()
-	defer s.configMu.Unlock()
-
-	cfg := s.deps.Config
-	if err := mutate(&cfg); err != nil {
-		return config.Config{}, false, err
-	}
-	return s.persistConfigLocked(cfg)
-}
-
-func (s *Server) persistConfigLocked(cfg config.Config) (config.Config, bool, error) {
-	current := s.deps.Config
-	if cfg.Audio.Version != current.Audio.Version {
-		return config.Config{}, false, invalidConfigError{err: errors.New("audio version is read-only")}
-	}
-	if config.AudioContentEqual(current.Audio, cfg.Audio) {
-		cfg.Audio = current.Audio
-	} else {
-		cfg.Audio.Version = config.NextAudioVersion(current.Audio.Version)
-	}
-	cfg.Normalize()
-	if err := cfg.Validate(); err != nil {
-		return config.Config{}, false, invalidConfigError{err: err}
-	}
-	if reflect.DeepEqual(current, cfg) {
-		return current, false, nil
-	}
-	if s.deps.ConfigPath != "" {
-		if err := config.AtomicWriteJSON(s.deps.ConfigPath, cfg); err != nil {
-			return config.Config{}, false, err
-		}
-	}
-	s.deps.Config = cfg
-	if cfg.Audio.Version != current.Audio.Version && s.deps.Logf != nil {
-		s.deps.Logf("audio config version %d -> %d", current.Audio.Version, cfg.Audio.Version)
-	}
-	return cfg, true, nil
 }

@@ -26,6 +26,7 @@ import (
 	"omv-blueprint/compose/audiocleaner/internal/media"
 	"omv-blueprint/compose/audiocleaner/internal/pipeline"
 	"omv-blueprint/compose/audiocleaner/internal/repository"
+	"omv-blueprint/compose/audiocleaner/internal/settings"
 )
 
 const (
@@ -38,7 +39,9 @@ const (
 	defaultWebDir     = "/app/web/dist"
 
 	startupCriticalRecoveryPrefix = "startup recovered interrupted critical phase "
+)
 
+const (
 	restartRunning int32 = iota
 	restartPending
 	restartFailed
@@ -68,6 +71,13 @@ type Options struct {
 	logCloser     func() error
 }
 
+type runtimeWatcher interface {
+	Close() error
+	Errors() <-chan error
+}
+
+type watcherFactory func([]string, func(string)) (runtimeWatcher, error)
+
 type Service struct {
 	cfg        config.Config
 	cfgMu      sync.RWMutex
@@ -75,7 +85,9 @@ type Service struct {
 	db         *repository.Repository
 	events     *eventbus.Bus
 	queue      *pipeline.Queue
-	watcher    *pipeline.Watcher
+	watcher    runtimeWatcher
+	watcherMu  sync.Mutex
+	newWatcher watcherFactory
 	server     *http.Server
 	logger     *log.Logger
 	logCloser  func() error
@@ -93,10 +105,12 @@ type Service struct {
 	restoreProbeTimeout   time.Duration
 	restorePersistTimeout time.Duration
 
-	workerCtx      context.Context
-	cancelWorker   context.CancelFunc
-	workers        sync.WaitGroup
-	workerIntakeMu sync.Mutex
+	workerCtx       context.Context
+	cancelWorker    context.CancelFunc
+	workers         sync.WaitGroup
+	workerIntakeMu  sync.Mutex
+	workerControlMu sync.Mutex
+	workerStops     []chan struct{}
 
 	accepting       atomic.Bool
 	stoppingWorkers atomic.Bool
@@ -184,6 +198,7 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 	}
 	service.accepting.Store(true)
 	service.restartState.Store(restartRunning)
+	service.logf("service started pid=%d", os.Getpid())
 
 	listener, err := service.prepareHTTPServer()
 	if err != nil {
@@ -402,19 +417,42 @@ func (s *Service) ScanAll(ctx context.Context) error {
 }
 
 func (s *Service) startWatcher() error {
-	watcher, err := pipeline.NewWatcher(s.cfg.Media.Roots, func(path string) {
-		if s.isCandidatePath(path) {
+	return s.reloadWatcher(s.config())
+}
+
+func (s *Service) reloadWatcher(cfg config.Config) error {
+	if !cfg.Scan.WatchdogEnabled {
+		s.setConfig(cfg)
+		s.closeWatcher()
+		return nil
+	}
+	mediaConfig := cfg.Media
+	createWatcher := s.newWatcher
+	if createWatcher == nil {
+		createWatcher = func(roots []string, onPath func(string)) (runtimeWatcher, error) {
+			return pipeline.NewWatcher(roots, onPath)
+		}
+	}
+	candidate, err := createWatcher(mediaConfig.Roots, func(path string) {
+		if isCandidatePathForMedia(path, mediaConfig) {
 			s.enqueueWithSource(path, pipeline.JobSourceWatchdog)
 		}
 	})
 	if err != nil {
 		return err
 	}
-	s.watcher = watcher
+	s.watcherMu.Lock()
+	old := s.watcher
+	s.setConfig(cfg)
+	s.watcher = candidate
+	s.watcherMu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
 	s.workers.Add(1)
 	go func() {
 		defer s.workers.Done()
-		for err := range watcher.Errors() {
+		for err := range candidate.Errors() {
 			s.logf("watcher error: %v", err)
 		}
 	}()
@@ -422,24 +460,32 @@ func (s *Service) startWatcher() error {
 }
 
 func (s *Service) startWorkers() {
-	for i := 0; i < s.cfg.Pipeline.Workers; i++ {
-		worker := pipeline.NewWorker(pipeline.WorkerDeps{
-			ConfigProvider: s.config,
-			Repository:     s.db,
-			BindJob:        s.queue.BindJob,
-			Runner:         pipeline.ExecRunner{},
-			Prober:         s.prober,
-			Events:         workerEvents{service: s},
-			BackupRoot:     s.backupRoot,
-			WorkRoot:       s.workRoot,
-			FFmpegName:     s.ffmpegName,
-		})
+	s.resizeWorkers(s.config().Pipeline.Workers)
+}
+
+func (s *Service) resizeWorkers(target int) {
+	s.workerControlMu.Lock()
+	defer s.workerControlMu.Unlock()
+	for len(s.workerStops) < target {
+		stop := make(chan struct{})
+		s.workerStops = append(s.workerStops, stop)
 		s.workers.Add(1)
-		go s.workerLoop(worker)
+		go s.workerLoop(stop)
+	}
+	for len(s.workerStops) > target {
+		last := len(s.workerStops) - 1
+		close(s.workerStops[last])
+		s.workerStops = s.workerStops[:last]
 	}
 }
 
-func (s *Service) workerLoop(worker *pipeline.Worker) {
+func (s *Service) workerCount() int {
+	s.workerControlMu.Lock()
+	defer s.workerControlMu.Unlock()
+	return len(s.workerStops)
+}
+
+func (s *Service) workerLoop(stop <-chan struct{}) {
 	defer s.workers.Done()
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -447,10 +493,14 @@ func (s *Service) workerLoop(worker *pipeline.Worker) {
 		select {
 		case <-s.workerCtx.Done():
 			return
+		case <-stop:
+			return
 		default:
 		}
 		job, ok := s.nextActiveJob()
 		if ok {
+			snapshot := s.config()
+			worker := s.newWorker(snapshot)
 			var result pipeline.AttemptResult
 			var processErr error
 			if job.ctx.Err() == nil {
@@ -537,9 +587,25 @@ func (s *Service) workerLoop(worker *pipeline.Worker) {
 		select {
 		case <-s.workerCtx.Done():
 			return
+		case <-stop:
+			return
 		case <-ticker.C:
 		}
 	}
+}
+
+func (s *Service) newWorker(snapshot config.Config) *pipeline.Worker {
+	return pipeline.NewWorker(pipeline.WorkerDeps{
+		ConfigProvider: func() config.Config { return snapshot },
+		Repository:     s.db,
+		BindJob:        s.queue.BindJob,
+		Runner:         pipeline.ExecRunner{},
+		Prober:         s.prober,
+		Events:         workerEvents{service: s},
+		BackupRoot:     s.backupRoot,
+		WorkRoot:       s.workRoot,
+		FFmpegName:     s.ffmpegName,
+	})
 }
 
 func (s *Service) nextActiveJob() (workerJob, bool) {
@@ -565,18 +631,19 @@ func (s *Service) stopWorkerIntake() {
 
 func (s *Service) prepareHTTPServer() (net.Listener, error) {
 	server := api.NewServer(api.Deps{
-		Config:         s.cfg,
-		ConfigPath:     s.configPath,
-		WebDir:         s.webDir,
-		Logf:           s.logf,
-		Events:         s.events,
-		ScanAll:        s.ScanAll,
-		RequestRestart: s.RequestRestart,
-		Status:         s,
-		RuntimeTasks:   s,
-		History:        s,
-		Files:          s,
-		RuntimeLogs:    s,
+		Config:           s.cfg,
+		ConfigPath:       s.configPath,
+		WebDir:           s.webDir,
+		Logf:             s.logf,
+		Events:           s.events,
+		ScanAll:          s.ScanAll,
+		RequestRestart:   s.RequestRestart,
+		ConfigApplicator: s,
+		Status:           s,
+		RuntimeTasks:     s,
+		History:          s,
+		Files:            s,
+		RuntimeLogs:      s,
 	})
 	s.server = &http.Server{
 		Addr:              s.httpAddr,
@@ -600,19 +667,16 @@ func (s *Service) serveHTTP(listener net.Listener) {
 	}()
 }
 
-func (s *Service) RequestRestart(cfg config.Config) {
-	s.setConfig(cfg)
+func (s *Service) RequestRestart(before, after config.Config) error {
 	if !s.restartState.CompareAndSwap(restartRunning, restartPending) &&
 		!s.restartState.CompareAndSwap(restartFailed, restartPending) {
-		return
+		return errors.New("service restart is already pending")
 	}
+	s.setConfig(after)
+	s.logf("service restart requested")
 	s.accepting.Store(false)
 	s.stopWorkerIntake()
-	if s.watcher != nil {
-		if err := s.watcher.Close(); err != nil {
-			s.logf("watcher close before restart failed: %v", err)
-		}
-	}
+	s.closeWatcher()
 	s.cancelNonCriticalActiveJobs()
 	s.waitForCriticalPhaseClear()
 	s.cancelNonCriticalActiveJobs()
@@ -623,18 +687,20 @@ func (s *Service) RequestRestart(cfg config.Config) {
 			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
 			continue
 		}
-		return
+		return nil
 	}
 	s.restartState.Store(restartFailed)
+	s.setConfig(before)
 	s.accepting.Store(true)
 	s.stoppingWorkers.Store(false)
-	if s.watcher != nil {
+	if before.Scan.WatchdogEnabled {
 		if err := s.startWatcher(); err != nil {
 			s.logf("watcher restart after process replacement failure failed: %v", err)
 		}
 	}
 	s.logf("critical: process replacement failed after 3 attempts")
 	s.events.Publish("service.restart_failed", map[string]any{"status": "restart_failed"})
+	return errors.New("process replacement failed after 3 attempts")
 }
 
 func (s *Service) waitForCriticalPhaseClear() {
@@ -1069,17 +1135,68 @@ func (s *Service) persistRestoredFile(file repository.FileFacts, backupPath stri
 }
 
 func (s *Service) isCandidatePath(path string) bool {
-	cfg := s.config()
+	return isCandidatePathForMedia(path, s.config().Media)
+}
+
+func isCandidatePathForMedia(path string, cfg config.MediaConfig) bool {
 	ext := strings.ToLower(filepath.Ext(path))
-	if pipeline.IsPathExcluded(path, cfg.Media.ExcludeDirs, cfg.Media.ExcludePatterns) {
+	if pipeline.IsPathExcluded(path, cfg.ExcludeDirs, cfg.ExcludePatterns) {
 		return false
 	}
-	for _, candidate := range cfg.Media.Extensions {
+	for _, candidate := range cfg.Extensions {
 		if strings.ToLower(candidate) == ext {
 			return !pipeline.IsAudioCleanerTempOutputPath(path)
 		}
 	}
 	return false
+}
+
+func (s *Service) closeWatcher() {
+	s.watcherMu.Lock()
+	watcher := s.watcher
+	s.watcher = nil
+	s.watcherMu.Unlock()
+	if watcher != nil {
+		if err := watcher.Close(); err != nil {
+			s.logf("watcher close failed: %v", err)
+		}
+	}
+}
+
+func (s *Service) Apply(_ context.Context, module settings.Module, before, after config.Config) error {
+	switch module {
+	case settings.Media:
+		if err := s.reloadWatcher(after); err != nil {
+			return err
+		}
+	case settings.Pipeline:
+		s.setConfig(after)
+		s.resizeWorkers(after.Pipeline.Workers)
+	case settings.Audio, settings.Validation, settings.Scan, settings.UI:
+		s.setConfig(after)
+	default:
+		return fmt.Errorf("unsupported config module %q", module)
+	}
+	if s.events != nil {
+		s.events.Publish("config.applied", map[string]any{"module": module, "apply_mode": settings.ApplyModeFor(module)})
+	}
+	return nil
+}
+
+func (s *Service) Rollback(ctx context.Context, module settings.Module, before config.Config) error {
+	switch module {
+	case settings.Media:
+		return s.reloadWatcher(before)
+	case settings.Pipeline:
+		s.setConfig(before)
+		s.resizeWorkers(before.Pipeline.Workers)
+	default:
+		s.setConfig(before)
+	}
+	if s.events != nil {
+		s.events.Publish("config.rolled_back", map[string]any{"module": module})
+	}
+	return nil
 }
 
 func (s *Service) config() config.Config {

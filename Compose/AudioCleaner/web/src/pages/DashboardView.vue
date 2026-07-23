@@ -204,7 +204,7 @@ const refreshRuntimeTasks = createRefreshTask(
 
 async function refreshConfig(): Promise<void> {
   try {
-    config.value = await api.config()
+    config.value = (await api.config()).modules
     configError.value = ''
   } catch (caught) {
     configError.value = errorMessage(caught)

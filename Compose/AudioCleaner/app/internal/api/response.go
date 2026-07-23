@@ -6,9 +6,22 @@ import (
 )
 
 type Response struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-	Data    any    `json:"data"`
+	Code      int    `json:"code"`
+	ErrorCode string `json:"error_code,omitempty"`
+	Message   string `json:"message"`
+	Data      any    `json:"data"`
+}
+
+func writeCodedError(w http.ResponseWriter, status int, errorCode, message string, data any) {
+	if message == "" {
+		message = http.StatusText(status)
+	}
+	writeJSON(w, status, Response{
+		Code:      status,
+		ErrorCode: errorCode,
+		Message:   message,
+		Data:      data,
+	})
 }
 
 func writeOK(w http.ResponseWriter, data any) {

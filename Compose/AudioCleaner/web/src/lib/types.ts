@@ -2,6 +2,7 @@ export type SupportedLanguage = 'zh-CN' | 'en-US'
 
 export interface ApiEnvelope<T> {
   code: number
+  error_code?: string
   message: string
   data: T
 }
@@ -25,6 +26,31 @@ export interface AudioCleanerConfig {
 	validation: ValidationConfig
   ui: UIConfig
   scan: ScanConfig
+}
+
+export type ConfigModuleName = 'media' | 'audio' | 'pipeline' | 'validation' | 'scan' | 'ui'
+export type ConfigApplyMode = 'hot_reload' | 'module_reload' | 'service_restart'
+export type ConfigApplyStatus = 'active' | 'restarting'
+
+export interface ConfigModuleMetadata {
+  revision: string
+  apply_mode: ConfigApplyMode
+}
+
+export interface SettingsView {
+  revision: string
+  modules: AudioCleanerConfig
+  metadata: Record<ConfigModuleName, ConfigModuleMetadata>
+}
+
+export interface ModuleUpdateResult {
+  module: ConfigModuleName
+  changed: boolean
+  apply_mode: ConfigApplyMode
+  status: ConfigApplyStatus
+  revision: string
+  config: AudioCleanerConfig[ConfigModuleName]
+  notices?: string[]
 }
 
 export interface MediaConfig {

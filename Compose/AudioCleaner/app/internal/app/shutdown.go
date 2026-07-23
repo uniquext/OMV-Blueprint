@@ -17,11 +17,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			shutdownErr = err
 		}
 	}
-	if s.watcher != nil {
-		if err := s.watcher.Close(); err != nil && shutdownErr == nil {
-			shutdownErr = err
-		}
-	}
+	s.closeWatcher()
 	s.cancelNonCriticalActiveJobs()
 
 	wait := time.NewTicker(100 * time.Millisecond)

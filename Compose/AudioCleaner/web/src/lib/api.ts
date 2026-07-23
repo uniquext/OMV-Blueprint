@@ -1,6 +1,7 @@
 import type {
   ApiEnvelope,
   AudioCleanerConfig,
+  ConfigModuleName,
   FileRecord,
   HistoryRecord,
   OperationStatusResponse,
@@ -11,8 +12,8 @@ import type {
   RuntimeTasksSnapshot,
   ScanResponse,
   ServiceStatus,
-  SupportedLanguage,
-  UIConfig
+  SettingsView,
+  ModuleUpdateResult
 } from './types'
 
 type CollectionResponse<T> = T[] | Partial<PageResult<T>> | null | undefined
@@ -23,10 +24,22 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const message = payload.message || response.statusText || 'request failed'
 
   if (!response.ok || payload.code !== 0) {
-    throw new Error(message)
+    throw new ApiError(message, response.status, payload.error_code, payload.data)
   }
 
   return payload.data as T
+}
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly code: number,
+    public readonly errorCode?: string,
+    public readonly data?: unknown
+  ) {
+    super(message)
+    this.name = 'ApiError'
+  }
 }
 
 export function unwrapItems<T>(value: CollectionResponse<T>): T[] {
@@ -56,10 +69,13 @@ function unwrapPage<T>(value: CollectionResponse<T>, page?: PageRequest): PageRe
   }
 }
 
-function jsonPatch(body: unknown): RequestInit {
+function jsonPatch(body: unknown, revision?: string): RequestInit {
   return {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(revision ? { 'If-Match': revision } : {})
+    },
     body: JSON.stringify(body)
   }
 }
@@ -84,7 +100,14 @@ function withPage(path: string, page?: PageRequest): string {
 }
 
 export const api = {
-  config: () => request<AudioCleanerConfig>('/api/config'),
+  config: () => request<SettingsView>('/api/config'),
+  configDefaults: () => request<SettingsView>('/api/config/defaults'),
+  patchConfig: <M extends ConfigModuleName>(module: M, revision: string, config: AudioCleanerConfig[M]) =>
+    request<ModuleUpdateResult>(
+      `/api/config/${module}`,
+      jsonPatch(module === 'audio' ? { incompatible_codecs: (config as AudioCleanerConfig['audio']).incompatible_codecs } : config, revision)
+    ),
+  health: () => request<{ status: string }>('/api/health'),
   status: () => request<ServiceStatus>('/api/status'),
   runtimeTasks: () => request<RuntimeTasksSnapshot>('/api/runtime-tasks'),
   runtimeLogs: (lines = 100) => request<RuntimeLogResponse>(`/api/logs?lines=${encodeURIComponent(String(lines))}`),
@@ -98,5 +121,4 @@ export const api = {
 	scan: () => request<ScanResponse>('/api/scan', post()),
 	restoreFileBackup: (id: number) => request<RestoreResult>(`/api/files/${id}/restore-backup`, post()),
 	deleteFileBackup: (id: number) => request<OperationStatusResponse>(`/api/files/${id}/backup`, { method: 'DELETE' }),
-	patchUI: (language: SupportedLanguage) => request<UIConfig>('/api/config/ui', jsonPatch({ language })),
 }

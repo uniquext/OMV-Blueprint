@@ -2,20 +2,19 @@ package api
 
 import (
 	"net/http"
-	"sync"
 
 	"github.com/go-chi/chi/v5"
+	"omv-blueprint/compose/audiocleaner/internal/settings"
 )
 
 type Server struct {
-	deps          Deps
-	router        http.Handler
-	configMu      sync.RWMutex
-	configWriteMu sync.Mutex
+	deps     Deps
+	router   http.Handler
+	settings *settings.Store
 }
 
 func NewServer(deps Deps) *Server {
-	server := &Server{deps: deps}
+	server := &Server{deps: deps, settings: settings.NewStore(deps.Config, deps.ConfigPath, deps.ConfigApplicator)}
 	server.router = server.routes()
 	return server
 }
@@ -43,8 +42,11 @@ func (s *Server) routes() http.Handler {
 	r.Post("/api/history/{job_id}/ignore", s.handleIgnoreHistoryJob)
 	r.Post("/api/scan", s.handleScan)
 	r.Get("/api/config", s.handleGetConfig)
-	r.Put("/api/config", s.handlePutConfig)
-	r.Patch("/api/config/ui", s.handlePatchUIConfig)
+	r.Get("/api/config/defaults", s.handleGetConfigDefaults)
+	for _, module := range settings.Modules() {
+		module := module
+		r.Patch("/api/config/"+string(module), s.handlePatchConfig(module))
+	}
 	r.Get("/api/logs", s.handleRuntimeLogs)
 	r.Get("/api/files", s.handleListFiles)
 	r.Post("/api/files/{file_id}/process", s.handleProcessFile)
