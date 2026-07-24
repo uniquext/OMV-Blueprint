@@ -33,6 +33,7 @@ type Deps struct {
 	Config     config.Config
 	ConfigPath string
 	WebDir     string
+	MediaRoot  string
 	Logf       func(string, ...any)
 	Events     *eventbus.Bus
 	EventBus   *eventbus.Bus

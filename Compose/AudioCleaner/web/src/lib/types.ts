@@ -60,6 +60,17 @@ export interface MediaConfig {
   exclude_patterns: string[]
 }
 
+export interface MediaDirectory {
+  name: string
+  path: string
+  has_children: boolean
+}
+
+export interface MediaDirectoryListing {
+  parent: string
+  directories: MediaDirectory[]
+}
+
 export interface AudioConfig {
   version: number
   incompatible_codecs: string[]

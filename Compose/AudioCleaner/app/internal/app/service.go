@@ -634,6 +634,7 @@ func (s *Service) prepareHTTPServer() (net.Listener, error) {
 		Config:           s.cfg,
 		ConfigPath:       s.configPath,
 		WebDir:           s.webDir,
+		MediaRoot:        "/media",
 		Logf:             s.logf,
 		Events:           s.events,
 		ScanAll:          s.ScanAll,

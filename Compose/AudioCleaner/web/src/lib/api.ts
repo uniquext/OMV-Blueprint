@@ -4,6 +4,7 @@ import type {
   ConfigModuleName,
   FileRecord,
   HistoryRecord,
+  MediaDirectoryListing,
   OperationStatusResponse,
   PageRequest,
   PageResult,
@@ -102,6 +103,10 @@ function withPage(path: string, page?: PageRequest): string {
 export const api = {
   config: () => request<SettingsView>('/api/config'),
   configDefaults: () => request<SettingsView>('/api/config/defaults'),
+  mediaDirectories: (parent: string) => {
+    const params = new URLSearchParams({ parent })
+    return request<MediaDirectoryListing>(`/api/media/directories?${params.toString()}`)
+  },
   patchConfig: <M extends ConfigModuleName>(module: M, revision: string, config: AudioCleanerConfig[M]) =>
     request<ModuleUpdateResult>(
       `/api/config/${module}`,

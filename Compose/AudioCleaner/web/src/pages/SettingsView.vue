@@ -255,14 +255,6 @@ function selectLanguage(language: 'zh-CN' | 'en-US'): void {
   languageOpen.value = false
 }
 
-function listErrors(prefix: string): Record<number, string> {
-  const result: Record<number, string> = {}
-  Object.entries(activeErrors.value).forEach(([field, message]) => {
-    if (field.startsWith(`${prefix}.`)) result[Number(field.slice(prefix.length + 1))] = message
-  })
-  return result
-}
-
 function errorMessage(caught: unknown): string {
   return caught instanceof Error ? caught.message : String(caught)
 }
@@ -333,11 +325,11 @@ onBeforeUnmount(() => {
         <div class="panel-body">
           <template v-if="activeModule === 'media'">
             <h2>Media</h2><p class="muted">{{ t('settingsMediaDescription') }}</p>
-            <div class="settings-form-grid settings-form-grid--lists">
-              <SettingsListEditor :label="t('settingsMediaRoots')" test-id="media-roots" :values="drafts.media.roots" :errors="listErrors('roots')" :error="activeErrors.roots" @update:values="drafts.media.roots = $event" />
-              <SettingsListEditor :label="t('settingsMediaExtensions')" test-id="media-extensions" :values="drafts.media.extensions" :errors="listErrors('extensions')" :error="activeErrors.extensions" @update:values="drafts.media.extensions = $event" />
-              <SettingsListEditor :label="t('settingsMediaExcludeDirs')" test-id="media-exclude_dirs" :values="drafts.media.exclude_dirs" :errors="listErrors('exclude_dirs')" @update:values="drafts.media.exclude_dirs = $event" />
-              <SettingsListEditor :label="t('settingsMediaExcludePatterns')" :help="t('settingsMediaExcludePatternsHelp')" test-id="media-exclude_patterns" :values="drafts.media.exclude_patterns" :errors="listErrors('exclude_patterns')" @update:values="drafts.media.exclude_patterns = $event">
+            <div class="settings-array-list">
+              <SettingsListEditor :label="t('settingsMediaRoots')" :hint="t('settingsMediaRootsHint')" test-id="media-roots" rule="media-root" :values="drafts.media.roots" :directory-loader="api.mediaDirectories" @update:values="drafts.media.roots = $event" />
+              <SettingsListEditor :label="t('settingsMediaExtensions')" :hint="t('settingsMediaExtensionsHint')" test-id="media-extensions" rule="extension" :values="drafts.media.extensions" @update:values="drafts.media.extensions = $event" />
+              <SettingsListEditor :label="t('settingsMediaExcludeDirs')" :hint="t('settingsMediaExcludeDirsHint')" test-id="media-exclude_dirs" rule="exclude-dir" :values="drafts.media.exclude_dirs" @update:values="drafts.media.exclude_dirs = $event" />
+              <SettingsListEditor :label="t('settingsMediaExcludePatterns')" :hint="t('settingsMediaExcludePatternsHint')" :help="t('settingsMediaExcludePatternsHelp')" test-id="media-exclude_patterns" rule="exclude-pattern" :values="drafts.media.exclude_patterns" @update:values="drafts.media.exclude_patterns = $event">
                 <template #help>
                   <div class="settings-pattern-help">
                     <strong class="settings-pattern-help__summary">{{ t('settingsPatternHelpSummary') }}</strong>
@@ -361,8 +353,15 @@ onBeforeUnmount(() => {
 
           <template v-else-if="activeModule === 'audio'">
             <h2>Audio</h2><p class="muted">{{ t('settingsAudioDescription') }}</p>
-            <div class="settings-readonly"><span>{{ t('settingsAudioVersion') }}</span><strong>v{{ drafts.audio.version }}</strong></div>
-            <SettingsListEditor :label="t('settingsIncompatibleCodecs')" test-id="audio-incompatible_codecs" :values="drafts.audio.incompatible_codecs" :errors="listErrors('incompatible_codecs')" :error="activeErrors.incompatible_codecs" @update:values="drafts.audio.incompatible_codecs = $event" />
+            <div class="settings-array-list">
+              <div class="settings-array-summary settings-array-summary--readonly" data-testid="audio-version-summary-row">
+                <span class="settings-array-summary__label">{{ t('settingsAudioVersion') }}</span>
+                <strong class="settings-array-summary__value">v{{ drafts.audio.version }}</strong>
+                <span class="settings-array-summary__count"></span>
+                <span class="settings-array-summary__readonly">{{ t('settingsReadonly') }}</span>
+              </div>
+              <SettingsListEditor :label="t('settingsIncompatibleCodecs')" :hint="t('settingsIncompatibleCodecsHint')" test-id="audio-incompatible_codecs" rule="codec" :values="drafts.audio.incompatible_codecs" @update:values="drafts.audio.incompatible_codecs = $event" />
+            </div>
           </template>
 
           <template v-else-if="activeModule === 'pipeline'">
@@ -413,7 +412,7 @@ onBeforeUnmount(() => {
         <div class="settings-actionbar__status" data-testid="settings-status" :data-status="moduleStatus(activeModule)"><strong>{{ moduleLabel(activeModule) }}</strong><span>{{ statusText }}</span></div>
         <div class="settings-actionbar__actions">
           <button v-if="moduleStatus(activeModule) === 'conflict' && conflicts[activeModule]" type="button" class="button" data-testid="settings-load-conflict" @click="loadConflictBaseline">{{ t('settingsLoadServerBaseline') }}</button>
-          <button type="button" class="button" :disabled="!isDirty(activeModule)" @click="discard"><X aria-hidden="true" />{{ t('settingsDiscard') }}</button>
+          <button type="button" class="button" data-testid="settings-discard" :disabled="!isDirty(activeModule)" @click="discard"><X aria-hidden="true" />{{ t('settingsDiscard') }}</button>
           <button type="button" class="button" @click="restoreDefault"><RotateCcw aria-hidden="true" />{{ t('settingsRestoreDefault') }}</button>
           <button type="button" class="button primary" data-testid="settings-save" :disabled="!canSave" @click="requestSave"><Save aria-hidden="true" />{{ saveText }}</button>
         </div>

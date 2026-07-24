@@ -14,6 +14,9 @@ type Server struct {
 }
 
 func NewServer(deps Deps) *Server {
+	if deps.MediaRoot == "" {
+		deps.MediaRoot = mediaMountPath
+	}
 	server := &Server{deps: deps, settings: settings.NewStore(deps.Config, deps.ConfigPath, deps.ConfigApplicator)}
 	server.router = server.routes()
 	return server
@@ -43,6 +46,7 @@ func (s *Server) routes() http.Handler {
 	r.Post("/api/scan", s.handleScan)
 	r.Get("/api/config", s.handleGetConfig)
 	r.Get("/api/config/defaults", s.handleGetConfigDefaults)
+	r.Get("/api/media/directories", s.handleListMediaDirectories)
 	for _, module := range settings.Modules() {
 		module := module
 		r.Patch("/api/config/"+string(module), s.handlePatchConfig(module))
