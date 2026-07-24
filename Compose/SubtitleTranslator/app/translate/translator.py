@@ -389,6 +389,7 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
 
         failed_batches = []
         prev_batch_failed = False
+        consecutive_failures = 0
 
         with open(tmp_path, "w" if start_batch_idx == 1 else "a", encoding="utf-8") as tmp_file:
             for batch in batches[start_batch_idx - 1:]:
@@ -465,18 +466,20 @@ def translate_file(task_id: str, file_path: str, start_batch_idx: int = 1):
                             failed_batches.append(batch.batch_idx)
                             translation_results = []
                             break
-                        sleep_time = 5 * (2 ** attempt)
-                        logger.warning(f"LLM Error: {e}, retrying in {sleep_time}s...")
-                        time.sleep(sleep_time)
-
+                        logger.warning(f"LLM Error: {e}, retrying in 1s...")
+                        time.sleep(1)
 
                 if not translation_results and batch.batch_idx in failed_batches:
+                    consecutive_failures += 1
+                    if consecutive_failures >= 3:
+                        raise RuntimeError("Translation circuit breaker triggered due to 3 consecutive batch failures.")
                     line_id = batch.start_id
                     for line in batch.lines:
                         tmp_file.write(f"ID: {line_id} | {line}\n")
                         line_id += 1
                     prev_batch_failed = True
                 else:
+                    consecutive_failures = 0
                     for result in translation_results:
                         tmp_file.write(f"ID: {result.id} | {result.text}\n")
                     prev_batch_failed = False
@@ -551,6 +554,7 @@ def retry_skipped_batches(task_id: str, file_path: str, skipped_batches: list):
     glossary = load_glossary()
     
     still_failed = []
+    consecutive_failures = 0
     
     for batch_idx in skipped_batches:
         if batch_idx > len(batches):
@@ -620,7 +624,8 @@ def retry_skipped_batches(task_id: str, file_path: str, skipped_batches: list):
                     still_failed.append(batch.batch_idx)
                     break
                 validation_failures += 1
-                time.sleep(5 * (2 ** attempt))
+                logger.warning(f"LLM Validation Error: {e}, retrying in 1s...")
+                time.sleep(1)
             except Exception as e:
                 if attempt >= max_retries:
                     _save_error_snapshot(
@@ -634,9 +639,15 @@ def retry_skipped_batches(task_id: str, file_path: str, skipped_batches: list):
                     )
                     still_failed.append(batch.batch_idx)
                     break
-                time.sleep(5 * (2 ** attempt))
+                logger.warning(f"LLM Error: {e}, retrying in 1s...")
+                time.sleep(1)
                 
-        if translation_results:
+        if not translation_results and batch.batch_idx in still_failed:
+            consecutive_failures += 1
+            if consecutive_failures >= 3:
+                raise RuntimeError("Translation circuit breaker triggered due to 3 consecutive batch failures during retry.")
+        elif translation_results:
+            consecutive_failures = 0
             for result in translation_results:
                 try:
                     orig_idx = line_map.index(result.id)

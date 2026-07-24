@@ -134,6 +134,24 @@ def recover_startup_jobs():
                     logger.warning(f"Invalid cleanup_files JSON for job {job_id}")
             failed_count += 1
 
+    # Consistency check for translating jobs
+    translating_jobs = db.get_jobs_by_status("translating")
+    for job in translating_jobs:
+        job_id = job["id"]
+        task_id = job.get("translate_task_id")
+        should_fail = False
+        if not task_id:
+            should_fail = True
+        else:
+            task = db.get_task(task_id)
+            if not task or task.get("status") in ("failed", "done"):
+                should_fail = True
+                
+        if should_fail:
+            logger.info(f"Failing inconsistent zombie translating job {job_id} for {job['media_path']}")
+            db.update_job_status(job_id, "failed", "Inconsistent state after system restart")
+            failed_count += 1
+
     cleaned = _cleanup_residual_intermediate_files()
     logger.info(f"Startup recovery complete. Marked {failed_count} jobs as failed, cleaned {cleaned} residual files.")
 
