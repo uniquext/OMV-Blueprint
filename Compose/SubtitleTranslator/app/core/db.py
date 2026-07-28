@@ -420,7 +420,7 @@ def get_job_by_translate_task(translate_task_id: str) -> Optional[Dict]:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
-            "SELECT * FROM subtitle_job WHERE translate_task_id = ?",
+            "SELECT * FROM subtitle_job WHERE translate_task_id = ? ORDER BY created_at DESC LIMIT 1",
             (translate_task_id,)
         )
         row = cursor.fetchone()
@@ -491,7 +491,7 @@ def get_stats() -> dict:
         }
 
         # Count statuses
-        cursor = conn.execute("SELECT status, COUNT(*) as count FROM subtitle_job GROUP BY status")
+        cursor = conn.execute("SELECT status, COUNT(*) as count FROM subtitle_job WHERE is_deleted = 0 GROUP BY status")
         for row in cursor.fetchall():
             if row["status"] in stats:
                 stats[row["status"]] = row["count"]
@@ -507,7 +507,7 @@ def get_stats() -> dict:
             "SELECT AVG(strftime('%s', completed_at) - strftime('%s', created_at)) as avg_dur "
             "FROM subtitle_job "
             "WHERE status = 'done' AND completed_at IS NOT NULL "
-            "AND (strftime('%s', completed_at) - strftime('%s', created_at)) >= 0"
+            "AND (strftime('%s', completed_at) - strftime('%s', created_at)) >= 0 AND is_deleted = 0"
         )
         row = cursor.fetchone()
         avg_duration = int(row["avg_dur"]) if row and row["avg_dur"] is not None else 0
@@ -526,7 +526,7 @@ def get_stats() -> dict:
             "FROM subtitle_job j "
             "INNER JOIN translate_task t ON j.translate_task_id = t.id "
             "WHERE t.status = 'done' AND t.completed_at IS NOT NULL AND t.started_at IS NOT NULL "
-            "AND (strftime('%s', t.completed_at) - strftime('%s', t.started_at)) >= 0 "
+            "AND (strftime('%s', t.completed_at) - strftime('%s', t.started_at)) >= 0 AND j.is_deleted = 0 "
             "GROUP BY j.funnel_type"
         )
         for row in cursor.fetchall():
@@ -536,7 +536,7 @@ def get_stats() -> dict:
         # 按漏斗级别分组计数(仅统计非终态的活跃任务)
         type_counts = {}
         cursor = conn.execute(
-            "SELECT funnel_type, COUNT(*) as count FROM subtitle_job WHERE status NOT IN ('done', 'skipped', 'failed') GROUP BY funnel_type"
+            "SELECT funnel_type, COUNT(*) as count FROM subtitle_job WHERE status NOT IN ('done', 'skipped', 'failed') AND is_deleted = 0 GROUP BY funnel_type"
         )
         for row in cursor.fetchall():
             if row["funnel_type"] is not None:
@@ -694,7 +694,7 @@ def get_jobs_stats() -> dict:
                 COUNT(CASE WHEN status = 'done' THEN 1 END) as done,
                 COUNT(CASE WHEN status = 'skipped' THEN 1 END) as skipped,
                 COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed
-            FROM subtitle_job
+            FROM subtitle_job WHERE is_deleted = 0
             """
         )
         row = cursor.fetchone()
@@ -779,3 +779,16 @@ def force_complete_task(task_id: str):
             (now, task_id)
         )
         conn.commit()
+
+        # Fetch job_id to publish event
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute("SELECT id, media_path FROM subtitle_job WHERE translate_task_id = ?", (task_id,))
+        row = cursor.fetchone()
+        
+    if row:
+        _publish_event("job_status_changed", {
+            "job_id": row["id"],
+            "status": "done",
+            "media_path": row["media_path"],
+            "translate_task_id": task_id
+        })

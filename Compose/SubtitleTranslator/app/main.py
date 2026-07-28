@@ -144,7 +144,7 @@ def recover_startup_jobs():
             should_fail = True
         else:
             task = db.get_task(task_id)
-            if not task or task.get("status") in ("failed", "done"):
+            if not task or task.get("status") in ("failed", "done", "incomplete"):
                 should_fail = True
                 
         if should_fail:

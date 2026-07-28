@@ -86,6 +86,16 @@ def process_task(task_id: str):
         except Exception as e:
             logger.error(f"Rebuild failed for job {job_id}: {e}")
             db.update_job_status(job_id, "failed", error=str(e))
+    elif updated_task["status"] == "incomplete":
+        skipped = db.get_task_skipped_batches(task_id)
+        is_draft = len(skipped) > 0
+        try:
+            rebuild_srt(job, draft=is_draft)
+            db.update_job_status(job_id, "incomplete")
+            logger.info(f"Job {job_id}: Pipeline incomplete (draft={is_draft})")
+        except Exception as e:
+            logger.error(f"Rebuild failed for job {job_id}: {e}")
+            db.update_job_status(job_id, "failed", error=str(e))
     else:
         logger.error(f"Unexpected task status after translate_file: {updated_task['status']}")
 
@@ -130,6 +140,16 @@ def process_retry_task(task_id: str):
                     os.remove(draft_srt_path)
             db.update_job_status(job_id, "done")
             logger.info(f"Job {job_id}: Retry Pipeline complete (draft={is_draft})")
+        except Exception as e:
+            logger.error(f"Rebuild failed for job {job_id}: {e}")
+            db.update_job_status(job_id, "failed", error=str(e))
+    elif updated_task["status"] == "incomplete":
+        skipped = db.get_task_skipped_batches(task_id)
+        is_draft = len(skipped) > 0
+        try:
+            rebuild_srt(job, draft=is_draft)
+            db.update_job_status(job_id, "incomplete")
+            logger.info(f"Job {job_id}: Retry Pipeline incomplete (draft={is_draft})")
         except Exception as e:
             logger.error(f"Rebuild failed for job {job_id}: {e}")
             db.update_job_status(job_id, "failed", error=str(e))

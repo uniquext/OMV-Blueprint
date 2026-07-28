@@ -161,21 +161,31 @@
     <div class="diag-overlay" v-if="previewVisible" @click.self="closePreview">
       <div class="diag-modal">
         <div class="diag-header">
-          <span class="diag-title">翻译快照对照 (Task: {{ previewTaskId.substring(0,8) }}...)</span>
+          <span class="diag-title">👀 字幕翻译快照对照 (Task: {{ previewTaskId.substring(0,8) }}...)</span>
           <button class="diag-close" @click="closePreview">&times;</button>
         </div>
         <div class="diag-body">
           <div v-if="previewLoading" style="text-align:center;padding:24px;color:#999;">加载中...</div>
           <div v-else-if="previewLines.length === 0" style="text-align:center;padding:24px;color:#999;">暂无数据</div>
-          <div v-else class="preview-container">
-            <div class="preview-row" v-for="line in previewLines" :key="line.id">
-              <div class="preview-id">{{ line.id }}</div>
-              <div class="preview-content">
-                <div class="preview-original">{{ line.original }}</div>
-                <div class="preview-translated" :class="{ empty: !line.translated }">{{ line.translated || '(未翻译)' }}</div>
+          <template v-else>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <div class="diag-stats">
+                当前提取原文行数: <strong>{{ previewOriginalCount }}</strong> &nbsp;|&nbsp; 已完成翻译行数: <strong>{{ previewTranslatedCount }}</strong>
               </div>
             </div>
-          </div>
+            <div class="diag-sync-container">
+              <div class="diag-row header">
+                <div class="diag-cell">原始字幕 (Original Subtitles)</div>
+                <div class="diag-cell">当前快照译文 (Translated Snapshot)</div>
+              </div>
+              <div class="diag-row" v-for="line in previewLines" :key="line.id">
+                <div class="diag-cell">ID: {{ line.id }} | {{ line.original }}</div>
+                <div class="diag-cell translated" :class="{ empty: !line.translated }">
+                  {{ line.translated ? `ID: ${line.id} | ${line.translated}` : '[未翻译]' }}
+                </div>
+              </div>
+            </div>
+          </template>
         </div>
       </div>
     </div>
@@ -492,6 +502,8 @@ const previewVisible = ref(false)
 const previewLoading = ref(false)
 const previewTaskId = ref('')
 const previewLines = ref([])
+const previewOriginalCount = computed(() => previewLines.value.length)
+const previewTranslatedCount = computed(() => previewLines.value.filter(l => l.translated).length)
 
 const openPreview = async (taskId) => {
   if (!taskId) return
@@ -692,13 +704,69 @@ useSSE('/api/events', {
   25% { transform: translateX(-4px); }
   75% { transform: translateX(4px); }
 }
-/* 快照预览区 */
-.preview-container { border: 1px solid #e8e8ec; border-radius: 6px; overflow: hidden; }
-.preview-row { display: flex; border-bottom: 1px solid #f0f0f4; }
-.preview-row:last-child { border-bottom: none; }
-.preview-id { padding: 12px; width: 40px; background: #fafafa; color: #999; font-size: 11px; text-align: right; border-right: 1px solid #f0f0f4; flex-shrink: 0; }
-.preview-content { flex: 1; min-width: 0; display: grid; grid-template-columns: 1fr 1fr; }
-.preview-original { padding: 12px; color: #555; font-size: 13px; line-height: 1.5; border-right: 1px solid #f0f0f4; white-space: pre-wrap; word-break: break-all; }
-.preview-translated { padding: 12px; color: #333; font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
-.preview-translated.empty { color: #bbb; font-style: italic; }
+/* ============ 模态框基础 ============ */
+.diag-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.45); z-index: 1000; display: flex; align-items: center; justify-content: center; }
+.diag-modal { background: #fff; border-radius: 10px; width: 94%; max-width: 1200px; max-height: 85vh; display: flex; flex-direction: column; box-shadow: 0 8px 32px rgba(0,0,0,0.18); }
+.diag-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; border-bottom: 1px solid #e8e8ec; }
+.diag-title { font-size: 15px; font-weight: 600; color: #333; }
+.diag-close { background: none; border: none; font-size: 22px; cursor: pointer; color: #999; padding: 0 4px; line-height: 1; }
+.diag-close:hover { color: #333; }
+.diag-body { padding: 16px 20px; display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+
+/* 提示信息 */
+.diag-stats { font-size: 12px; color: #666; background: #f8f8fa; padding: 6px 12px; border-radius: 4px; display: inline-block; margin-bottom: 12px;}
+
+/* ============ 同步滚动对比区 (完美对齐) ============ */
+.diag-sync-container { 
+    background: #1e1e2e;
+    border-radius: 6px; 
+    flex: 1;
+    overflow-y: auto;
+    display: flex; 
+    flex-direction: column;
+    border: 1px solid #313244;
+}
+
+.diag-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    padding: 10px 16px;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
+.diag-row:hover { background: rgba(255,255,255,0.03); }
+
+/* 固定的表头 */
+.diag-row.header {
+    position: sticky;
+    top: 0;
+    background: #181825;
+    font-weight: 600;
+    color: #bac2de;
+    z-index: 10;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+
+.diag-cell {
+    font-size: 13px; 
+    font-family: "SF Mono", "Fira Code", monospace; 
+    line-height: 1.6; 
+    color: #cdd6f4;
+    white-space: pre-wrap; 
+    word-break: break-all;
+}
+
+.diag-cell.translated.empty {
+    color: #6c7086;
+    font-style: italic;
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d0d0d6; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #b0b0b8; }
+.diag-sync-container::-webkit-scrollbar-thumb { background: #45475a; }
+.diag-sync-container::-webkit-scrollbar-thumb:hover { background: #585b70; }
 </style>
