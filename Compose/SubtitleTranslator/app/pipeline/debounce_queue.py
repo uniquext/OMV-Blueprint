@@ -135,8 +135,16 @@ class FunnelWorkerPool:
             logger.info(f"Job deduped for {media_path}, skipping")
             return
 
-        funnel_result = evaluate_media(media_path)
-        execute_funnel_action(job_id, media_path, funnel_result)
+        try:
+            funnel_result = evaluate_media(media_path)
+            execute_funnel_action(job_id, media_path, funnel_result)
+        except Exception as e:
+            logger.error(f"Error during funnel logic for {media_path}: {e}")
+            try:
+                db.update_job_status(job_id, "failed", error=str(e))
+            except Exception as inner_e:
+                logger.error(f"Failed to mark job {job_id} as failed: {inner_e}")
+            raise e
 
     def shutdown(self, wait: bool = True, timeout: float = 10) -> None:
         self._running = False

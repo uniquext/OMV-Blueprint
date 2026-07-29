@@ -34,7 +34,7 @@ def _publish_event(event_type: str, payload: dict):
 def init_db():
 
 
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         # 启用 WAL 模式，支撑 WebUI 并发读写
         conn.execute("PRAGMA journal_mode=WAL")
         
@@ -119,7 +119,7 @@ def init_db():
 
 
 def fetch_next_task() -> Optional[Dict]:
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
             "SELECT * FROM translate_task WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
@@ -142,7 +142,7 @@ def fetch_next_task() -> Optional[Dict]:
 
 
 def get_task(task_id: str) -> Optional[Dict]:
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
             "SELECT * FROM translate_task WHERE id = ?",
@@ -155,7 +155,7 @@ def get_task(task_id: str) -> Optional[Dict]:
 
 
 def get_processing_tasks() -> List[Dict]:
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute("SELECT * FROM translate_task WHERE status = 'processing' ORDER BY created_at ASC")
         return [dict(r) for r in cursor.fetchall()]
@@ -163,7 +163,7 @@ def get_processing_tasks() -> List[Dict]:
 
 def update_progress(task_id: str, current_batch: int, total_batches: int, progress_text: str = ""):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.execute(
             "UPDATE translate_task SET current_batch = ?, total_batches = ?, progress = ?, updated_at = ? WHERE id = ?",
             (current_batch, total_batches, progress_text, now, task_id)
@@ -181,7 +181,7 @@ def complete_task(task_id: str, tokens: int = 0, skipped_batches: list = None):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     skipped_json = json.dumps(skipped_batches) if skipped_batches else None
     status = 'incomplete' if skipped_batches else 'done'
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         # done/incomplete 是终态，同步设置 completed_at
         conn.execute(
             "UPDATE translate_task SET status = ?, completed_at = ?, updated_at = ?, tokens = ?, skipped_batches = ? WHERE id = ?",
@@ -192,7 +192,7 @@ def complete_task(task_id: str, tokens: int = 0, skipped_batches: list = None):
 
 def fail_task(task_id: str, error: str):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         # failed 是终态，同步设置 completed_at
         conn.execute(
             "UPDATE translate_task SET status = 'failed', error = ?, completed_at = ?, updated_at = ? WHERE id = ?",
@@ -203,7 +203,7 @@ def fail_task(task_id: str, error: str):
 
 def reset_task_to_queued(task_id: str):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.execute(
             "UPDATE translate_task SET status = 'queued', updated_at = ? WHERE id = ?",
             (now, task_id)
@@ -214,7 +214,7 @@ def reset_task_to_queued(task_id: str):
 
 def get_task_skipped_batches(task_id: str) -> list:
     """获取任务的跳过批次列表，返回空列表表示完整翻译"""
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute("SELECT skipped_batches FROM translate_task WHERE id = ?", (task_id,))
         row = cursor.fetchone()
@@ -229,7 +229,7 @@ def get_task_skipped_batches(task_id: str) -> list:
 def reset_task_for_retry(task_id: str):
     """清除完成时间并设置为queued，用于精准重试"""
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.execute(
             "UPDATE translate_task SET status = 'queued', updated_at = ?, completed_at = NULL, started_at = NULL WHERE id = ?",
             (now, task_id)
@@ -239,7 +239,7 @@ def reset_task_for_retry(task_id: str):
 
 
 def create_job(media_path: str, source: str = "scheduler") -> Optional[str]:
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
         # 去重查询：终态（done/failed/skipped）的 Job 允许重新创建
         cursor = conn.execute(
@@ -273,7 +273,7 @@ def create_job(media_path: str, source: str = "scheduler") -> Optional[str]:
 
 def backfill_job(media_path: str, funnel_type: int, output_srt_path: str = None) -> Optional[str]:
     """回填已存在的字幕文件记录到 subtitle_job"""
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
         # 全量去重查询：任何状态下，只要有该 media_path 存在，就跳过
         cursor = conn.execute(
@@ -306,7 +306,7 @@ def update_job_status(job_id: str, status: str, error: str = None):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     # 终态自动设置 completed_at
     completed_at = now if status in TERMINAL_STATES else None
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         if error:
             conn.execute(
                 "UPDATE subtitle_job SET status = ?, error = ?, completed_at = COALESCE(?, completed_at), updated_at = ? WHERE id = ?",
@@ -344,7 +344,7 @@ def update_job_status(job_id: str, status: str, error: str = None):
 def update_job_funnel_info(job_id: str, funnel_type: int, original_srt_path: str = None,
                            output_srt_path: str = None, cleanup_files: List[str] = None):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.execute(
             """UPDATE subtitle_job
                SET funnel_type = ?, original_srt_path = ?, output_srt_path = ?,
@@ -358,7 +358,7 @@ def update_job_funnel_info(job_id: str, funnel_type: int, original_srt_path: str
 
 
 def get_jobs_by_status(status: str) -> List[Dict]:
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
             "SELECT * FROM subtitle_job WHERE status = ?",
@@ -368,7 +368,7 @@ def get_jobs_by_status(status: str) -> List[Dict]:
 
 
 def get_jobs(statuses: list = None) -> list:
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
         if statuses:
             placeholders = ",".join("?" for _ in statuses)
@@ -382,7 +382,7 @@ def get_jobs(statuses: list = None) -> list:
 
 
 def get_job_by_media_path(media_path: str) -> Optional[Dict]:
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
             "SELECT * FROM subtitle_job WHERE media_path = ? ORDER BY created_at DESC LIMIT 1",
@@ -395,7 +395,7 @@ def get_job_by_media_path(media_path: str) -> Optional[Dict]:
 
 
 def get_previous_job_with_task(media_path: str, current_job_id: str) -> Optional[Dict]:
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
             "SELECT * FROM subtitle_job WHERE media_path = ? AND id != ? AND translate_task_id IS NOT NULL ORDER BY created_at DESC LIMIT 1",
@@ -409,7 +409,7 @@ def get_previous_job_with_task(media_path: str, current_job_id: str) -> Optional
 
 def link_task_to_job(job_id: str, task_id: str):
     now_iso = datetime.datetime.utcnow().isoformat()
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.execute(
             "UPDATE subtitle_job SET status = 'translating', translate_task_id = ?, updated_at = ? WHERE id = ?",
             (task_id, now_iso, job_id)
@@ -417,7 +417,7 @@ def link_task_to_job(job_id: str, task_id: str):
 
 
 def get_job_by_translate_task(translate_task_id: str) -> Optional[Dict]:
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
             "SELECT * FROM subtitle_job WHERE translate_task_id = ? ORDER BY created_at DESC LIMIT 1",
@@ -430,7 +430,7 @@ def get_job_by_translate_task(translate_task_id: str) -> Optional[Dict]:
 
 
 def create_translate_task_for_job(job_id: str, file_path: str) -> Optional[str]:
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
             "SELECT id FROM translate_task WHERE file_path = ? AND status IN ('queued', 'processing')",
@@ -477,7 +477,7 @@ def create_translate_task_for_job(job_id: str, file_path: str) -> Optional[str]:
 def get_stats() -> dict:
     """获取各个状态 of Job 计数、成功率和平均耗时"""
     global _last_anomaly_check_time, _cached_has_anomaly, _cached_anomaly_reason
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
 
         stats = {
@@ -637,7 +637,7 @@ def query_jobs(page: int = 1, page_size: int = 20, status: list = None, funnel_t
         f"{where_clause} ORDER BY sj.created_at {sort_dir.upper()} LIMIT ? OFFSET ?"
     )
 
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
 
         # 获取总数
@@ -668,7 +668,7 @@ def query_tasks(page: int = 1, page_size: int = 20, status: str = None) -> tuple
     offset = (page - 1) * page_size
     fetch_sql = f"SELECT * FROM translate_task{where_clause} ORDER BY created_at DESC LIMIT ? OFFSET ?"
 
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
 
         # 获取总数
@@ -685,7 +685,7 @@ def query_tasks(page: int = 1, page_size: int = 20, status: str = None) -> tuple
 
 def get_jobs_stats() -> dict:
     """获取终态 Job 的计数与成功率（skipped 任务不计入分母，防除零保护）"""
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
 
         cursor = conn.execute(
@@ -727,7 +727,7 @@ def insert_translation_error(
     """插入一条翻译错误诊断快照，返回新记录的 id"""
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     settings_json = json.dumps(llm_settings, ensure_ascii=False) if llm_settings is not None else None
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         cursor = conn.execute(
             """INSERT INTO translation_errors
                (task_id, batch_idx, error_reason, system_prompt, glossary, user_prompt, llm_response, llm_settings, created_at)
@@ -740,7 +740,7 @@ def insert_translation_error(
 
 def get_translation_errors(task_id: str) -> List[Dict]:
     """查询指定任务的所有错误诊断记录，按 id 升序返回"""
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
             "SELECT * FROM translation_errors WHERE task_id = ? ORDER BY id ASC",
@@ -760,7 +760,7 @@ def get_translation_errors(task_id: str) -> List[Dict]:
 
 def soft_delete_job(job_id: str):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.execute(
             "UPDATE subtitle_job SET is_deleted = 1, updated_at = ? WHERE id = ?",
             (now, job_id)
@@ -769,7 +769,7 @@ def soft_delete_job(job_id: str):
 
 def force_complete_task(task_id: str):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
         conn.execute(
             "UPDATE translate_task SET status = 'done', updated_at = ? WHERE id = ?",
             (now, task_id)
