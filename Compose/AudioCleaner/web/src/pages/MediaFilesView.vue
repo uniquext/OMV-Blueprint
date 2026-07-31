@@ -3,9 +3,12 @@ import { LoaderCircle, Play, RotateCcw, Trash2 } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import DataPager from '../components/DataPager.vue'
+import OverflowMarquee from '../components/OverflowMarquee.vue'
+import RowActionMenu from '../components/RowActionMenu.vue'
 import { eventStreamState } from '../composables/useEventStream'
 import { t } from '../i18n'
 import { api } from '../lib/api'
+import { shouldRefreshMediaFiles } from '../lib/mediaFileRefresh'
 import { semanticBadgeClass } from '../lib/semantic'
 import { formatServiceTimestamp } from '../lib/time'
 import type { FileRecord } from '../lib/types'
@@ -28,6 +31,7 @@ const complianceFilter = ref<ComplianceFilter>('all')
 const backupFilter = ref<BackupFilter>('all')
 const keyword = ref('')
 const openFilter = ref<'compliance' | 'backup' | null>(null)
+const openActionFileID = ref<number | null>(null)
 const filesRoot = ref<HTMLElement | null>(null)
 let loadSequence = 0
 let loadScheduled = false
@@ -107,6 +111,7 @@ async function loadAllFiles(): Promise<FileRecord[]> {
 
 async function loadFiles(): Promise<void> {
   const sequence = ++loadSequence
+  openActionFileID.value = null
   loading.value = true
   error.value = ''
   try {
@@ -130,7 +135,13 @@ async function loadFiles(): Promise<void> {
 }
 
 function toggleMenu(menu: 'compliance' | 'backup'): void {
+  openActionFileID.value = null
   openFilter.value = openFilter.value === menu ? null : menu
+}
+
+function toggleActionMenu(fileID: number): void {
+  openFilter.value = null
+  openActionFileID.value = openActionFileID.value === fileID ? null : fileID
 }
 
 function selectComplianceFilter(value: ComplianceFilter): void {
@@ -161,6 +172,7 @@ function toggleFile(file: FileRecord): void {
 }
 
 function askOperation(action: 'process' | 'restore' | 'delete', file: FileRecord): void {
+  openActionFileID.value = null
   selectedFile.value = file
   confirmAction.value = action
 }
@@ -248,24 +260,19 @@ function displayTimestamp(value: string): string {
 }
 
 watch(pageSize, () => {
+  openActionFileID.value = null
   if (page.value !== 1) page.value = 1
   else clampPage()
 })
 watch([complianceFilter, backupFilter, keyword], () => {
+  openActionFileID.value = null
   if (page.value !== 1) page.value = 1
   else clampPage()
 })
 watch(
   () => eventStreamState.lastEvent,
   (event) => {
-    if (
-      event &&
-      ['compatible', 'processed', 'failed', 'file.backup_created', 'file.backup_restored', 'file.backup_deleted'].includes(
-        event.type
-      )
-    ) {
-      scheduleLoad()
-    }
+    if (shouldRefreshMediaFiles(event)) scheduleLoad()
   }
 )
 
@@ -359,22 +366,22 @@ onBeforeUnmount(() => {
 
       <div v-if="loading" class="panel-body muted">{{ t('filesLoading') }}</div>
 
-      <table class="data-table history-table files-table">
+      <div class="data-table-scroll">
+        <table class="data-table history-table files-table">
         <thead>
           <tr>
             <th></th>
             <th class="history-id-heading">ID</th>
             <th>{{ t('filesColumnFile') }}</th>
             <th>{{ t('filesColumnCompliance') }}</th>
-            <th>{{ t('filesColumnAudioVersion') }}</th>
             <th>{{ t('filesColumnBackup') }}</th>
-            <th>{{ t('filesColumnUpdated') }}</th>
-            <th>{{ t('filesColumnActions') }}</th>
+            <th class="date-cell">{{ t('filesColumnUpdated') }}</th>
+            <th class="actions-cell files-actions-cell">{{ t('filesColumnActions') }}</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="!loading && files.length === 0">
-            <td colspan="8" class="muted">{{ t('filesNoData') }}</td>
+            <td colspan="7" class="muted">{{ t('filesNoData') }}</td>
           </tr>
           <template v-for="file in files" :key="file.id">
             <tr data-testid="file-row">
@@ -389,108 +396,122 @@ onBeforeUnmount(() => {
                 </button>
               </td>
               <td class="history-id-cell">{{ file.id }}</td>
-              <td class="path-cell" :title="file.path">
-                <span class="history-path-main">{{ fileName(file.path) }}</span>
-                <span class="history-path-sub">{{ directory(file.path) }}</span>
+              <td class="path-cell file-column-cell">
+                <OverflowMarquee class="history-path-main" :text="fileName(file.path)" />
+                <OverflowMarquee class="history-path-sub" :text="directory(file.path)" />
               </td>
               <td class="status-cell">
                 <span :class="complianceTone(file.compliance_status)">{{ complianceLabel(file.compliance_status) }}</span>
               </td>
-              <td>{{ file.audio_policy_version || t('filesEmptyValue') }}</td>
               <td class="status-cell" :title="file.backup_file">
                 <span :class="backupTone(file)">{{ backupStatusLabel(file) }}</span>
               </td>
               <td class="date-cell">{{ displayTimestamp(file.updated_at) }}</td>
               <td class="actions-cell files-actions-cell">
-                <div class="row-actions">
+                <RowActionMenu
+                  :open="openActionFileID === file.id"
+                  :label="t('rowActionsMore')"
+                  :width="132"
+                  :test-id="`file-actions-${file.id}`"
+                  @toggle="toggleActionMenu(file.id)"
+                  @close="openActionFileID = null"
+                >
                   <button
-                    class="button primary"
+                    class="row-action-item"
+                    role="menuitem"
                     type="button"
                     :data-testid="`file-process-${file.id}`"
                     :disabled="busy || !canProcess(file) || isProcessing(file)"
                     @click="askOperation('process', file)"
                   >
-                    <LoaderCircle v-if="isProcessing(file)" :size="14" aria-hidden="true" />
-                    <Play v-else :size="14" aria-hidden="true" />
-                    {{ isProcessing(file) ? t('filesProcessing') : t('filesProcess') }}
+                    <LoaderCircle v-if="isProcessing(file)" :size="16" aria-hidden="true" />
+                    <Play v-else :size="16" aria-hidden="true" />
+                    <span>{{ isProcessing(file) ? t('filesProcessing') : t('filesProcess') }}</span>
                   </button>
                   <button
-                    class="button"
+                    class="row-action-item"
+                    role="menuitem"
                     type="button"
                     :data-testid="`file-restore-${file.id}`"
                     :disabled="busy || !file.backup_file"
                     @click="askOperation('restore', file)"
                   >
-                    <RotateCcw :size="14" aria-hidden="true" />
-                    {{ t('filesRestore') }}
+                    <RotateCcw :size="16" aria-hidden="true" />
+                    <span>{{ t('filesRestore') }}</span>
                   </button>
                   <button
-                    class="button danger"
+                    class="row-action-item row-action-item--danger"
+                    role="menuitem"
                     type="button"
                     :data-testid="`file-delete-${file.id}`"
                     :disabled="busy || !file.backup_file"
                     @click="askOperation('delete', file)"
                   >
-                    <Trash2 :size="14" aria-hidden="true" />
-                    {{ t('filesDeleteBackup') }}
+                    <Trash2 :size="16" aria-hidden="true" />
+                    <span>{{ t('filesDeleteBackup') }}</span>
                   </button>
-                </div>
+                </RowActionMenu>
               </td>
             </tr>
 
             <tr v-if="isExpanded(file)" class="history-detail-row" data-testid="file-detail-row">
-              <td class="history-detail-cell" colspan="8">
+              <td class="history-detail-cell" colspan="7">
                 <div class="history-detail-grid files-detail-grid">
-                  <div class="history-detail-field">
-                    <span class="history-detail-key">{{ t('filesDetailID') }}:</span>
-                    <span class="history-detail-value">{{ file.id }}</span>
+                  <div class="files-detail-column">
+                    <div class="history-detail-field">
+                      <span class="history-detail-key">{{ t('filesDetailID') }}:</span>
+                      <span class="history-detail-value">{{ file.id }}</span>
+                    </div>
+                    <div class="history-detail-field">
+                      <span class="history-detail-key">{{ t('filesDetailMtimeNS') }}:</span>
+                      <span class="history-detail-value">{{ file.mtime_ns }}</span>
+                    </div>
+                    <div class="history-detail-field">
+                      <span class="history-detail-key">{{ t('filesDetailAudioPolicyVersion') }}:</span>
+                      <span class="history-detail-value">{{ file.audio_policy_version || t('filesEmptyValue') }}</span>
+                    </div>
+                    <div class="history-detail-field">
+                      <span class="history-detail-key">{{ t('filesDetailUpdatedAt') }}:</span>
+                      <span class="history-detail-value">{{ displayTimestamp(file.updated_at) }}</span>
+                    </div>
+                    <div class="history-detail-field">
+                      <span class="history-detail-key">{{ t('filesDetailPath') }}:</span>
+                      <span class="history-detail-value">{{ file.path }}</span>
+                    </div>
+                    <div class="history-detail-field">
+                      <span class="history-detail-key">{{ t('filesDetailBackupFile') }}:</span>
+                      <span class="history-detail-value">{{ file.backup_file || t('filesEmptyValue') }}</span>
+                    </div>
                   </div>
-                  <div class="history-detail-field">
-                    <span class="history-detail-key">{{ t('filesDetailSize') }}:</span>
-                    <span class="history-detail-value">{{ file.size }} ({{ formatBytes(file.size) }})</span>
-                  </div>
-                  <div class="history-detail-field">
-                    <span class="history-detail-key">{{ t('filesDetailMtimeNS') }}:</span>
-                    <span class="history-detail-value">{{ file.mtime_ns }}</span>
-                  </div>
-                  <div class="history-detail-field">
-                    <span class="history-detail-key">{{ t('filesDetailComplianceStatus') }}:</span>
-                    <span class="history-detail-value">{{ complianceLabel(file.compliance_status) }}</span>
-                  </div>
-                  <div class="history-detail-field">
-                    <span class="history-detail-key">{{ t('filesDetailAudioPolicyVersion') }}:</span>
-                    <span class="history-detail-value">{{ file.audio_policy_version || t('filesEmptyValue') }}</span>
-                  </div>
-                  <div class="history-detail-field">
-                    <span class="history-detail-key">{{ t('filesDetailCreatedAt') }}:</span>
-                    <span class="history-detail-value">{{ displayTimestamp(file.created_at) }}</span>
-                  </div>
-                  <div class="history-detail-field">
-                    <span class="history-detail-key">{{ t('filesDetailUpdatedAt') }}:</span>
-                    <span class="history-detail-value">{{ displayTimestamp(file.updated_at) }}</span>
-                  </div>
-                  <div class="history-detail-field history-detail-field--wide">
-                    <span class="history-detail-key">{{ t('filesDetailPath') }}:</span>
-                    <span class="history-detail-value">{{ file.path }}</span>
-                  </div>
-                  <div class="history-detail-field history-detail-field--wide">
-                    <span class="history-detail-key">{{ t('filesDetailAudioSignature') }}:</span>
-                    <span class="history-detail-value">{{ file.audio_signature || t('filesEmptyValue') }}</span>
-                  </div>
-                  <div class="history-detail-field history-detail-field--wide">
-                    <span class="history-detail-key">{{ t('filesDetailVideoSignature') }}:</span>
-                    <span class="history-detail-value">{{ file.video_signature || t('filesEmptyValue') }}</span>
-                  </div>
-                  <div class="history-detail-field history-detail-field--wide">
-                    <span class="history-detail-key">{{ t('filesDetailBackupFile') }}:</span>
-                    <span class="history-detail-value">{{ file.backup_file || t('filesEmptyValue') }}</span>
+                  <div class="files-detail-column">
+                    <div class="history-detail-field">
+                      <span class="history-detail-key">{{ t('filesDetailSize') }}:</span>
+                      <span class="history-detail-value">{{ file.size }} ({{ formatBytes(file.size) }})</span>
+                    </div>
+                    <div class="history-detail-field">
+                      <span class="history-detail-key">{{ t('filesDetailComplianceStatus') }}:</span>
+                      <span class="history-detail-value">{{ complianceLabel(file.compliance_status) }}</span>
+                    </div>
+                    <div class="history-detail-field">
+                      <span class="history-detail-key">{{ t('filesDetailCreatedAt') }}:</span>
+                      <span class="history-detail-value">{{ displayTimestamp(file.created_at) }}</span>
+                    </div>
+                    <div class="history-detail-field">
+                      <span class="history-detail-key">{{ t('filesDetailAudioSignature') }}:</span>
+                      <span class="history-detail-value">{{ file.audio_signature || t('filesEmptyValue') }}</span>
+                    </div>
+                    <div class="history-detail-field">
+                      <span class="history-detail-key">{{ t('filesDetailVideoSignature') }}:</span>
+                      <span class="history-detail-value">{{ file.video_signature || t('filesEmptyValue') }}</span>
+                    </div>
                   </div>
                 </div>
               </td>
             </tr>
           </template>
         </tbody>
-      </table>
+        </table>
+      </div>
 
       <DataPager
         :page="page"

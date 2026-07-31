@@ -118,6 +118,19 @@ type Service struct {
 
 	pathMutationMu    sync.Mutex
 	pathMutationPaths map[string]struct{}
+
+	scanMu                 sync.RWMutex
+	scanCurrent            ScanSession
+	scanHasCurrent         bool
+	scanCancel             context.CancelFunc
+	scanSequence           uint64
+	lastScanVisited        int64
+	pendingScanSource      ScanSource
+	discoveryWatcherStatus string
+	discoveryWatcherError  string
+	discoveryNextAt        time.Time
+	discoveryLastResult    *ReconciliationResult
+	discoveryRecovery      *RecoveryResult
 }
 
 type workerJob struct {
@@ -227,18 +240,22 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 	if err := service.cleanupOrphanTempOutputs(ctx); err != nil {
 		service.logf("startup temp cleanup failed: %v", err)
 	}
-	if cfg.Scan.StartupScanEnabled {
-		if err := service.ScanAll(ctx); err != nil {
-			service.logf("startup scan failed: %v", err)
-		}
-	}
 	if cfg.Scan.WatchdogEnabled {
 		if err := service.startWatcher(); err != nil {
 			service.logf("watcher start failed: %v", err)
+			service.markWatcherError(err)
 		}
+	} else {
+		service.markWatcherDisabled()
 	}
 	service.startWorkers()
+	service.startReconciliationLoop()
 	service.serveHTTP(listener)
+	if cfg.Scan.StartupScanEnabled {
+		if _, _, err := service.startManagedScan(ScanSourceStartup, false); err != nil {
+			service.logf("startup scan failed: %v", err)
+		}
+	}
 	return service, nil
 }
 
@@ -400,20 +417,8 @@ func closeOptionsLog(opts Options) {
 }
 
 func (s *Service) ScanAll(ctx context.Context) error {
-	cfg := s.config()
-	paths, err := pipeline.ScanRoots(pipeline.ScanConfig{
-		Roots:           cfg.Media.Roots,
-		Extensions:      cfg.Media.Extensions,
-		ExcludeDirs:     cfg.Media.ExcludeDirs,
-		ExcludePatterns: cfg.Media.ExcludePatterns,
-	})
-	if err != nil {
-		return err
-	}
-	for _, path := range paths {
-		s.enqueueWithSource(path, pipeline.JobSourceScan)
-	}
-	return nil
+	_, _, err := s.startManagedScan(ScanSourceManual, false)
+	return err
 }
 
 func (s *Service) startWatcher() error {
@@ -424,13 +429,19 @@ func (s *Service) reloadWatcher(cfg config.Config) error {
 	if !cfg.Scan.WatchdogEnabled {
 		s.setConfig(cfg)
 		s.closeWatcher()
+		s.markWatcherDisabled()
 		return nil
 	}
 	mediaConfig := cfg.Media
 	createWatcher := s.newWatcher
 	if createWatcher == nil {
 		createWatcher = func(roots []string, onPath func(string)) (runtimeWatcher, error) {
-			return pipeline.NewWatcher(roots, onPath)
+			return pipeline.NewFilteredWatcher(pipeline.ScanConfig{
+				Roots:           roots,
+				Extensions:      mediaConfig.Extensions,
+				ExcludeDirs:     mediaConfig.ExcludeDirs,
+				ExcludePatterns: mediaConfig.ExcludePatterns,
+			}, onPath)
 		}
 	}
 	candidate, err := createWatcher(mediaConfig.Roots, func(path string) {
@@ -446,16 +457,12 @@ func (s *Service) reloadWatcher(cfg config.Config) error {
 	s.setConfig(cfg)
 	s.watcher = candidate
 	s.watcherMu.Unlock()
+	s.markWatcherRunning()
 	if old != nil {
 		_ = old.Close()
 	}
 	s.workers.Add(1)
-	go func() {
-		defer s.workers.Done()
-		for err := range candidate.Errors() {
-			s.logf("watcher error: %v", err)
-		}
-	}()
+	go s.monitorWatcher(candidate)
 	return nil
 }
 
@@ -513,7 +520,7 @@ func (s *Service) workerLoop(stop <-chan struct{}) {
 			retryScheduled := false
 			if processErr != nil && result.Retryable {
 				pipelineConfig := s.config().Pipeline
-				retryScheduled = s.queue.ScheduleRetry(
+				retryScheduled = s.scheduleRetry(
 					job.task.Path,
 					pipelineConfig.RetryDelay(),
 					result.LastError,
@@ -638,6 +645,8 @@ func (s *Service) prepareHTTPServer() (net.Listener, error) {
 		Logf:             s.logf,
 		Events:           s.events,
 		ScanAll:          s.ScanAll,
+		Scans:            s,
+		Discovery:        s,
 		RequestRestart:   s.RequestRestart,
 		ConfigApplicator: s,
 		Status:           s,
@@ -677,6 +686,7 @@ func (s *Service) RequestRestart(before, after config.Config) error {
 	s.logf("service restart requested")
 	s.accepting.Store(false)
 	s.stopWorkerIntake()
+	s.cancelManagedScanForShutdown()
 	s.closeWatcher()
 	s.cancelNonCriticalActiveJobs()
 	s.waitForCriticalPhaseClear()
@@ -862,10 +872,34 @@ func (s *Service) IgnoreHistoryJob(ctx context.Context, id int64) (any, error) {
 }
 
 func (s *Service) ListFiles(ctx context.Context, page *repository.PageRequest) (any, error) {
-	if page != nil {
-		return s.db.FilesPage(ctx, *page)
+	files, err := s.db.Files(ctx)
+	if err != nil {
+		return nil, err
 	}
-	return s.db.Files(ctx)
+	mediaConfig := s.config().Media
+	filtered := make([]repository.FileFacts, 0, len(files))
+	for _, file := range files {
+		if isCandidatePathForMedia(file.Path, mediaConfig) {
+			filtered = append(filtered, file)
+		}
+	}
+	if page == nil {
+		return filtered, nil
+	}
+
+	request := page.Normalize()
+	start := request.Offset()
+	if start > len(filtered) {
+		start = len(filtered)
+	}
+	end := start + request.PageSize
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	items := append(make([]repository.FileFacts, 0, end-start), filtered[start:end]...)
+	return repository.PageResult[repository.FileFacts]{
+		Items: items, Page: request.Page, PageSize: request.PageSize, Total: len(filtered),
+	}, nil
 }
 
 func (s *Service) ProcessFile(ctx context.Context, id int64) (any, error) {
@@ -1028,6 +1062,15 @@ func (s *Service) enqueueWithSource(path string, source pipeline.JobSource) bool
 	return s.queue.EnqueueWithSource(path, source)
 }
 
+func (s *Service) scheduleRetry(path string, delay time.Duration, lastError string, maxRetries int) bool {
+	s.workerIntakeMu.Lock()
+	defer s.workerIntakeMu.Unlock()
+	if s.queue == nil || !s.isCandidatePath(path) {
+		return false
+	}
+	return s.queue.ScheduleRetry(path, delay, lastError, maxRetries)
+}
+
 func (s *Service) canEnqueueLocked(path string) bool {
 	if !s.accepting.Load() {
 		return false
@@ -1140,6 +1183,9 @@ func (s *Service) isCandidatePath(path string) bool {
 }
 
 func isCandidatePathForMedia(path string, cfg config.MediaConfig) bool {
+	if !pathWithinRoots(path, cfg.Roots) {
+		return false
+	}
 	ext := strings.ToLower(filepath.Ext(path))
 	if pipeline.IsPathExcluded(path, cfg.ExcludeDirs, cfg.ExcludePatterns) {
 		return false
@@ -1165,9 +1211,12 @@ func (s *Service) closeWatcher() {
 }
 
 func (s *Service) Apply(_ context.Context, module settings.Module, before, after config.Config) error {
+	var removedWaiting []pipeline.RemovedWaitingTask
 	switch module {
 	case settings.Media:
-		if err := s.reloadWatcher(after); err != nil {
+		var err error
+		removedWaiting, err = s.applyMediaConfig(after)
+		if err != nil {
 			return err
 		}
 	case settings.Pipeline:
@@ -1178,10 +1227,53 @@ func (s *Service) Apply(_ context.Context, module settings.Module, before, after
 	default:
 		return fmt.Errorf("unsupported config module %q", module)
 	}
+	for _, task := range removedWaiting {
+		s.finishRemovedWaitingTask(task)
+		s.logf("removed waiting task excluded by media rules path=%s phase=%s source=%s", task.Path, task.Phase, task.Source)
+	}
 	if s.events != nil {
-		s.events.Publish("config.applied", map[string]any{"module": module, "apply_mode": settings.ApplyModeFor(module)})
+		data := map[string]any{"module": module, "apply_mode": settings.ApplyModeFor(module)}
+		if module == settings.Media {
+			data["removed_waiting_tasks"] = len(removedWaiting)
+		}
+		s.events.Publish("config.applied", data)
 	}
 	return nil
+}
+
+func (s *Service) applyMediaConfig(after config.Config) ([]pipeline.RemovedWaitingTask, error) {
+	s.workerIntakeMu.Lock()
+	defer s.workerIntakeMu.Unlock()
+	if err := s.reloadWatcher(after); err != nil {
+		return nil, err
+	}
+	if s.queue == nil {
+		return nil, nil
+	}
+	return s.queue.RemoveWaitingIf(func(task pipeline.RuntimeTask) bool {
+		return !isCandidatePathForMedia(task.Path, after.Media)
+	}), nil
+}
+
+func (s *Service) finishRemovedWaitingTask(task pipeline.RemovedWaitingTask) {
+	if task.JobID == 0 || s.db == nil {
+		return
+	}
+	finalError := task.LastRetryError
+	if finalError == "" {
+		finalError = "removed from waiting queue because the path is excluded by current media rules"
+	}
+	finishCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, _, err := s.db.FailProcessingJob(finishCtx, task.JobID, finalError); err != nil {
+		s.logf("finish removed waiting job failed job_id=%d path=%s error=%v", task.JobID, task.Path, err)
+		return
+	}
+	if s.events != nil {
+		s.events.Publish("failed", map[string]any{
+			"job_id": task.JobID, "path": task.Path, "status": "failed", "error": finalError,
+		})
+	}
 }
 
 func (s *Service) Rollback(ctx context.Context, module settings.Module, before config.Config) error {

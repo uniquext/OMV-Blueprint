@@ -10,6 +10,7 @@ import (
 func (s *Service) Shutdown(ctx context.Context) error {
 	s.accepting.Store(false)
 	s.stopWorkerIntake()
+	s.cancelManagedScanForShutdown()
 
 	var shutdownErr error
 	if s.server != nil {

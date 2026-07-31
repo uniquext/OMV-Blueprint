@@ -2,6 +2,7 @@ import type {
   ApiEnvelope,
   AudioCleanerConfig,
   ConfigModuleName,
+  DiscoveryStatus,
   FileRecord,
   HistoryRecord,
   MediaDirectoryListing,
@@ -12,6 +13,8 @@ import type {
   RuntimeLogResponse,
   RuntimeTasksSnapshot,
   ScanResponse,
+  ScanSession,
+  ScanStartResponse,
   ServiceStatus,
   SettingsView,
   ModuleUpdateResult
@@ -122,8 +125,11 @@ export const api = {
 	ignoreHistoryJob: (id: number) => request<OperationStatusResponse>(`/api/history/${id}/ignore`, post()),
 	filesPage: async (page?: PageRequest) =>
 		unwrapPage(await request<CollectionResponse<FileRecord>>(withPage('/api/files', page)), page),
-	processFile: (id: number) => request<ScanResponse>(`/api/files/${id}/process`, post()),
-	scan: () => request<ScanResponse>('/api/scan', post()),
+		processFile: (id: number) => request<ScanResponse>(`/api/files/${id}/process`, post()),
+		startScan: () => request<ScanStartResponse>('/api/scans', post()),
+		currentScan: () => request<ScanSession>('/api/scans/current'),
+		cancelScan: (id: string) => request<ScanSession>(`/api/scans/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+		discoveryStatus: () => request<DiscoveryStatus>('/api/discovery-status'),
 	restoreFileBackup: (id: number) => request<RestoreResult>(`/api/files/${id}/restore-backup`, post()),
 	deleteFileBackup: (id: number) => request<OperationStatusResponse>(`/api/files/${id}/backup`, { method: 'DELETE' }),
 }

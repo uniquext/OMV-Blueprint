@@ -3,6 +3,8 @@ import { EyeOff, RotateCcw } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import DataPager from '../components/DataPager.vue'
+import OverflowMarquee from '../components/OverflowMarquee.vue'
+import RowActionMenu from '../components/RowActionMenu.vue'
 import { eventStreamState } from '../composables/useEventStream'
 import { jobStatusLabel, t } from '../i18n'
 import { api } from '../lib/api'
@@ -44,6 +46,7 @@ const dateFrom = ref('')
 const dateTo = ref('')
 const keyword = ref('')
 const openFilter = ref<'result' | 'source' | 'dateFrom' | 'dateTo' | null>(null)
+const openActionJobID = ref<number | null>(null)
 const calendarDraft = ref('')
 const calendarMonth = ref('')
 
@@ -98,6 +101,7 @@ function clampPage(): void {
 }
 
 async function loadHistory(): Promise<void> {
+  openActionJobID.value = null
   loading.value = true
   error.value = ''
   try {
@@ -124,6 +128,7 @@ function scheduleHistoryLoad(): void {
 }
 
 function askJobAction(action: 'retry' | 'ignore', job: HistoryRecord): void {
+  openActionJobID.value = null
   pendingAction.value = action
   selectedJob.value = job
 }
@@ -160,7 +165,14 @@ function closeFilter(): void {
 }
 
 function toggleMenu(menu: 'result' | 'source'): void {
+  openActionJobID.value = null
   openFilter.value = openFilter.value === menu ? null : menu
+}
+
+function toggleActionMenu(job: HistoryRecord): void {
+  const id = jobID(job)
+  openFilter.value = null
+  openActionJobID.value = openActionJobID.value === id ? null : id
 }
 
 function selectResultFilter(value: JobFilter): void {
@@ -199,6 +211,7 @@ function monthKey(value: string): string {
 }
 
 function openDateFilter(field: 'dateFrom' | 'dateTo'): void {
+  openActionJobID.value = null
   const value = field === 'dateFrom' ? dateFrom.value : dateTo.value
   calendarDraft.value = value
   calendarMonth.value = monthKey(value || newestHistoryDate())
@@ -372,6 +385,7 @@ function showDialog(element: HTMLDialogElement): void {
 
 watch(page, clampPage)
 watch(pageSize, () => {
+  openActionJobID.value = null
   if (page.value !== 1) {
     page.value = 1
     return
@@ -379,6 +393,7 @@ watch(pageSize, () => {
   clampPage()
 })
 watch([resultFilter, sourceFilter, dateFrom, dateTo, keyword], () => {
+  openActionJobID.value = null
   if (page.value !== 1) {
     page.value = 1
     return
@@ -586,16 +601,17 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-if="loading" class="panel-body muted">{{ t('jobsLoading') }}</div>
-      <table class="data-table history-table">
+      <div class="data-table-scroll">
+        <table class="data-table history-table">
         <thead>
           <tr>
             <th></th>
             <th class="history-id-heading">ID</th>
-            <th>{{ t('jobsColumnPath') }}</th>
+            <th>{{ t('filesColumnFile') }}</th>
             <th>{{ t('jobsColumnSource') }}</th>
             <th>{{ t('historyColumnResult') }}</th>
-            <th>{{ t('tableUpdated') }}</th>
-            <th>{{ t('jobsColumnActions') }}</th>
+            <th class="date-cell">{{ t('tableUpdated') }}</th>
+            <th class="actions-cell history-actions-cell">{{ t('jobsColumnActions') }}</th>
           </tr>
         </thead>
         <tbody>
@@ -610,9 +626,9 @@ onBeforeUnmount(() => {
                 </button>
               </td>
               <td class="history-id-cell">{{ jobID(job) }}</td>
-              <td class="path-cell" :title="jobPath(job)">
-                <span class="history-path-main">{{ jobBasename(job) }}</span>
-                <span class="history-path-sub">{{ jobDirectory(job) }}</span>
+              <td class="path-cell file-column-cell">
+                <OverflowMarquee class="history-path-main" :text="jobBasename(job)" />
+                <OverflowMarquee class="history-path-sub" :text="jobDirectory(job)" />
               </td>
               <td class="source-cell">{{ jobDiscoverySourceLabel(job) }}</td>
               <td class="status-cell">
@@ -620,28 +636,37 @@ onBeforeUnmount(() => {
               </td>
               <td class="date-cell">{{ jobTableDate(job) }}</td>
               <td class="actions-cell history-actions-cell">
-                <div class="row-actions">
+                <RowActionMenu
+                  :open="openActionJobID === jobID(job)"
+                  :label="t('rowActionsMore')"
+                  :width="108"
+                  :test-id="`history-actions-${job.id}`"
+                  @toggle="toggleActionMenu(job)"
+                  @close="openActionJobID = null"
+                >
                   <button
-                    class="button"
+                    class="row-action-item"
+                    role="menuitem"
                     type="button"
                     :data-testid="`history-retry-${job.id}`"
                     :disabled="busy || job.result !== 'failed'"
                     @click="askJobAction('retry', job)"
                   >
-                    <RotateCcw :size="14" aria-hidden="true" />
-                    {{ t('historyRetry') }}
+                    <RotateCcw :size="16" aria-hidden="true" />
+                    <span>{{ t('historyRetry') }}</span>
                   </button>
                   <button
-                    class="button danger"
+                    class="row-action-item row-action-item--danger"
+                    role="menuitem"
                     type="button"
                     :data-testid="`history-ignore-${job.id}`"
                     :disabled="busy || job.result !== 'failed'"
                     @click="askJobAction('ignore', job)"
                   >
-                    <EyeOff :size="14" aria-hidden="true" />
-                    {{ t('historyIgnore') }}
+                    <EyeOff :size="16" aria-hidden="true" />
+                    <span>{{ t('historyIgnore') }}</span>
                   </button>
-                </div>
+                </RowActionMenu>
               </td>
             </tr>
             <tr v-if="isExpanded(job)" class="history-detail-row">
@@ -691,7 +716,8 @@ onBeforeUnmount(() => {
             </tr>
           </template>
         </tbody>
-      </table>
+        </table>
+      </div>
       <DataPager
         :page="page"
         :page-size="pageSize"

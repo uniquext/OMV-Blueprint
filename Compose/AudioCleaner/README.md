@@ -44,22 +44,3 @@ Hash 路由：
 `ui.language` 支持 `zh-CN` 和 `en-US`，保存后在当前浏览器热生效。Notifications 和整份 Config PUT 已从 Settings 合同移除。
 
 备份采用固定的 `safety_only` 策略，不提供保留期或模式配置。
-
-运行单元测试：
-
-```bash
-cd app && go test -race ./...
-cd ../web && npm test && npm run build
-```
-
-## 集成验证
-
-针对已经启动在 9830 且容器名为 `audiocleaner-settings-it` 的隔离测试实例，运行设置系统集成测试：
-
-```bash
-BASE_URL=http://127.0.0.1:9830 \
-CONTAINER_NAME=audiocleaner-settings-it \
-bash test/scripts/run-settings-integration.sh
-```
-
-脚本覆盖六模块合同、严格校验、revision 冲突、三种生效方式、Scan 强制重启、重启后健康与 SSE 恢复、原子持久化和 Notifications 构建资产扫描。结果写入 `test/reports/settings-integration-results.jsonl`。测试会修改配置，必须使用隔离 bind mount，不得直接针对正式数据目录运行。

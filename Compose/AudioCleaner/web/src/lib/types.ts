@@ -101,6 +101,7 @@ export interface UIConfig {
 export interface ScanConfig {
   startup_scan_enabled: boolean
   watchdog_enabled: boolean
+  reconciliation_interval_minutes: number
 }
 
 export type JobStatus = 'compatible' | 'processing' | 'processed' | 'failed' | string
@@ -171,6 +172,66 @@ export interface TranscodeSuccessRate {
 
 export interface ScanResponse {
   status: 'queued' | string
+}
+
+export type ScanSource = 'manual' | 'startup' | 'reconciliation' | 'recovery' | string
+export type ScanStatus = 'idle' | 'running' | 'reconciling' | 'cancelling' | 'completed' | 'cancelled' | 'failed' | string
+
+export interface ScanSession {
+  scan_id: string
+  source: ScanSource
+  status: ScanStatus
+  started_at?: string
+  updated_at?: string
+  finished_at?: string
+  current_root: string
+  current_directory: string
+  progress_percent?: number
+  estimating: boolean
+  rate_per_second: number
+  eta_seconds?: number
+  visited: number
+  discovered: number
+  skipped: number
+  enqueued: number
+  failed: number
+  merged: number
+  missing: number
+  added: number
+  modified: number
+  last_merged_path?: string
+  last_error?: string
+}
+
+export interface ScanStartResponse {
+  scan: ScanSession
+  reused: boolean
+}
+
+export interface ReconciliationResult {
+  completed_at: string
+  added: number
+  modified: number
+  deleted: number
+}
+
+export interface RecoveryResult {
+  detected_at: string
+  completed_at?: string
+  reason: string
+  status: 'pending' | 'running' | 'completed' | string
+}
+
+export interface DiscoveryStatus {
+  status: 'normal' | 'limited' | 'degraded' | string
+  watcher_enabled: boolean
+  watcher_status: 'running' | 'disabled' | 'error' | string
+  watcher_error?: string
+  watched_directories: number
+  reconciliation_interval_minutes: number
+  next_reconciliation_at?: string
+  last_reconciliation?: ReconciliationResult
+  recovery?: RecoveryResult
 }
 
 export interface RestoreResult {

@@ -41,6 +41,8 @@ type Deps struct {
 	ScanAll          func(context.Context) error
 	RequestRestart   func(config.Config, config.Config) error
 	ConfigApplicator settings.Applicator
+	Scans            ScanController
+	Discovery        DiscoveryStatusProvider
 
 	Status       StatusProvider
 	RuntimeTasks RuntimeTaskProvider
@@ -55,6 +57,16 @@ type StatusProvider interface {
 
 type RuntimeTaskProvider interface {
 	RuntimeTasks(ctx context.Context) (any, error)
+}
+
+type ScanController interface {
+	StartScan(context.Context) (any, error)
+	CurrentScan(context.Context) (any, error)
+	CancelScan(context.Context, string) (any, error)
+}
+
+type DiscoveryStatusProvider interface {
+	DiscoveryStatus(context.Context) (any, error)
 }
 
 type HistoryStore interface {
@@ -145,7 +157,6 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	if !scanPayloadAllowed(w, r) {
 		return
 	}
-
 	if s.deps.ScanAll != nil {
 		if err := s.deps.ScanAll(r.Context()); err != nil {
 			writeDependencyResult(w, nil, err)
@@ -156,6 +167,50 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeOK(w, map[string]string{"status": "queued"})
+}
+
+func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
+	if !scanPayloadAllowed(w, r) {
+		return
+	}
+	if s.deps.Scans == nil {
+		writeOK(w, map[string]any{"scan": map[string]string{"status": "idle"}, "reused": false})
+		return
+	}
+	result, err := s.deps.Scans.StartScan(r.Context())
+	writeDependencyResult(w, result, err)
+}
+
+func (s *Server) handleCurrentScan(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Scans == nil {
+		writeOK(w, map[string]string{"status": "idle"})
+		return
+	}
+	result, err := s.deps.Scans.CurrentScan(r.Context())
+	writeDependencyResult(w, result, err)
+}
+
+func (s *Server) handleCancelScan(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Scans == nil {
+		writeError(w, http.StatusNotFound, "scan not found")
+		return
+	}
+	id := strings.TrimSpace(chi.URLParam(r, "scan_id"))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "scan id is required")
+		return
+	}
+	result, err := s.deps.Scans.CancelScan(r.Context(), id)
+	writeDependencyResult(w, result, err)
+}
+
+func (s *Server) handleDiscoveryStatus(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Discovery == nil {
+		writeOK(w, map[string]any{"status": "limited", "watcher_status": "disabled"})
+		return
+	}
+	result, err := s.deps.Discovery.DiscoveryStatus(r.Context())
+	writeDependencyResult(w, result, err)
 }
 
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {

@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"io/fs"
 	pathpkg "path"
 	"path/filepath"
@@ -12,6 +13,79 @@ type ScanConfig struct {
 	Extensions      []string
 	ExcludeDirs     []string
 	ExcludePatterns []string
+}
+
+type ScanCallbacks struct {
+	OnEntry     func(root, path string, entry fs.DirEntry)
+	OnDirectory func(root, path string)
+	OnCandidate func(root, path string, info fs.FileInfo)
+	OnError     func(path string, err error)
+}
+
+// StreamScan walks configured roots once and reports candidates immediately.
+// Per-path filesystem errors are reported and skipped so one unreadable branch
+// does not hide the rest of a media library.
+func StreamScan(ctx context.Context, cfg ScanConfig, callbacks ScanCallbacks) error {
+	extensions := extensionSet(cfg.Extensions)
+	excludeDirs := nameSet(cfg.ExcludeDirs)
+
+	for _, root := range cfg.Roots {
+		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if walkErr != nil {
+				if callbacks.OnError != nil {
+					callbacks.OnError(path, walkErr)
+				}
+				return nil
+			}
+			if entry.Type()&fs.ModeSymlink != 0 {
+				return nil
+			}
+			if entry.IsDir() {
+				if path != root {
+					if _, ok := excludeDirs[entry.Name()]; ok || IsPathExcluded(path, cfg.ExcludeDirs, cfg.ExcludePatterns) {
+						return filepath.SkipDir
+					}
+				}
+				if callbacks.OnEntry != nil {
+					callbacks.OnEntry(root, path, entry)
+				}
+				if callbacks.OnDirectory != nil {
+					callbacks.OnDirectory(root, path)
+				}
+				return nil
+			}
+			if callbacks.OnEntry != nil {
+				callbacks.OnEntry(root, path, entry)
+			}
+			if _, ok := extensions[strings.ToLower(filepath.Ext(entry.Name()))]; !ok {
+				return nil
+			}
+			if IsPathExcluded(path, cfg.ExcludeDirs, cfg.ExcludePatterns) || IsAudioCleanerTempOutputPath(entry.Name()) {
+				return nil
+			}
+			info, err := entry.Info()
+			if err != nil {
+				if callbacks.OnError != nil {
+					callbacks.OnError(path, err)
+				}
+				return nil
+			}
+			if info.Size() == 0 {
+				return nil
+			}
+			if callbacks.OnCandidate != nil {
+				callbacks.OnCandidate(root, path, info)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func ScanRoots(cfg ScanConfig) ([]string, error) {

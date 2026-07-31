@@ -51,8 +51,9 @@ type UIConfig struct {
 }
 
 type ScanConfig struct {
-	StartupScanEnabled bool `json:"startup_scan_enabled"`
-	WatchdogEnabled    bool `json:"watchdog_enabled"`
+	StartupScanEnabled         bool `json:"startup_scan_enabled"`
+	WatchdogEnabled            bool `json:"watchdog_enabled"`
+	ReconciliationIntervalMins int  `json:"reconciliation_interval_minutes"`
 }
 
 func Default() Config {
@@ -83,8 +84,9 @@ func Default() Config {
 			Language: "zh-CN",
 		},
 		Scan: ScanConfig{
-			StartupScanEnabled: true,
-			WatchdogEnabled:    true,
+			StartupScanEnabled:         true,
+			WatchdogEnabled:            true,
+			ReconciliationIntervalMins: 15,
 		},
 	}
 }
@@ -148,6 +150,9 @@ func (c Config) Validate() error {
 	}
 	if c.Pipeline.JobTimeoutMinutes < 1 || c.Pipeline.JobTimeoutMinutes > 10080 {
 		return errors.New("pipeline.job_timeout_minutes must be between 1 and 10080")
+	}
+	if c.Scan.ReconciliationIntervalMins < 1 || c.Scan.ReconciliationIntervalMins > 10080 {
+		return errors.New("scan.reconciliation_interval_minutes must be between 1 and 10080")
 	}
 	if math.IsNaN(c.Validation.MaxSizeRatio) || math.IsInf(c.Validation.MaxSizeRatio, 0) || c.Validation.MaxSizeRatio < 1 || c.Validation.MaxSizeRatio > 10 {
 		return errors.New("validation.max_size_ratio must be a finite number between 1 and 10")

@@ -46,6 +46,12 @@ type RuntimeTaskSnapshot struct {
 	Active  []RuntimeTask `json:"active_tasks"`
 }
 
+type RemovedWaitingTask struct {
+	RuntimeTask
+	JobID          int64
+	LastRetryError string
+}
+
 type runtimeTask struct {
 	RuntimeTask
 	active          bool
@@ -230,6 +236,64 @@ func (q *Queue) Len() int {
 		}
 	}
 	return count
+}
+
+func (q *Queue) RemoveWaitingIf(remove func(RuntimeTask) bool) []RemovedWaitingTask {
+	if remove == nil {
+		return nil
+	}
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	type orderedRemovedTask struct {
+		task  RemovedWaitingTask
+		order uint64
+	}
+	removed := make([]orderedRemovedTask, 0)
+	removedPaths := make(map[string]struct{})
+	for path, task := range q.tasks {
+		if task.active || !remove(task.RuntimeTask) {
+			continue
+		}
+		if task.retryTimer != nil {
+			task.retryTimer.Stop()
+		}
+		task.retryGeneration++
+		removed = append(removed, orderedRemovedTask{
+			task: RemovedWaitingTask{
+				RuntimeTask:    task.RuntimeTask,
+				JobID:          task.jobID,
+				LastRetryError: task.lastRetryError,
+			},
+			order: task.order,
+		})
+		removedPaths[path] = struct{}{}
+		delete(q.tasks, path)
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+
+	writeIndex := 0
+	for _, job := range q.jobs {
+		if _, ok := removedPaths[job.Path]; ok {
+			continue
+		}
+		q.jobs[writeIndex] = job
+		writeIndex++
+	}
+	for index := writeIndex; index < len(q.jobs); index++ {
+		q.jobs[index] = QueueJob{}
+	}
+	q.jobs = q.jobs[:writeIndex]
+
+	sort.Slice(removed, func(i, j int) bool { return removed[i].order < removed[j].order })
+	result := make([]RemovedWaitingTask, len(removed))
+	for index, item := range removed {
+		result[index] = item.task
+	}
+	return result
 }
 
 func (q *Queue) UpdatePhase(path string, phase RuntimePhase) {

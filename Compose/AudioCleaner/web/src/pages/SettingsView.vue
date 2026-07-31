@@ -135,6 +135,9 @@ function validationErrors(module: ConfigModuleName): Record<string, string> {
     validateRange(errors, 'max_size_increase_mb', config.validation.max_size_increase_mb, 0, 1048576)
     validateRange(errors, 'duration_tolerance_seconds', config.validation.duration_tolerance_seconds, 0, 3600)
   }
+	if (module === 'scan') {
+		validateRange(errors, 'reconciliation_interval_minutes', config.scan.reconciliation_interval_minutes, 1, 10080)
+	}
   return errors
 }
 
@@ -387,9 +390,27 @@ onBeforeUnmount(() => {
           </template>
 
           <template v-else-if="activeModule === 'scan'">
-            <h2>Scan</h2><p class="muted">{{ t('settingsScanDescription') }}</p>
-            <label class="settings-switch-row"><span><strong>{{ t('settingsStartupScan') }}</strong><small>{{ drafts.scan.startup_scan_enabled ? t('settingsEnabled') : t('settingsDisabled') }}</small></span><input v-model="drafts.scan.startup_scan_enabled" data-testid="scan-startup_scan_enabled" type="checkbox" /><i aria-hidden="true"></i></label>
-            <label class="settings-switch-row"><span><strong>{{ t('settingsWatchdog') }}</strong><small>{{ drafts.scan.watchdog_enabled ? t('settingsEnabled') : t('settingsDisabled') }}</small></span><input v-model="drafts.scan.watchdog_enabled" data-testid="scan-watchdog_enabled" type="checkbox" /><i aria-hidden="true"></i></label>
+            <h2>{{ t('settingsScanTitle') }}</h2><p class="muted">{{ t('settingsScanDescription') }}</p>
+            <div class="settings-scan-rows">
+              <div class="settings-scan-row">
+                <div><strong>{{ t('settingsStartupScan') }}</strong><small>{{ t('settingsStartupScanHint') }}</small></div>
+                <label class="settings-toggle-control"><span>{{ drafts.scan.startup_scan_enabled ? t('settingsEnabled') : t('settingsDisabled') }}</span><input v-model="drafts.scan.startup_scan_enabled" data-testid="scan-startup_scan_enabled" type="checkbox" /><i aria-hidden="true"></i></label>
+              </div>
+              <div class="settings-scan-row">
+                <div><strong>{{ t('settingsWatchdog') }}</strong><small>{{ t('settingsWatchdogHint') }}</small></div>
+                <label class="settings-toggle-control"><span>{{ drafts.scan.watchdog_enabled ? t('settingsEnabled') : t('settingsDisabled') }}</span><input v-model="drafts.scan.watchdog_enabled" data-testid="scan-watchdog_enabled" type="checkbox" /><i aria-hidden="true"></i></label>
+              </div>
+              <label class="settings-scan-row">
+                <div><strong>{{ t('settingsReconciliation') }}</strong><small>{{ t('settingsReconciliationHint') }}</small></div>
+                <div class="settings-scan-number"><span class="unit-input"><input v-model.number="drafts.scan.reconciliation_interval_minutes" data-testid="scan-reconciliation_interval_minutes" type="number" min="1" max="10080" /><i>{{ t('settingsMinutes') }}</i></span><span v-if="activeErrors.reconciliation_interval_minutes" class="field-error">{{ activeErrors.reconciliation_interval_minutes }}</span></div>
+              </label>
+              <div class="settings-scan-row">
+                <div><strong>{{ t('settingsUniquePathRule') }}</strong><small>{{ t('settingsUniquePathRuleHint') }}</small></div><span class="settings-enforced">{{ t('settingsAlwaysEnabled') }}</span>
+              </div>
+              <div class="settings-scan-row">
+                <div><strong>{{ t('settingsWatcherRecovery') }}</strong><small>{{ t('settingsWatcherRecoveryHint') }}</small></div><span class="settings-enforced">{{ t('settingsAutomatic') }}</span>
+              </div>
+            </div>
           </template>
 
           <template v-else>
