@@ -3,6 +3,8 @@ package repository
 import (
 	"encoding/json"
 	"time"
+
+	"omv-blueprint/compose/audiocleaner/internal/compatibility"
 )
 
 type DiscoverySource string
@@ -32,17 +34,19 @@ const (
 )
 
 type FileFacts struct {
-	ID                 int64            `json:"id"`
-	Path               string           `json:"path"`
-	Size               int64            `json:"size"`
-	MTimeNS            int64            `json:"mtime_ns"`
-	AudioSignature     string           `json:"audio_signature"`
-	VideoSignature     string           `json:"video_signature"`
-	ComplianceStatus   ComplianceStatus `json:"compliance_status"`
-	AudioPolicyVersion int              `json:"audio_policy_version"`
-	BackupFile         string           `json:"backup_file"`
-	CreatedAt          time.Time        `json:"created_at"`
-	UpdatedAt          time.Time        `json:"updated_at"`
+	ID                      int64                     `json:"id"`
+	Path                    string                    `json:"path"`
+	Size                    int64                     `json:"size"`
+	MTimeNS                 int64                     `json:"mtime_ns"`
+	AudioSignature          string                    `json:"audio_signature"`
+	VideoSignature          string                    `json:"video_signature"`
+	ComplianceStatus        ComplianceStatus          `json:"compliance_status"`
+	AudioPolicyVersion      int                       `json:"audio_policy_version"`
+	BackupFile              string                    `json:"backup_file"`
+	MissingAt               *time.Time                `json:"missing_at,omitempty"`
+	CompatibilityAssessment *compatibility.Assessment `json:"compatibility_assessment,omitempty"`
+	CreatedAt               time.Time                 `json:"created_at"`
+	UpdatedAt               time.Time                 `json:"updated_at"`
 }
 
 type ReplacementJournal struct {

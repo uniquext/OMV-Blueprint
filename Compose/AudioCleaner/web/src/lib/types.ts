@@ -131,6 +131,41 @@ export interface RuntimeLogResponse {
   lines: number
 }
 
+export interface AudioTrackEvidence {
+  stream_index: number
+  codec: string
+  channels: number
+  language?: string
+  title?: string
+  disposition?: string
+}
+
+export interface RuleMatch {
+  codec: string
+  stream_indexes: number[]
+}
+
+export interface AudioPlanEvidence {
+  stream_index: number
+  action: 'copy' | 'transcode' | string
+  target_codec?: string
+  bitrate?: string
+}
+
+export interface CompatibilityAssessment {
+  schema_version: number
+  source: 'source_probe' | 'cache' | string
+  policy_version: number
+  policy_incompatible_codecs: string[]
+  audio_tracks: AudioTrackEvidence[]
+  matched_rules: RuleMatch[]
+  action: 'already_compatible' | 'transcode' | 'unsupported' | string
+  audio_plans: AudioPlanEvidence[]
+  reason: string
+  assessed_at: string
+  reused_at?: string
+}
+
 export interface FileRecord {
 	id: number
 	path: string
@@ -141,6 +176,8 @@ export interface FileRecord {
 	compliance_status: 'compliant' | 'noncompliant' | '' | string
 	audio_policy_version: number
 	backup_file: string
+	compatibility_assessment?: CompatibilityAssessment
+	missing_at?: string
 	created_at: string
 	updated_at: string
 }

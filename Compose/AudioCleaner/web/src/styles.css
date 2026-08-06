@@ -3173,7 +3173,7 @@ textarea {
     overflow-x: auto;
   }
 
-  .files-detail-grid {
+.files-detail-grid {
     grid-template-columns: 1fr;
   }
 
@@ -3305,6 +3305,81 @@ textarea {
   .dashboard-task-pager__controls {
     width: 100%;
     justify-content: flex-end;
+  }
+}
+
+.compatibility-assessment {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid #e0e6eb;
+}
+
+.compatibility-assessment-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.compatibility-assessment-head h3,
+.compatibility-assessment-columns h4 {
+  margin: 0;
+  font-size: 14px;
+  letter-spacing: 0;
+}
+
+.compatibility-assessment-facts {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.8fr) minmax(100px, 0.5fr) minmax(240px, 2fr);
+  gap: 16px;
+  margin: 0 0 18px;
+}
+
+.compatibility-assessment-facts div {
+  min-width: 0;
+}
+
+.compatibility-assessment-facts dt {
+  color: #687886;
+  font-size: 12px;
+}
+
+.compatibility-assessment-facts dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.compatibility-assessment-columns {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 24px;
+}
+
+.compatibility-assessment-columns ul {
+  display: grid;
+  gap: 7px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.compatibility-assessment-columns li {
+  overflow-wrap: anywhere;
+  color: #4b5c68;
+  font-size: 13px;
+}
+
+.compatibility-assessment-missing {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid #e0e6eb;
+}
+
+@media (max-width: 820px) {
+  .compatibility-assessment-facts,
+  .compatibility-assessment-columns {
+    grid-template-columns: 1fr;
   }
 }
 

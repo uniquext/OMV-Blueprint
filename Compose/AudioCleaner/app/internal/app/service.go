@@ -21,6 +21,7 @@ import (
 
 	"omv-blueprint/compose/audiocleaner/internal/api"
 	"omv-blueprint/compose/audiocleaner/internal/backup"
+	"omv-blueprint/compose/audiocleaner/internal/compatibility"
 	"omv-blueprint/compose/audiocleaner/internal/config"
 	"omv-blueprint/compose/audiocleaner/internal/eventbus"
 	"omv-blueprint/compose/audiocleaner/internal/media"
@@ -79,19 +80,20 @@ type runtimeWatcher interface {
 type watcherFactory func([]string, func(string)) (runtimeWatcher, error)
 
 type Service struct {
-	cfg        config.Config
-	cfgMu      sync.RWMutex
-	configPath string
-	db         *repository.Repository
-	events     *eventbus.Bus
-	queue      *pipeline.Queue
-	watcher    runtimeWatcher
-	watcherMu  sync.Mutex
-	newWatcher watcherFactory
-	server     *http.Server
-	logger     *log.Logger
-	logCloser  func() error
-	logPath    string
+	cfg                      config.Config
+	cfgMu                    sync.RWMutex
+	configPath               string
+	db                       *repository.Repository
+	compatibilityCacheUpsert func(context.Context, repository.FileFacts) (repository.FileFacts, error)
+	events                   *eventbus.Bus
+	queue                    *pipeline.Queue
+	watcher                  runtimeWatcher
+	watcherMu                sync.Mutex
+	newWatcher               watcherFactory
+	server                   *http.Server
+	logger                   *log.Logger
+	logCloser                func() error
+	logPath                  string
 
 	backupRoot  string
 	workRoot    string
@@ -138,6 +140,14 @@ type workerJob struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 }
+
+type enqueueDisposition uint8
+
+const (
+	enqueueRejected enqueueDisposition = iota
+	enqueueAccepted
+	enqueueDuplicate
+)
 
 func RecoverStartup(ctx context.Context, repo RecoveryRepository) error {
 	jobs, err := repo.ProcessingJobs(ctx)
@@ -879,7 +889,7 @@ func (s *Service) ListFiles(ctx context.Context, page *repository.PageRequest) (
 	mediaConfig := s.config().Media
 	filtered := make([]repository.FileFacts, 0, len(files))
 	for _, file := range files {
-		if isCandidatePathForMedia(file.Path, mediaConfig) {
+		if file.MissingAt == nil && isCandidatePathForMedia(file.Path, mediaConfig) {
 			filtered = append(filtered, file)
 		}
 	}
@@ -1045,21 +1055,29 @@ func (s *Service) RuntimeLogs(ctx context.Context, lines int) (any, error) {
 }
 
 func (s *Service) enqueueWithSource(path string, source pipeline.JobSource) bool {
+	disposition, _ := s.enqueueWithSourceResult(path, source)
+	return disposition == enqueueAccepted
+}
+
+func (s *Service) enqueueWithSourceResult(path string, source pipeline.JobSource) (enqueueDisposition, error) {
 	s.workerIntakeMu.Lock()
 	defer s.workerIntakeMu.Unlock()
 	if !s.canEnqueueLocked(path) {
-		return false
+		return enqueueRejected, nil
 	}
 	file, err := s.db.FileByPath(context.Background(), path)
 	if err == nil && file.BackupFile != "" {
 		s.logf("skip unresolved backup path=%s backup_file=%s source=%s", path, file.BackupFile, source)
-		return false
+		return enqueueRejected, nil
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		s.logf("skip enqueue because file backup state could not be read path=%s source=%s error=%v", path, source, err)
-		return false
+		return enqueueRejected, err
 	}
-	return s.queue.EnqueueWithSource(path, source)
+	if !s.queue.EnqueueWithSource(path, source) {
+		return enqueueDuplicate, nil
+	}
+	return enqueueAccepted, nil
 }
 
 func (s *Service) scheduleRetry(path string, delay time.Duration, lastError string, maxRetries int) bool {
@@ -1140,6 +1158,7 @@ func (s *Service) persistRestoredFile(file repository.FileFacts, backupPath stri
 	file.VideoSignature = ""
 	file.ComplianceStatus = repository.ComplianceUnknown
 	file.AudioPolicyVersion = 0
+	file.CompatibilityAssessment = nil
 
 	if statErr != nil {
 		return fmt.Errorf("%s: stat restored file: %w", pipeline.CauseRestoreStatError, statErr)
@@ -1164,6 +1183,10 @@ func (s *Service) persistRestoredFile(file repository.FileFacts, backupPath stri
 	default:
 		return fmt.Errorf("%s: assess restored file: %s", pipeline.CauseUnsupported, decision.Reason)
 	}
+	assessment := compatibility.BuildAssessment(probe, decision, compatibility.Policy{
+		Version: analysisConfig.Audio.Version, IncompatibleCodecs: analysisConfig.Audio.IncompatibleCodecs,
+	}, time.Now())
+	file.CompatibilityAssessment = &assessment
 	if err := backup.Remove(backupPath, s.backupRoot); err != nil {
 		return fmt.Errorf("delete restored backup: %w", err)
 	}

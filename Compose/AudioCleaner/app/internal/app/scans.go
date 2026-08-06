@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"omv-blueprint/compose/audiocleaner/internal/compatibility"
 	"omv-blueprint/compose/audiocleaner/internal/config"
 	"omv-blueprint/compose/audiocleaner/internal/pipeline"
 	"omv-blueprint/compose/audiocleaner/internal/repository"
@@ -276,6 +277,7 @@ func (s *Service) runScanWithConfig(ctx context.Context, id string, cfg pipeline
 		known[file.Path] = file
 	}
 	seen := make(map[string]struct{}, len(knownFiles))
+	presentIDs := make([]int64, 0)
 	var added int64
 	var modified int64
 
@@ -302,35 +304,66 @@ func (s *Service) runScanWithConfig(ctx context.Context, id string, cfg pipeline
 			}
 			seen[path] = struct{}{}
 			persisted, exists := known[path]
+			wasMissing := exists && persisted.MissingAt != nil
+			if wasMissing {
+				added++
+				presentIDs = append(presentIDs, persisted.ID)
+			}
 			if exists && persisted.BackupFile != "" {
 				s.updateScan(id, func(scan *ScanSession) { scan.Skipped++ })
 				return
 			}
-			if exists && persisted.Size == info.Size() && persisted.MTimeNS == info.ModTime().UnixNano() &&
-				persisted.AudioPolicyVersion == audioPolicyVersion && persisted.ComplianceStatus != repository.ComplianceUnknown {
-				s.updateScan(id, func(scan *ScanSession) { scan.Skipped++ })
-				return
+			if exists {
+				audioConfig := s.config().Audio
+				audioConfig.Version = audioPolicyVersion
+				cache := evaluateCompatibilityCandidate(
+					persisted,
+					info.Size(),
+					info.ModTime().UnixNano(),
+					compatibility.Policy{Version: audioConfig.Version, IncompatibleCodecs: audioConfig.IncompatibleCodecs},
+					time.Now(),
+				)
+				if cache.Reuse {
+					persisted.AudioPolicyVersion = audioPolicyVersion
+					persisted.CompatibilityAssessment = &cache.Assessment
+					if _, cacheErr := s.upsertCompatibilityCache(ctx, persisted); cacheErr != nil {
+						s.updateScan(id, func(scan *ScanSession) {
+							scan.Failed++
+							scan.LastError = fmt.Sprintf("%s: persist compatibility cache: %v", path, cacheErr)
+						})
+						return
+					}
+					s.updateScan(id, func(scan *ScanSession) { scan.Skipped++ })
+					return
+				}
 			}
 			if !exists {
 				added++
-			} else if persisted.Size != info.Size() || persisted.MTimeNS != info.ModTime().UnixNano() {
+			} else if !wasMissing && (persisted.Size != info.Size() || persisted.MTimeNS != info.ModTime().UnixNano()) {
 				modified++
 			}
-			if s.queue != nil && s.queue.Contains(path) {
+			disposition, enqueueErr := s.enqueueWithSourceResult(path, pipeline.JobSourceScan)
+			switch disposition {
+			case enqueueAccepted:
+				s.updateScan(id, func(scan *ScanSession) { scan.Enqueued++ })
+			case enqueueDuplicate:
 				s.updateScan(id, func(scan *ScanSession) {
 					scan.Merged++
 					scan.LastMergedPath = path
 				})
-				return
-			}
-			if s.enqueueWithSource(path, pipeline.JobSourceScan) {
-				s.updateScan(id, func(scan *ScanSession) { scan.Enqueued++ })
-				return
-			}
-			if ctx.Err() == nil {
+			case enqueueRejected:
+				if enqueueErr != nil {
+					s.updateScan(id, func(scan *ScanSession) {
+						scan.Failed++
+						scan.LastError = fmt.Sprintf("%s: %v", path, enqueueErr)
+					})
+				} else if ctx.Err() == nil {
+					s.updateScan(id, func(scan *ScanSession) { scan.Skipped++ })
+				}
+			default:
 				s.updateScan(id, func(scan *ScanSession) {
-					scan.Merged++
-					scan.LastMergedPath = path
+					scan.Failed++
+					scan.LastError = fmt.Sprintf("%s: unknown enqueue result", path)
 				})
 			}
 		},
@@ -343,18 +376,51 @@ func (s *Service) runScanWithConfig(ctx context.Context, id string, cfg pipeline
 	})
 
 	missing := int64(0)
+	missingIDs := make([]int64, 0)
 	if err == nil && ctx.Err() == nil {
 		for _, file := range knownFiles {
 			if _, ok := seen[file.Path]; ok || !pathWithinRoots(file.Path, cfg.Roots) ||
 				!isCandidatePathForMedia(file.Path, mediaConfigFromScan(cfg)) {
 				continue
 			}
-			if _, statErr := os.Stat(file.Path); errors.Is(statErr, os.ErrNotExist) {
+			if _, statErr := os.Stat(file.Path); errors.Is(statErr, os.ErrNotExist) && file.MissingAt == nil {
 				missing++
+				missingIDs = append(missingIDs, file.ID)
 			}
+		}
+		if reconcileErr := s.db.ReconcileFilePresence(ctx, missingIDs, presentIDs, time.Now()); reconcileErr != nil {
+			err = reconcileErr
 		}
 	}
 	s.finishManagedScan(id, err, added, modified, missing)
+}
+
+func evaluateCompatibilityCandidate(file repository.FileFacts, size int64, mtimeNS int64, policy compatibility.Policy, now time.Time) compatibility.CacheResult {
+	assessment := compatibility.Assessment{}
+	if file.CompatibilityAssessment != nil {
+		assessment = *file.CompatibilityAssessment
+		if file.AudioPolicyVersion != assessment.PolicyVersion {
+			return compatibility.CacheResult{Reason: "stored policy metadata is inconsistent"}
+		}
+	}
+	return compatibility.EvaluateCache(compatibility.CacheInput{
+		KnownCompatible:  file.ComplianceStatus == repository.ComplianceCompliant,
+		HasRecoveryIssue: file.BackupFile != "",
+		StoredSize:       file.Size,
+		StoredMTimeNS:    file.MTimeNS,
+		CurrentSize:      size,
+		CurrentMTimeNS:   mtimeNS,
+		Policy:           policy,
+		Assessment:       assessment,
+		Now:              now,
+	})
+}
+
+func (s *Service) upsertCompatibilityCache(ctx context.Context, file repository.FileFacts) (repository.FileFacts, error) {
+	if s.compatibilityCacheUpsert != nil {
+		return s.compatibilityCacheUpsert(ctx, file)
+	}
+	return s.db.UpsertFile(ctx, file)
 }
 
 func (s *Service) finishManagedScan(id string, scanErr error, added, modified, missing int64) {

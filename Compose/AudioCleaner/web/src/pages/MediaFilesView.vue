@@ -9,9 +9,17 @@ import { eventStreamState } from '../composables/useEventStream'
 import { t } from '../i18n'
 import { api } from '../lib/api'
 import { shouldRefreshMediaFiles } from '../lib/mediaFileRefresh'
+import {
+  assessmentActionKey,
+  assessmentReasonKey,
+  assessmentSourceKey,
+  audioPlanSummary,
+  audioTrackSummary,
+  ruleMatchSummary
+} from '../lib/compatibility'
 import { semanticBadgeClass } from '../lib/semantic'
 import { formatServiceTimestamp } from '../lib/time'
-import type { FileRecord } from '../lib/types'
+import type { CompatibilityAssessment, FileRecord } from '../lib/types'
 
 type ComplianceFilter = 'all' | 'compliant' | 'noncompliant' | 'unknown'
 type BackupFilter = 'all' | 'pending' | 'none'
@@ -39,6 +47,11 @@ let loadScheduled = false
 const complianceFilters: ComplianceFilter[] = ['all', 'compliant', 'noncompliant', 'unknown']
 const backupFilters: BackupFilter[] = ['all', 'pending', 'none']
 const busy = computed(() => loading.value || operationPending.value)
+
+function assessmentReason(assessment: CompatibilityAssessment): string {
+  const key = assessmentReasonKey(assessment)
+  return key ? t(key) : assessment.reason || t('filesEmptyValue')
+}
 const filteredFiles = computed(() => {
   const query = keyword.value.trim().toLocaleLowerCase()
   return allFiles.value.filter((file) => {
@@ -505,6 +518,64 @@ onBeforeUnmount(() => {
                       <span class="history-detail-value">{{ file.video_signature || t('filesEmptyValue') }}</span>
                     </div>
                   </div>
+                </div>
+                <section
+                  v-if="file.compatibility_assessment"
+                  class="compatibility-assessment"
+                  data-testid="compatibility-assessment"
+                >
+                  <header class="compatibility-assessment-head">
+                    <h3>{{ t('filesAssessmentTitle') }}</h3>
+                    <span :class="complianceTone(file.compliance_status)">
+                      {{ t(assessmentActionKey(file.compatibility_assessment)) }}
+                    </span>
+                  </header>
+                  <dl class="compatibility-assessment-facts">
+                    <div>
+                      <dt>{{ t('filesAssessmentSource') }}</dt>
+                      <dd>{{ t(assessmentSourceKey(file.compatibility_assessment)) }}</dd>
+                    </div>
+                    <div>
+                      <dt>{{ t('filesAssessmentPolicy') }}</dt>
+                      <dd>v{{ file.compatibility_assessment.policy_version }}</dd>
+                    </div>
+                    <div class="compatibility-assessment-reason">
+                      <dt>{{ t('filesAssessmentReason') }}</dt>
+                      <dd>{{ assessmentReason(file.compatibility_assessment) }}</dd>
+                    </div>
+                  </dl>
+                  <div class="compatibility-assessment-columns">
+                    <div>
+                      <h4>{{ t('filesAssessmentTracks') }}</h4>
+                      <ul v-if="file.compatibility_assessment.audio_tracks.length">
+                        <li v-for="track in file.compatibility_assessment.audio_tracks" :key="track.stream_index">
+                          {{ audioTrackSummary(track) }}
+                        </li>
+                      </ul>
+                      <p v-else class="muted">{{ t('filesAssessmentNoTracks') }}</p>
+                    </div>
+                    <div>
+                      <h4>{{ t('filesAssessmentRules') }}</h4>
+                      <ul v-if="file.compatibility_assessment.matched_rules.length">
+                        <li v-for="rule in file.compatibility_assessment.matched_rules" :key="rule.codec">
+                          {{ ruleMatchSummary(rule) }}
+                        </li>
+                      </ul>
+                      <p v-else class="muted">{{ t('filesAssessmentNoRules') }}</p>
+                    </div>
+                    <div>
+                      <h4>{{ t('filesAssessmentPlan') }}</h4>
+                      <ul v-if="file.compatibility_assessment.audio_plans.length">
+                        <li v-for="plan in file.compatibility_assessment.audio_plans" :key="plan.stream_index">
+                          {{ audioPlanSummary(plan) }}
+                        </li>
+                      </ul>
+                      <p v-else class="muted">{{ t('filesAssessmentNoPlan') }}</p>
+                    </div>
+                  </div>
+                </section>
+                <div v-else class="compatibility-assessment-missing muted" data-testid="compatibility-assessment-missing">
+                  {{ t('filesAssessmentMissing') }}
                 </div>
               </td>
             </tr>

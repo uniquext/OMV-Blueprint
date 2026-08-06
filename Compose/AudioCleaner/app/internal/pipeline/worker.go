@@ -11,10 +11,13 @@ import (
 	"time"
 
 	"omv-blueprint/compose/audiocleaner/internal/backup"
+	"omv-blueprint/compose/audiocleaner/internal/compatibility"
 	"omv-blueprint/compose/audiocleaner/internal/config"
 	"omv-blueprint/compose/audiocleaner/internal/media"
 	"omv-blueprint/compose/audiocleaner/internal/repository"
 )
+
+var errSourceChangedDuringProbe = errors.New("source file changed during compatibility probe")
 
 type FailureCause string
 
@@ -187,11 +190,6 @@ func NewWorker(deps WorkerDeps) *Worker {
 	}
 }
 
-type preflightResult struct {
-	stat  StableStat
-	probe media.ProbeData
-}
-
 func (w *Worker) ProcessAttempt(ctx context.Context, task QueueJob) (AttemptResult, error) {
 	if err := w.validateDeps(); err != nil {
 		return AttemptResult{}, err
@@ -216,23 +214,13 @@ func (w *Worker) ProcessAttempt(ctx context.Context, task QueueJob) (AttemptResu
 		return AttemptResult{}, nil
 	}
 
-	var preflight *preflightResult
 	if task.JobID == 0 && !fileMissing && file.ComplianceStatus == repository.ComplianceCompliant {
-		gateConfig := w.currentConfig()
-		if file.AudioPolicyVersion == gateConfig.Audio.Version {
-			preflightCtx, cancelPreflight := context.WithTimeout(ctx, gateConfig.Pipeline.JobTimeout())
-			stable, stableErr := w.stable.Wait(preflightCtx, file.Path, gateConfig.Pipeline.StatQuietDuration())
-			if stableErr == nil {
-				probe, probeErr := w.prober.Probe(preflightCtx, file.Path)
-				if probeErr == nil {
-					if file.AudioSignature == probe.AudioSignature() && file.VideoSignature == probe.VideoSignature() {
-						cancelPreflight()
-						return AttemptResult{}, nil
-					}
-					preflight = &preflightResult{stat: stable, probe: probe}
-				}
-			}
-			cancelPreflight()
+		cacheResult, reused, cacheErr := w.tryReuseCompatibilityCache(ctx, file, task.AttemptNumber)
+		if cacheErr != nil {
+			return cacheResult, cacheErr
+		}
+		if reused {
+			return cacheResult, nil
 		}
 	}
 
@@ -260,7 +248,7 @@ func (w *Worker) ProcessAttempt(ctx context.Context, task QueueJob) (AttemptResu
 
 	jobCtx, cancel := context.WithTimeout(ctx, w.currentConfig().Pipeline.JobTimeout())
 	defer cancel()
-	if err := w.processFile(jobCtx, ctx, &result, task.AttemptNumber, preflight); err != nil {
+	if err := w.processFile(jobCtx, ctx, &result, task.AttemptNumber); err != nil {
 		cause := causeForFailure(err)
 		var postReplaceErr postReplacePersistenceError
 		result.Retryable = !errors.As(err, &postReplaceErr)
@@ -272,24 +260,126 @@ func (w *Worker) ProcessAttempt(ctx context.Context, task QueueJob) (AttemptResu
 	return result, nil
 }
 
-func (w *Worker) processFile(jobCtx context.Context, persistCtx context.Context, result *AttemptResult, attempt int, preflight *preflightResult) error {
+func (w *Worker) tryReuseCompatibilityCache(ctx context.Context, file repository.FileFacts, attempt int) (AttemptResult, bool, error) {
+	currentInfo, err := w.stat.Stat(file.Path)
+	if err != nil {
+		return AttemptResult{}, false, nil
+	}
+	gateConfig := w.currentConfig()
+	assessment := compatibility.Assessment{}
+	if file.CompatibilityAssessment != nil {
+		assessment = *file.CompatibilityAssessment
+	}
+	cache := compatibility.EvaluateCache(compatibility.CacheInput{
+		KnownCompatible:  true,
+		HasRecoveryIssue: file.BackupFile != "",
+		StoredSize:       file.Size, StoredMTimeNS: file.MTimeNS,
+		CurrentSize: currentInfo.Size(), CurrentMTimeNS: currentInfo.ModTime().UnixNano(),
+		Policy:     compatibility.Policy{Version: gateConfig.Audio.Version, IncompatibleCodecs: gateConfig.Audio.IncompatibleCodecs},
+		Assessment: assessment, Now: time.Now(),
+	})
+	if !cache.Reuse {
+		return AttemptResult{}, false, nil
+	}
+	file.AudioPolicyVersion = gateConfig.Audio.Version
+	file.CompatibilityAssessment = &cache.Assessment
+	persisted, persistErr := w.repository.UpsertFile(ctx, file)
+	if persistErr != nil {
+		return AttemptResult{FileID: file.ID, FinalFile: file}, false, persistErr
+	}
+	w.publish(ctx, WorkerEvent{FileID: persisted.ID, Path: persisted.Path, Kind: "diagnostic", Code: "compatibility_cache_reused", Attempt: attempt, Message: cache.Reason})
+	return AttemptResult{FileID: persisted.ID, FinalFile: persisted}, true, nil
+}
+
+type stableSourceAssessment struct {
+	stat     StableStat
+	probe    media.ProbeData
+	decision media.Decision
+	config   config.Config
+}
+
+func (w *Worker) assessStableSource(jobCtx context.Context, result *AttemptResult) (stableSourceAssessment, error) {
+	file := result.FinalFile
+	analysisConfig := w.currentConfig()
+	originalStat, err := w.stable.Wait(jobCtx, file.Path, analysisConfig.Pipeline.StatQuietDuration())
+	if err != nil {
+		return stableSourceAssessment{}, failure(err, causeForContextOr(CauseFailed, err))
+	}
+	file.Size = originalStat.Size
+	file.MTimeNS = originalStat.MTimeNS
+	clearFileAssessment(&file)
+	result.FinalFile = file
+
+	originalProbe, err := w.prober.Probe(jobCtx, file.Path)
+	if err != nil {
+		return stableSourceAssessment{}, failure(fmt.Errorf("probe source: %w", err), causeForContextOr(CauseFFProbeError, err))
+	}
+	postProbeInfo, err := w.stat.Stat(file.Path)
+	if err != nil {
+		return stableSourceAssessment{}, failure(fmt.Errorf("stat source after probe: %w", err), CauseFailed)
+	}
+	if postProbeInfo.Size() != originalStat.Size || postProbeInfo.ModTime().UnixNano() != originalStat.MTimeNS {
+		return stableSourceAssessment{}, failure(fmt.Errorf("%w: expected size=%d mtime_ns=%d, got size=%d mtime_ns=%d", errSourceChangedDuringProbe, originalStat.Size, originalStat.MTimeNS, postProbeInfo.Size(), postProbeInfo.ModTime().UnixNano()), CauseFailed)
+	}
+
+	decisionConfig := w.currentConfig()
+	decision := media.Decide(file.Path, originalProbe, media.DecisionConfig{
+		Extensions: decisionConfig.Media.Extensions, IncompatibleCodecs: decisionConfig.Audio.IncompatibleCodecs,
+	})
+	assessment := compatibility.BuildAssessment(originalProbe, decision, compatibility.Policy{
+		Version: decisionConfig.Audio.Version, IncompatibleCodecs: decisionConfig.Audio.IncompatibleCodecs,
+	}, time.Now())
+	file.AudioSignature = originalProbe.AudioSignature()
+	file.VideoSignature = originalProbe.VideoSignature()
+	file.CompatibilityAssessment = &assessment
+	result.FinalFile = file
+	return stableSourceAssessment{stat: originalStat, probe: originalProbe, decision: decision, config: decisionConfig}, nil
+}
+
+func (w *Worker) processFile(jobCtx context.Context, persistCtx context.Context, result *AttemptResult, attempt int) error {
 	file := result.FinalFile
 	jobID := result.JobID
 	w.publishPhase(persistCtx, file, RuntimeChecking, attempt)
 
-	var originalStat StableStat
-	if preflight != nil {
-		originalStat = preflight.stat
-	} else {
-		analysisConfig := w.currentConfig()
-		stable, err := w.stable.Wait(jobCtx, file.Path, analysisConfig.Pipeline.StatQuietDuration())
-		if err != nil {
-			return failure(err, causeForContextOr(CauseFailed, err))
-		}
-		originalStat = stable
+	source, err := w.assessStableSource(jobCtx, result)
+	if err != nil {
+		return err
 	}
-	file.Size = originalStat.Size
-	file.MTimeNS = originalStat.MTimeNS
+	file = result.FinalFile
+	originalStat := source.stat
+	originalProbe := source.probe
+	decision := source.decision
+	decisionConfig := source.config
+
+	switch decision.Action {
+	case media.ActionUnsupported:
+		file.ComplianceStatus = repository.ComplianceUnknown
+		file.AudioPolicyVersion = 0
+		result.FinalFile = file
+		finalError := formatFinalError(CauseUnsupported, errors.New(decision.Reason))
+		if err := w.completeProcessJob(persistCtx, result, repository.JobResultFailed, finalError); err != nil {
+			return err
+		}
+		w.publish(persistCtx, WorkerEvent{FileID: file.ID, Path: file.Path, Kind: "status_change", Code: "failed", Status: "failed", Outcome: "unsupported", Attempt: attempt, Error: decision.Reason})
+		return nil
+	case media.ActionAlreadyCompatible:
+		file.ComplianceStatus = repository.ComplianceCompliant
+		file.AudioPolicyVersion = decisionConfig.Audio.Version
+		result.FinalFile = file
+		if err := w.completeProcessJob(persistCtx, result, repository.JobResultCompatible, ""); err != nil {
+			return err
+		}
+		w.publish(persistCtx, WorkerEvent{FileID: file.ID, Path: file.Path, Kind: "status_change", Code: "compatible", Status: "compatible", Attempt: attempt})
+		return nil
+	}
+
+	file.ComplianceStatus = repository.ComplianceNoncompliant
+	file.AudioPolicyVersion = decisionConfig.Audio.Version
+	persisted, err := w.repository.UpsertFile(persistCtx, file)
+	if err != nil {
+		return err
+	}
+	file = persisted
 	result.FinalFile = file
 
 	outputPath, err := w.temp.Allocate(file.Path)
@@ -346,57 +436,19 @@ func (w *Worker) processFile(jobCtx context.Context, persistCtx context.Context,
 	if backupStat.Size() != originalStat.Size {
 		return failure(fmt.Errorf("backup size mismatch: got %d want %d", backupStat.Size(), originalStat.Size), CauseVerificationFailed)
 	}
-	originalProbe, err := w.prober.Probe(jobCtx, backupPath)
+	backupProbe, err := w.prober.Probe(jobCtx, backupPath)
 	if err != nil {
 		return failure(fmt.Errorf("probe backup: %w", err), causeForContextOr(CauseFFProbeError, err))
 	}
-	if preflight != nil && (preflight.probe.AudioSignature() != originalProbe.AudioSignature() ||
-		preflight.probe.VideoSignature() != originalProbe.VideoSignature()) {
-		return failure(errors.New("backup signature differs from preflight source"), CauseVerificationFailed)
+	if backupProbe.AudioSignature() != originalProbe.AudioSignature() || backupProbe.VideoSignature() != originalProbe.VideoSignature() {
+		return failure(errors.New("backup signature differs from probed source"), CauseVerificationFailed)
 	}
-	file.AudioSignature = originalProbe.AudioSignature()
-	file.VideoSignature = originalProbe.VideoSignature()
-	result.FinalFile = file
 	if err := w.repository.MarkReplacementBackupReady(
 		persistCtx, jobID, backupStat.Size(), backupStat.ModTime().UnixNano(),
-		originalProbe.AudioSignature(), originalProbe.VideoSignature(),
+		backupProbe.AudioSignature(), backupProbe.VideoSignature(),
 	); err != nil {
 		return err
 	}
-
-	decisionConfig := w.currentConfig()
-	decision := media.Decide(file.Path, originalProbe, media.DecisionConfig{
-		Extensions: decisionConfig.Media.Extensions, IncompatibleCodecs: decisionConfig.Audio.IncompatibleCodecs,
-	})
-	switch decision.Action {
-	case media.ActionUnsupported:
-		clearFileAssessment(&file)
-		result.FinalFile = file
-		finalError := formatFinalError(CauseUnsupported, errors.New(decision.Reason))
-		if err := w.completeProcessJob(persistCtx, result, repository.JobResultFailed, finalError); err != nil {
-			return err
-		}
-		w.publish(persistCtx, WorkerEvent{FileID: file.ID, Path: file.Path, Kind: "status_change", Code: "failed", Status: "failed", Outcome: "unsupported", Attempt: attempt, Error: decision.Reason})
-		return nil
-	case media.ActionAlreadyCompatible:
-		file.ComplianceStatus = repository.ComplianceCompliant
-		file.AudioPolicyVersion = decisionConfig.Audio.Version
-		result.FinalFile = file
-		if err := w.completeProcessJob(persistCtx, result, repository.JobResultCompatible, ""); err != nil {
-			return err
-		}
-		w.publish(persistCtx, WorkerEvent{FileID: file.ID, Path: file.Path, Kind: "status_change", Code: "compatible", Status: "compatible", Attempt: attempt})
-		return nil
-	}
-
-	file.ComplianceStatus = repository.ComplianceNoncompliant
-	file.AudioPolicyVersion = decisionConfig.Audio.Version
-	persisted, err := w.repository.UpsertFile(persistCtx, file)
-	if err != nil {
-		return err
-	}
-	file = persisted
-	result.FinalFile = file
 
 	w.publishPhase(persistCtx, file, RuntimeTranscoding, attempt)
 	primaryArgs := media.BuildFFmpegArgs(backupPath, outputPath, originalProbe, decision, true)
@@ -458,6 +510,10 @@ func (w *Worker) processFile(jobCtx context.Context, persistCtx context.Context,
 	file.VideoSignature = finalProbe.VideoSignature()
 	file.ComplianceStatus = repository.ComplianceCompliant
 	file.AudioPolicyVersion = finalValidationConfig.Audio.Version
+	finalAssessment := compatibility.BuildAssessment(finalProbe, finalDecision, compatibility.Policy{
+		Version: finalValidationConfig.Audio.Version, IncompatibleCodecs: finalValidationConfig.Audio.IncompatibleCodecs,
+	}, time.Now())
+	file.CompatibilityAssessment = &finalAssessment
 	result.FinalFile = file
 	if err := w.completeProcessJob(persistCtx, result, repository.JobResultSucceeded, ""); err != nil {
 		return w.handleInstalledFailure(jobCtx, persistCtx, result, attempt, originalStat, originalProbe, decisionConfig.Audio.Version, backupPath, err, &preserveBackup)
@@ -607,6 +663,7 @@ func clearFileAssessment(file *repository.FileFacts) {
 	file.VideoSignature = ""
 	file.ComplianceStatus = repository.ComplianceUnknown
 	file.AudioPolicyVersion = 0
+	file.CompatibilityAssessment = nil
 }
 
 func (w *Worker) publishPhase(ctx context.Context, file repository.FileFacts, phase RuntimePhase, attempt int) {

@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "build": "vue-tsc --noEmit && vite build"
+    "build": "vue-tsc --noEmit && vite build",
+    "test:scan-discovery": "node --test test/scan-discovery-contract.test.mjs",
+    "test:compatibility-cache": "vitest run src/lib/compatibility.test.ts && node --test test/compatibility-cache-contract.test.mjs"
   },
   "dependencies": {
     "@lucide/vue": "^1.24.0",
@@ -13,8 +15,10 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.0",
+    "@vitest/coverage-v8": "^2.1.9",
     "typescript": "^5.6.0",
     "vite": "^6.0.0",
+    "vitest": "^2.1.9",
     "vue-tsc": "^3.3.8"
   }
 }

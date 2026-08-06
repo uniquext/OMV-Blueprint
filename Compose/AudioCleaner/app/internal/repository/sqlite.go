@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+	"omv-blueprint/compose/audiocleaner/internal/compatibility"
 )
 
 type Repository struct {
@@ -55,6 +57,10 @@ func upsertFile(ctx context.Context, queryer interface {
 	if err := validateFileCompliance(file); err != nil {
 		return FileFacts{}, err
 	}
+	assessmentJSON, err := marshalCompatibilityAssessment(file.CompatibilityAssessment)
+	if err != nil {
+		return FileFacts{}, err
+	}
 	createdAt := file.CreatedAt
 	if createdAt.IsZero() {
 		createdAt = now
@@ -71,24 +77,28 @@ INSERT INTO files (
   audio_signature,
   video_signature,
   compliance_status,
-  audio_policy_version,
-  backup_file,
-  created_at,
-  updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(file_path) DO UPDATE SET
+	  audio_policy_version,
+	  backup_file,
+	  compatibility_assessment,
+	  created_at,
+	  updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(file_path) DO UPDATE SET
   size = excluded.size,
   mtime_ns = excluded.mtime_ns,
   audio_signature = excluded.audio_signature,
   video_signature = excluded.video_signature,
   compliance_status = excluded.compliance_status,
-  audio_policy_version = excluded.audio_policy_version,
-  backup_file = excluded.backup_file,
-  updated_at = ?
+	  audio_policy_version = excluded.audio_policy_version,
+	  backup_file = excluded.backup_file,
+	  compatibility_assessment = excluded.compatibility_assessment,
+	  missing_at = NULL,
+	  updated_at = ?
 RETURNING `+fileSelectColumns, file.Path,
 		file.Size, file.MTimeNS, nullableString(file.AudioSignature),
 		nullableString(file.VideoSignature), nullableString(string(file.ComplianceStatus)),
 		nullableInt64(int64(file.AudioPolicyVersion)), nullableString(file.BackupFile),
+		assessmentJSON,
 		formatTime(createdAt), formatTime(updatedAt),
 		formatTime(now))
 
@@ -159,6 +169,31 @@ func (r *Repository) FilesWithBackup(ctx context.Context) ([]FileFacts, error) {
 	}
 	defer rows.Close()
 	return scanFileFactsRows(rows)
+}
+
+func (r *Repository) ReconcileFilePresence(ctx context.Context, missingIDs, presentIDs []int64, observedAt time.Time) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin file presence reconciliation: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, id := range missingIDs {
+		if _, err := tx.ExecContext(ctx, `UPDATE files SET missing_at = ?, updated_at = ? WHERE id = ? AND missing_at IS NULL`,
+			formatTime(observedAt), formatTime(observedAt), id); err != nil {
+			return fmt.Errorf("mark file %d missing: %w", id, err)
+		}
+	}
+	for _, id := range presentIDs {
+		if _, err := tx.ExecContext(ctx, `UPDATE files SET missing_at = NULL, updated_at = ? WHERE id = ? AND missing_at IS NOT NULL`,
+			formatTime(observedAt), id); err != nil {
+			return fmt.Errorf("mark file %d present: %w", id, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit file presence reconciliation: %w", err)
+	}
+	return nil
 }
 
 func (r *Repository) SetFileBackup(ctx context.Context, fileID int64, path string) error {
@@ -403,6 +438,7 @@ WHERE jobs.id = ? AND jobs.result = ?`, id, string(JobResultProcessing)))
 	file.VideoSignature = ""
 	file.ComplianceStatus = ComplianceUnknown
 	file.AudioPolicyVersion = 0
+	file.CompatibilityAssessment = nil
 	now := time.Now()
 	persisted, err := upsertFile(ctx, tx, file, now)
 	if err != nil {
@@ -552,7 +588,7 @@ func (r *Repository) init(ctx context.Context) error {
 		if err := r.validateSchema(ctx); err != nil {
 			return err
 		}
-		if _, err := r.db.ExecContext(ctx, `PRAGMA user_version = 5`); err != nil {
+		if _, err := r.db.ExecContext(ctx, `PRAGMA user_version = 7`); err != nil {
 			return fmt.Errorf("set sqlite schema version: %w", err)
 		}
 		return r.normalizeStoredTimes(ctx)
@@ -575,6 +611,12 @@ func (r *Repository) init(ctx context.Context) error {
 		if err := r.migrateV4ToV5(ctx); err != nil {
 			return err
 		}
+		if err := r.migrateV5ToV6(ctx); err != nil {
+			return err
+		}
+		if err := r.migrateV6ToV7(ctx); err != nil {
+			return err
+		}
 	case 2:
 		if err := r.validateSchemaColumns(ctx, schemaV2Columns); err != nil {
 			return err
@@ -588,6 +630,12 @@ func (r *Repository) init(ctx context.Context) error {
 		if err := r.migrateV4ToV5(ctx); err != nil {
 			return err
 		}
+		if err := r.migrateV5ToV6(ctx); err != nil {
+			return err
+		}
+		if err := r.migrateV6ToV7(ctx); err != nil {
+			return err
+		}
 	case 3:
 		if err := r.validateSchemaColumns(ctx, schemaV3Columns); err != nil {
 			return err
@@ -598,6 +646,12 @@ func (r *Repository) init(ctx context.Context) error {
 		if err := r.migrateV4ToV5(ctx); err != nil {
 			return err
 		}
+		if err := r.migrateV5ToV6(ctx); err != nil {
+			return err
+		}
+		if err := r.migrateV6ToV7(ctx); err != nil {
+			return err
+		}
 	case 4:
 		if err := r.validateSchemaColumns(ctx, schemaV4Columns); err != nil {
 			return err
@@ -605,7 +659,30 @@ func (r *Repository) init(ctx context.Context) error {
 		if err := r.migrateV4ToV5(ctx); err != nil {
 			return err
 		}
+		if err := r.migrateV5ToV6(ctx); err != nil {
+			return err
+		}
+		if err := r.migrateV6ToV7(ctx); err != nil {
+			return err
+		}
 	case 5:
+		if err := r.validateSchemaColumns(ctx, schemaV5Columns); err != nil {
+			return err
+		}
+		if err := r.migrateV5ToV6(ctx); err != nil {
+			return err
+		}
+		if err := r.migrateV6ToV7(ctx); err != nil {
+			return err
+		}
+	case 6:
+		if err := r.validateSchemaColumns(ctx, schemaV6Columns); err != nil {
+			return err
+		}
+		if err := r.migrateV6ToV7(ctx); err != nil {
+			return err
+		}
+	case 7:
 		// Already current.
 	default:
 		if err := r.validateSchema(ctx); err != nil {
@@ -635,6 +712,7 @@ func (r *Repository) normalizeStoredTimes(ctx context.Context) error {
 	columns := []storedTimeColumn{
 		{table: "files", idColumn: "id", column: "created_at"},
 		{table: "files", idColumn: "id", column: "updated_at"},
+		{table: "files", idColumn: "id", column: "missing_at"},
 		{table: "jobs", idColumn: "id", column: "started_at"},
 		{table: "jobs", idColumn: "id", column: "finished_at"},
 		{table: "replacement_journal", idColumn: "job_id", column: "created_at"},
@@ -699,7 +777,7 @@ func normalizeStoredTimeColumn(ctx context.Context, tx *sql.Tx, target storedTim
 }
 
 func (r *Repository) validateSchema(ctx context.Context) error {
-	return r.validateSchemaColumns(ctx, schemaV5Columns)
+	return r.validateSchemaColumns(ctx, schemaV7Columns)
 }
 
 func (r *Repository) validateSchemaColumns(ctx context.Context, expected map[string][]string) error {
@@ -959,6 +1037,55 @@ func (r *Repository) migrateV4ToV5(ctx context.Context) error {
 	return nil
 }
 
+func (r *Repository) migrateV5ToV6(ctx context.Context) error {
+	return runSQLiteMigration(ctx, sqlMigrationBeginner{db: r.db}, "v5 to v6", []string{
+		`ALTER TABLE files ADD COLUMN missing_at TEXT NULL`,
+		`PRAGMA user_version = 6`,
+	})
+}
+
+func (r *Repository) migrateV6ToV7(ctx context.Context) error {
+	return runSQLiteMigration(ctx, sqlMigrationBeginner{db: r.db}, "v6 to v7", []string{
+		`ALTER TABLE files ADD COLUMN compatibility_assessment TEXT NULL`,
+		`PRAGMA user_version = 7`,
+	})
+}
+
+type sqliteMigrationBeginner interface {
+	BeginTx(context.Context, *sql.TxOptions) (sqliteMigrationTx, error)
+}
+
+type sqliteMigrationTx interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	Commit() error
+	Rollback() error
+}
+
+type sqlMigrationBeginner struct {
+	db *sql.DB
+}
+
+func (b sqlMigrationBeginner) BeginTx(ctx context.Context, options *sql.TxOptions) (sqliteMigrationTx, error) {
+	return b.db.BeginTx(ctx, options)
+}
+
+func runSQLiteMigration(ctx context.Context, beginner sqliteMigrationBeginner, name string, statements []string) error {
+	tx, err := beginner.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin sqlite %s migration: %w", name, err)
+	}
+	defer tx.Rollback()
+	for _, stmt := range statements {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("migrate sqlite %s: %w", name, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit sqlite %s: %w", name, err)
+	}
+	return nil
+}
+
 func tableExists(ctx context.Context, db *sql.DB, table string) (bool, error) {
 	var count int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
@@ -1021,6 +1148,33 @@ var schemaV5Columns = map[string][]string{
 	},
 }
 
+var schemaV6Columns = map[string][]string{
+	"files": {
+		"id", "file_path", "size", "mtime_ns", "audio_signature", "video_signature",
+		"created_at", "updated_at", "compliance_status", "audio_policy_version", "backup_file", "missing_at",
+	},
+	"jobs": {"id", "file_id", "trigger_source", "result", "final_error", "started_at", "finished_at", "ignored"},
+	"replacement_journal": {
+		"job_id", "file_id", "original_path", "temporary_backup_path", "output_path", "phase",
+		"original_size", "original_mtime_ns", "original_audio_signature", "original_video_signature",
+		"last_error", "created_at", "updated_at",
+	},
+}
+
+var schemaV7Columns = map[string][]string{
+	"files": {
+		"id", "file_path", "size", "mtime_ns", "audio_signature", "video_signature",
+		"created_at", "updated_at", "compliance_status", "audio_policy_version", "backup_file", "missing_at",
+		"compatibility_assessment",
+	},
+	"jobs": {"id", "file_id", "trigger_source", "result", "final_error", "started_at", "finished_at", "ignored"},
+	"replacement_journal": {
+		"job_id", "file_id", "original_path", "temporary_backup_path", "output_path", "phase",
+		"original_size", "original_mtime_ns", "original_audio_signature", "original_video_signature",
+		"last_error", "created_at", "updated_at",
+	},
+}
+
 func ensureParentDir(path string) error {
 	if path == "" {
 		return errors.New("sqlite repository path is empty")
@@ -1074,6 +1228,8 @@ func scanFileFacts(row rowScanner) (FileFacts, error) {
 	var complianceStatus sql.NullString
 	var audioPolicyVersion sql.NullInt64
 	var backupFile sql.NullString
+	var missingAt sql.NullString
+	var compatibilityAssessment sql.NullString
 	var createdAt string
 	var updatedAt string
 
@@ -1087,6 +1243,8 @@ func scanFileFacts(row rowScanner) (FileFacts, error) {
 		&complianceStatus,
 		&audioPolicyVersion,
 		&backupFile,
+		&missingAt,
+		&compatibilityAssessment,
 		&createdAt,
 		&updatedAt,
 	)
@@ -1110,7 +1268,31 @@ func scanFileFacts(row rowScanner) (FileFacts, error) {
 	file.ComplianceStatus = ComplianceStatus(nullableStringValue(complianceStatus))
 	file.AudioPolicyVersion = int(nullableInt64Value(audioPolicyVersion))
 	file.BackupFile = nullableStringValue(backupFile)
+	if missingAt.Valid {
+		value, err := parseTime(missingAt.String)
+		if err != nil {
+			return FileFacts{}, fmt.Errorf("parse file missing_at: %w", err)
+		}
+		file.MissingAt = &value
+	}
+	if compatibilityAssessment.Valid {
+		file.CompatibilityAssessment = &compatibility.Assessment{}
+		if err := json.Unmarshal([]byte(compatibilityAssessment.String), file.CompatibilityAssessment); err != nil {
+			return FileFacts{}, fmt.Errorf("parse file compatibility_assessment: %w", err)
+		}
+	}
 	return file, nil
+}
+
+func marshalCompatibilityAssessment(assessment *compatibility.Assessment) (any, error) {
+	if assessment == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(assessment)
+	if err != nil {
+		return nil, fmt.Errorf("marshal file compatibility_assessment: %w", err)
+	}
+	return string(data), nil
 }
 
 func scanFileFactsRows(rows *sql.Rows) ([]FileFacts, error) {
@@ -1339,8 +1521,10 @@ const fileSelectColumns = `
   video_signature,
   compliance_status,
   audio_policy_version,
-  backup_file,
-  created_at,
+	  backup_file,
+	  missing_at,
+	  compatibility_assessment,
+	  created_at,
   updated_at`
 
 const qualifiedFileSelectColumns = `
@@ -1352,8 +1536,10 @@ const qualifiedFileSelectColumns = `
   files.video_signature,
   files.compliance_status,
   files.audio_policy_version,
-  files.backup_file,
-  files.created_at,
+	  files.backup_file,
+	  files.missing_at,
+	  files.compatibility_assessment,
+	  files.created_at,
   files.updated_at`
 
 const historySelectColumns = `
@@ -1414,7 +1600,9 @@ var schemaStatements = []string{
       AND audio_policy_version >= 1
     )
 	  ),
-	  backup_file TEXT NULL
+	  backup_file TEXT NULL,
+	  missing_at TEXT NULL,
+	  compatibility_assessment TEXT NULL
 	);`,
 	`CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY,
