@@ -143,11 +143,9 @@ export async function loadAllJobPages<T>(
   const items: T[] = []
   let total = 0
   let page = 1
-  let lastResult: PageResult<T> | null = null
 
   while (true) {
     const result = await loadPage(page, pageSize)
-    lastResult = result
     total = result.total
     items.push(...result.items)
 
@@ -161,6 +159,6 @@ export async function loadAllJobPages<T>(
     items,
     page: 1,
     page_size: pageSize,
-    total: lastResult ? total : 0
+    total
   }
 }

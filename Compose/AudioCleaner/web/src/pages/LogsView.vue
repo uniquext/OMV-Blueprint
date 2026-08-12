@@ -29,7 +29,7 @@ function normalizeLevel(level: string): RuntimeLogEntry['normalizedLevel'] {
 
 function parseRuntimeLogLine(line: string): RuntimeLogEntry {
   const pythonLogMatch = line.match(
-    /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2},\d{3})\s+-\s+.+?\s+-\s+(DEBUG|INFO|WARN|WARNING|ERROR|CRITICAL)\s+-\s+(.*)$/
+    /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2},\d{3})\s+-\s+.+?\s+-\s+([A-Z]+)\s+-\s+(.*)$/
   )
   if (pythonLogMatch) {
     const level = pythonLogMatch[2]

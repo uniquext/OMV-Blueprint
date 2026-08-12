@@ -19,9 +19,8 @@ const marqueeStyle = computed<Record<string, string>>(() => ({
 }))
 
 function measure(): void {
-  const viewportElement = viewport.value
-  const contentElement = content.value
-  if (!viewportElement || !contentElement) return
+  const viewportElement = viewport.value!
+  const contentElement = content.value!
   overflowDistance.value = Math.max(0, contentElement.scrollWidth - viewportElement.clientWidth)
   if (!overflowDistance.value) active.value = false
 }

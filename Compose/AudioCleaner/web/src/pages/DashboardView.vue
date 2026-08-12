@@ -4,6 +4,8 @@ import { CircleCheck, CircleStop, History, Radar, RadioTower, RefreshCw, ScanSea
 import { eventStreamState } from '../composables/useEventStream'
 import { serviceStatusLabel, t } from '../i18n'
 import { api } from '../lib/api'
+import { taskProgressDetails } from '../lib/healthObservability'
+import { recoveryStatusKey, scanIsActive, scanProgressPercent, scanSourceKey, scanStatusKey, watcherStatusKey } from '../lib/scanDiscovery'
 import type {
   AudioCleanerConfig,
   DiscoveryStatus,
@@ -96,13 +98,13 @@ const successRate = computed(() => {
   if (total === 0) return t('dashboardEmptyValue')
   return `${Math.round(rate.rate * 100)}% (${rate.succeeded}/${total})`
 })
-const scanActive = computed(() => ['running', 'reconciling', 'cancelling'].includes(scan.value?.status ?? ''))
+const scanActive = computed(() => scanIsActive(scan.value?.status))
 const scanProgressLabel = computed(() => {
   if (!scan.value || scan.value.status === 'idle') return t('dashboardEmptyValue')
   if (scan.value.estimating && scan.value.progress_percent === undefined) return t('dashboardScanEstimating')
   return `${Math.round(scan.value.progress_percent ?? 0)}%`
 })
-const scanProgressWidth = computed(() => `${Math.min(100, Math.max(0, scan.value?.progress_percent ?? 0))}%`)
+const scanProgressWidth = computed(() => `${scanProgressPercent(scan.value)}%`)
 const scanRateLabel = computed(() => {
   if (scan.value?.status === 'cancelling') return t('dashboardScanStopping')
   if (!scan.value || scan.value.status === 'idle') return t('dashboardEmptyValue')
@@ -158,38 +160,19 @@ function formatClock(value: string | undefined, includeSeconds = false): string 
 }
 
 function scanStatusLabel(value: string | undefined): string {
-  const keys: Record<string, string> = {
-    idle: 'dashboardScanIdle',
-    running: 'dashboardScanRunning',
-    reconciling: 'dashboardScanReconciling',
-    cancelling: 'dashboardScanCancelling',
-    completed: 'dashboardScanCompleted',
-    cancelled: 'dashboardScanCancelled',
-    failed: 'dashboardScanFailed'
-  }
-  return t(keys[value ?? 'idle'] ?? 'dashboardScanIdle')
+  return t(scanStatusKey(value))
 }
 
 function scanSourceLabel(value: string | undefined): string {
-  const keys: Record<string, string> = {
-    manual: 'dashboardScanSourceManual',
-    startup: 'dashboardScanSourceStartup',
-    reconciliation: 'dashboardScanSourceReconciliation',
-    recovery: 'dashboardScanSourceRecovery'
-  }
-  return value ? t(keys[value] ?? 'dashboardScanSourceManual') : t('dashboardScanNotStarted')
+  return t(scanSourceKey(value))
 }
 
 function watcherStatusLabel(): string {
-  if (!discovery.value?.watcher_enabled || discovery.value?.watcher_status === 'disabled') return t('dashboardDiscoveryDisabled')
-  if (discovery.value?.watcher_status === 'error') return t('dashboardDiscoveryAbnormal')
-  return t('dashboardDiscoveryRunning')
+  return t(watcherStatusKey(discovery.value))
 }
 
 function recoveryStatusLabel(): string {
-  if (discovery.value?.recovery?.status === 'completed') return t('dashboardDiscoveryRecovered')
-  if (discovery.value?.recovery?.status === 'running') return t('dashboardDiscoveryRecovering')
-  return t('dashboardDiscoveryPending')
+  return t(recoveryStatusKey(discovery.value?.recovery?.status))
 }
 
 function selectDashboardTaskTab(tab: DashboardTaskTab): void {
@@ -220,6 +203,7 @@ function dashboardTaskPhaseLabel(phase: RuntimePhase): string {
   const keys: Record<string, string> = {
     queued: 'dashboardPhaseQueued',
     retry_wait: 'dashboardPhaseRetryWait',
+    capacity_wait: 'dashboardPhaseCapacityWait',
     checking: 'dashboardPhaseChecking',
     transcoding: 'dashboardPhaseTranscoding',
     verifying: 'dashboardPhaseVerifying',
@@ -228,6 +212,15 @@ function dashboardTaskPhaseLabel(phase: RuntimePhase): string {
   }
   const key = keys[phase]
   return key ? t(key) : t('dashboardPhaseUnknown')
+}
+
+function dashboardTaskDetails(task: (typeof selectedTasks.value)[number]) {
+  return taskProgressDetails(task)
+}
+
+function capacityLabel(capability: string): string {
+  const labels: Record<string, string> = { backup: 'Backup', work: 'Work', media: 'Media' }
+  return labels[capability] ?? capability
 }
 
 function dashboardTaskPhaseClass(): string {
@@ -436,6 +429,29 @@ onBeforeUnmount(() => {
       <section class="dashboard-metric dashboard-metric--success panel"><span class="dashboard-metric__label">{{ t('dashboardSuccessRate') }}</span><strong class="dashboard-metric__value">{{ successRate }}</strong></section>
     </div>
 
+    <section v-if="status" class="dashboard-health-panel panel" :data-status="status.status" data-testid="dashboard-business-health">
+      <header class="dashboard-health-header">
+        <div><h2>{{ t('dashboardHealthTitle') }}</h2><strong>{{ serviceStatusLabel(status.status) }}</strong></div>
+        <span>{{ status.intake_accepting ? t('serviceStatusNormal') : serviceStatusLabel(status.status) }}</span>
+      </header>
+      <div v-if="status.health_reasons.length" class="dashboard-health-reasons">
+        <div v-for="reason in status.health_reasons" :key="reason.code" class="dashboard-health-reason">
+          <strong>{{ reason.summary }}</strong>
+          <span>{{ t('dashboardAffectedCapability') }}: {{ reason.affected_capability }}</span>
+          <span>{{ t('dashboardSuggestedAction') }}: {{ reason.advice }}</span>
+        </div>
+      </div>
+      <div v-else class="dashboard-health-normal">{{ t('dashboardHealthNormal') }}</div>
+      <div class="dashboard-capacity-list">
+        <div v-for="(volume, index) in status.capacity.volumes" :key="`${volume.capability}:${volume.path}:${index}`" class="dashboard-capacity-row" :data-ready="volume.ready">
+          <strong>{{ capacityLabel(volume.capability) }}</strong>
+          <span :title="volume.path">{{ volume.path }}</span>
+          <span>{{ t('dashboardCapacityAvailable') }} {{ formatBytes(volume.available_bytes) }}</span>
+          <span>{{ t('dashboardCapacityRequired') }} {{ formatBytes(volume.required_bytes) }}</span>
+        </div>
+      </div>
+    </section>
+
     <section v-if="scan" class="dashboard-scan-panel panel" data-testid="dashboard-current-scan">
       <header class="dashboard-scan-header">
         <div class="dashboard-scan-title">
@@ -504,7 +520,12 @@ onBeforeUnmount(() => {
       </div>
       <div class="dashboard-task-list">
         <div v-if="pagedDashboardTasks.length === 0" class="dashboard-task-empty muted">{{ t('dashboardTaskEmpty') }}</div>
-        <div v-for="task in pagedDashboardTasks" :key="`${task.phase}:${task.path}`" class="dashboard-task-row"><div class="dashboard-task-path"><strong>{{ dashboardTaskFileName(task.path) }}</strong><span>{{ dashboardTaskDirectory(task.path) }}</span></div><span class="dashboard-task-chip" :class="dashboardTaskPhaseClass()">{{ dashboardTaskPhaseLabel(task.phase) }}</span></div>
+        <div v-for="task in pagedDashboardTasks" :key="`${task.phase}:${task.path}`" class="dashboard-task-row" :data-stalled="task.stalled">
+          <div class="dashboard-task-path"><strong>{{ dashboardTaskFileName(task.path) }}</strong><span>{{ dashboardTaskDirectory(task.path) }}</span></div>
+          <div class="dashboard-task-state"><span class="dashboard-task-chip" :class="dashboardTaskPhaseClass()">{{ dashboardTaskPhaseLabel(task.phase) }}</span><b v-if="task.stalled">{{ t('dashboardTaskStalled') }}</b></div>
+          <div v-if="dashboardTaskDetails(task).waitReason" class="dashboard-task-wait"><span>{{ t('dashboardTaskWaitReason') }}: <strong>{{ dashboardTaskDetails(task).waitReason }}</strong></span><span>{{ t('dashboardTaskUnlock') }}: <strong>{{ dashboardTaskDetails(task).unlockCondition }}</strong></span></div>
+          <div v-else class="dashboard-task-progress"><span>{{ t('dashboardTaskElapsed') }} <strong>{{ formatDuration(dashboardTaskDetails(task).elapsedSeconds) }}</strong></span><span>{{ t('dashboardTaskPosition') }} <strong>{{ formatDuration(dashboardTaskDetails(task).positionSeconds) }}</strong></span><span>{{ t('dashboardTaskSpeed') }} <strong>{{ dashboardTaskDetails(task).speed.toFixed(2) }}x</strong></span><span>{{ t('dashboardTaskOutput') }} <strong>{{ formatBytes(dashboardTaskDetails(task).outputBytes) }}</strong></span><span>{{ t('dashboardTaskETA') }} <strong>{{ formatDuration(dashboardTaskDetails(task).etaSeconds) }}</strong></span></div>
+        </div>
       </div>
       <div class="dashboard-task-pager">
         <span class="dashboard-task-pager__summary">{{ dashboardTaskSummary }}</span>

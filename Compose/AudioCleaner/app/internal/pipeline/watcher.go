@@ -23,12 +23,14 @@ type Watcher struct {
 	watched      map[string]struct{}
 }
 
+var newFSNotifyWatcher = fsnotify.NewWatcher
+
 func NewWatcher(roots []string, onPath func(string)) (*Watcher, error) {
 	return NewFilteredWatcher(ScanConfig{Roots: roots}, onPath)
 }
 
 func NewFilteredWatcher(cfg ScanConfig, onPath func(string)) (*Watcher, error) {
-	fsWatcher, err := fsnotify.NewWatcher()
+	fsWatcher, err := newFSNotifyWatcher()
 	if err != nil {
 		return nil, err
 	}

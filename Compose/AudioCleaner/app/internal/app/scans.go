@@ -101,6 +101,8 @@ type watcherDirectoryCounter interface {
 	DirectoryCount() int
 }
 
+var relativeScanPath = filepath.Rel
+
 func (s *Service) StartScan(_ context.Context) (any, error) {
 	scan, created, err := s.startManagedScan(ScanSourceManual, false)
 	if err != nil {
@@ -314,6 +316,20 @@ func (s *Service) runScanWithConfig(ctx context.Context, id string, cfg pipeline
 				return
 			}
 			if exists {
+				suppressed, suppressionErr := s.evaluateFailureSuppression(ctx, persisted.ID, info.Size(), info.ModTime().UnixNano(), audioPolicyVersion)
+				if suppressionErr != nil {
+					s.updateScan(id, func(scan *ScanSession) {
+						scan.Failed++
+						scan.LastError = fmt.Sprintf("%s: inspect failure suppression: %v", path, suppressionErr)
+					})
+					return
+				}
+				if suppressed {
+					s.updateScan(id, func(scan *ScanSession) { scan.Skipped++ })
+					return
+				}
+			}
+			if exists {
 				audioConfig := s.config().Audio
 				audioConfig.Version = audioPolicyVersion
 				cache := evaluateCompatibilityCandidate(
@@ -342,7 +358,7 @@ func (s *Service) runScanWithConfig(ctx context.Context, id string, cfg pipeline
 			} else if !wasMissing && (persisted.Size != info.Size() || persisted.MTimeNS != info.ModTime().UnixNano()) {
 				modified++
 			}
-			disposition, enqueueErr := s.enqueueWithSourceResult(path, pipeline.JobSourceScan)
+			disposition, enqueueErr := s.enqueueScanCandidate(path)
 			switch disposition {
 			case enqueueAccepted:
 				s.updateScan(id, func(scan *ScanSession) { scan.Enqueued++ })
@@ -374,6 +390,9 @@ func (s *Service) runScanWithConfig(ctx context.Context, id string, cfg pipeline
 			})
 		},
 	})
+	if err == nil {
+		err = ctx.Err()
+	}
 
 	missing := int64(0)
 	missingIDs := make([]int64, 0)
@@ -388,11 +407,32 @@ func (s *Service) runScanWithConfig(ctx context.Context, id string, cfg pipeline
 				missingIDs = append(missingIDs, file.ID)
 			}
 		}
-		if reconcileErr := s.db.ReconcileFilePresence(ctx, missingIDs, presentIDs, time.Now()); reconcileErr != nil {
+		if reconcileErr := s.reconcileFilePresence(ctx, missingIDs, presentIDs, time.Now()); reconcileErr != nil {
 			err = reconcileErr
 		}
 	}
 	s.finishManagedScan(id, err, added, modified, missing)
+}
+
+func (s *Service) enqueueScanCandidate(path string) (enqueueDisposition, error) {
+	if s.enqueueScanCandidateFn != nil {
+		return s.enqueueScanCandidateFn(path)
+	}
+	return s.enqueueWithSourceResult(path, pipeline.JobSourceScan)
+}
+
+func (s *Service) evaluateFailureSuppression(ctx context.Context, fileID, size, mtimeNS int64, policyVersion int) (bool, error) {
+	if s.evaluateSuppressionFn != nil {
+		return s.evaluateSuppressionFn(ctx, fileID, size, mtimeNS, policyVersion)
+	}
+	return s.db.EvaluateFailureSuppression(ctx, fileID, size, mtimeNS, policyVersion)
+}
+
+func (s *Service) reconcileFilePresence(ctx context.Context, missingIDs, presentIDs []int64, observedAt time.Time) error {
+	if s.reconcilePresenceFn != nil {
+		return s.reconcilePresenceFn(ctx, missingIDs, presentIDs, observedAt)
+	}
+	return s.db.ReconcileFilePresence(ctx, missingIDs, presentIDs, observedAt)
 }
 
 func evaluateCompatibilityCandidate(file repository.FileFacts, size int64, mtimeNS int64, policy compatibility.Policy, now time.Time) compatibility.CacheResult {
@@ -510,6 +550,9 @@ func (s *Service) updateScan(id string, update func(*ScanSession)) {
 
 func (s *Service) startReconciliationLoop() {
 	interval := time.Duration(s.config().Scan.ReconciliationIntervalMins) * time.Minute
+	if s.reconciliationInterval != nil {
+		interval = s.reconciliationInterval(s.config())
+	}
 	if interval <= 0 {
 		return
 	}
@@ -684,7 +727,7 @@ func pathWithinRoots(path string, roots []string) bool {
 	cleanPath := filepath.Clean(path)
 	for _, root := range roots {
 		cleanRoot := filepath.Clean(root)
-		relative, err := filepath.Rel(cleanRoot, cleanPath)
+		relative, err := relativeScanPath(cleanRoot, cleanPath)
 		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 			return true
 		}

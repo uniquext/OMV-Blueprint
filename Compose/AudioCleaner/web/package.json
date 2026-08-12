@@ -5,8 +5,13 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vue-tsc --noEmit && vite build",
-    "test:scan-discovery": "node --test test/scan-discovery-contract.test.mjs",
-    "test:compatibility-cache": "vitest run src/lib/compatibility.test.ts && node --test test/compatibility-cache-contract.test.mjs"
+	"test": "vitest run && node --test test/*.test.mjs",
+	"test:coverage": "vitest run --coverage --coverage.reportsDirectory=../test/coverage/all-web && node --test test/*.test.mjs",
+    "test:scan-discovery": "vitest run src/lib/scanDiscovery.test.ts --coverage --coverage.include=src/lib/scanDiscovery.ts --coverage.reportsDirectory=../test/coverage/01-scan-discovery/web && node --test test/scan-discovery-contract.test.mjs",
+    "test:compatibility-cache": "vitest run src/lib/compatibility.test.ts --coverage --coverage.include=src/lib/compatibility.ts --coverage.reportsDirectory=../test/coverage/02-compatibility-cache/web && node --test test/compatibility-cache-contract.test.mjs",
+    "test:safe-replacement": "vitest run src/lib/replacement.test.ts --coverage --coverage.include=src/lib/replacement.ts --coverage.reportsDirectory=../test/coverage/03-safe-replacement/web && node --test test/safe-replacement-contract.test.mjs",
+    "test:failure-recovery": "vitest run src/lib/failureRecovery.test.ts --coverage --coverage.include=src/lib/failureRecovery.ts --coverage.reportsDirectory=../test/coverage/04-failure-recovery/web",
+    "test:health-observability": "vitest run src/lib/healthObservability.test.ts --coverage --coverage.include=src/lib/healthObservability.ts --coverage.reportsDirectory=../test/coverage/05-health-observability/web && node --test test/health-observability-contract.test.mjs"
   },
   "dependencies": {
     "@lucide/vue": "^1.24.0",
@@ -16,6 +21,8 @@
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.0",
     "@vitest/coverage-v8": "^2.1.9",
+    "@vue/test-utils": "^2.4.11",
+    "happy-dom": "^20.11.2",
     "typescript": "^5.6.0",
     "vite": "^6.0.0",
     "vitest": "^2.1.9",

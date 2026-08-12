@@ -1,11 +1,43 @@
 package media
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
 	"strings"
+	"time"
 )
+
+const QualitySchemaVersion = 1
+
+type QualityGate string
+type QualityStatus string
+
+const (
+	QualityStructure QualityGate = "structure"
+	QualityVideo     QualityGate = "video"
+	QualityAudio     QualityGate = "audio"
+	QualityDuration  QualityGate = "duration"
+	QualitySize      QualityGate = "size"
+
+	QualityPassed QualityStatus = "passed"
+	QualityFailed QualityStatus = "failed"
+	QualityNotRun QualityStatus = "not_run"
+)
+
+type QualityCheck struct {
+	Gate   QualityGate   `json:"gate"`
+	Status QualityStatus `json:"status"`
+	Detail string        `json:"detail"`
+}
+
+type QualityAssessment struct {
+	SchemaVersion int            `json:"schema_version"`
+	Passed        bool           `json:"passed"`
+	Checks        []QualityCheck `json:"checks"`
+	EvaluatedAt   time.Time      `json:"evaluated_at"`
+}
 
 type ValidationRules struct {
 	IncompatibleCodecs       []string
@@ -17,29 +49,61 @@ type ValidationRules struct {
 }
 
 func ValidateOutput(original ProbeData, output ProbeData, decision Decision, rules ValidationRules) error {
+	report := EvaluateOutputQuality(original, output, decision, rules)
+	for _, check := range report.Checks {
+		if check.Status == QualityFailed {
+			return errors.New(check.Detail)
+		}
+	}
+	return nil
+}
+
+func EvaluateOutputQuality(original ProbeData, output ProbeData, decision Decision, rules ValidationRules) QualityAssessment {
+	structureErr := error(nil)
 	if rules.OutputSize <= 0 {
-		return fmt.Errorf("output file is empty")
+		structureErr = errors.New("output file is empty")
+	} else {
+		structureErr = validateStreamCounts(original, output)
 	}
 
-	if err := validateStreamCounts(original, output); err != nil {
-		return err
+	checks := make([]QualityCheck, 0, 5)
+	checks = append(checks, qualityResult(QualityStructure, "output structure is complete", structureErr))
+	if structureErr != nil {
+		checks = append(checks,
+			QualityCheck{Gate: QualityVideo, Status: QualityNotRun, Detail: "not run because structure validation failed"},
+			QualityCheck{Gate: QualityAudio, Status: QualityNotRun, Detail: "not run because structure validation failed"},
+		)
+	} else {
+		checks = append(checks,
+			qualityResult(QualityVideo, "video streams preserve codec and dimensions", validateVideoStreams(original.OrdinaryVideoStreams(), output.OrdinaryVideoStreams())),
+			qualityResult(QualityAudio, "audio streams preserve order and metadata", validateAudioPlans(original.AudioStreams(), output.AudioStreams(), decision.AudioPlans, rules.IncompatibleCodecs)),
+		)
 	}
+	checks = append(checks,
+		qualityResult(QualityDuration, "duration is within tolerance", validateDuration(original, output, rules.DurationToleranceSeconds)),
+		qualityResult(QualitySize, "output size is within limits", validateOutputSize(rules)),
+	)
 
-	if err := validateVideoStreams(original.OrdinaryVideoStreams(), output.OrdinaryVideoStreams()); err != nil {
-		return err
+	passed := true
+	for _, check := range checks {
+		if check.Status != QualityPassed {
+			passed = false
+			break
+		}
 	}
-
-	originalAudio := original.AudioStreams()
-	outputAudio := output.AudioStreams()
-	if err := validateAudioPlans(originalAudio, outputAudio, decision.AudioPlans, rules.IncompatibleCodecs); err != nil {
-		return err
+	return QualityAssessment{
+		SchemaVersion: QualitySchemaVersion,
+		Passed:        passed,
+		Checks:        checks,
+		EvaluatedAt:   time.Now(),
 	}
+}
 
-	if err := validateOutputSize(rules); err != nil {
-		return err
+func qualityResult(gate QualityGate, successDetail string, err error) QualityCheck {
+	if err != nil {
+		return QualityCheck{Gate: gate, Status: QualityFailed, Detail: err.Error()}
 	}
-
-	return validateDuration(original, output, rules.DurationToleranceSeconds)
+	return QualityCheck{Gate: gate, Status: QualityPassed, Detail: successDetail}
 }
 
 func validateStreamCounts(original ProbeData, output ProbeData) error {

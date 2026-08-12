@@ -1,5 +1,6 @@
 services:
   audiocleaner:
+    image: audiocleaner-audiocleaner:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -14,7 +15,6 @@ services:
       PGID: ${PGID}
       TZ: ${TZ}
     volumes:
-      - ${LOCALTIME_PATH}:/etc/localtime:ro
       - ./config:/app/config
       - ./data:/app/data
       - ./logs:/app/logs

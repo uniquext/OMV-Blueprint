@@ -14,6 +14,9 @@ import (
 
 	_ "modernc.org/sqlite"
 	"omv-blueprint/compose/audiocleaner/internal/compatibility"
+	"omv-blueprint/compose/audiocleaner/internal/media"
+	"omv-blueprint/compose/audiocleaner/internal/observability"
+	"omv-blueprint/compose/audiocleaner/internal/replacement"
 )
 
 type Repository struct {
@@ -21,11 +24,15 @@ type Repository struct {
 }
 
 func Open(ctx context.Context, path string) (*Repository, error) {
+	return openRepository(ctx, path, sql.Open)
+}
+
+func openRepository(ctx context.Context, path string, opener func(string, string) (*sql.DB, error)) (*Repository, error) {
 	if err := ensureParentDir(path); err != nil {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite", sqliteDSN(path))
+	db, err := opener("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite repository: %w", err)
 	}
@@ -280,6 +287,134 @@ func (r *Repository) ProcessJobStats(ctx context.Context) (ProcessJobStats, erro
 	return stats, nil
 }
 
+func (r *Repository) PruneRetention(ctx context.Context, policy RetentionPolicy, now time.Time) (RetentionResult, error) {
+	if policy.HistoryMaxAge <= 0 && policy.HistoryMaxCount <= 0 && policy.MissingFileMaxAge <= 0 && policy.MissingFileMaxCount <= 0 {
+		return RetentionResult{}, nil
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RetentionResult{}, fmt.Errorf("begin retention transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	jobItems, err := retentionJobItems(ctx, tx)
+	if err != nil {
+		return RetentionResult{}, err
+	}
+	jobCutoff := time.Time{}
+	if policy.HistoryMaxAge > 0 {
+		jobCutoff = now.Add(-policy.HistoryMaxAge)
+	}
+	jobIDs := observability.SelectExpired(jobItems, jobCutoff, policy.HistoryMaxCount)
+	result := RetentionResult{}
+	for _, id := range jobIDs {
+		deleted, deleteErr := tx.ExecContext(ctx, `DELETE FROM jobs WHERE id=?`, id)
+		if deleteErr != nil {
+			return RetentionResult{}, fmt.Errorf("delete expired job %d: %w", id, deleteErr)
+		}
+		count, countErr := deleted.RowsAffected()
+		if countErr != nil {
+			return RetentionResult{}, countErr
+		}
+		result.DeletedJobs += int(count)
+	}
+
+	fileItems, err := retentionFileItems(ctx, tx)
+	if err != nil {
+		return RetentionResult{}, err
+	}
+	fileCutoff := time.Time{}
+	if policy.MissingFileMaxAge > 0 {
+		fileCutoff = now.Add(-policy.MissingFileMaxAge)
+	}
+	fileIDs := observability.SelectExpired(fileItems, fileCutoff, policy.MissingFileMaxCount)
+	for _, id := range fileIDs {
+		deleted, deleteErr := tx.ExecContext(ctx, `DELETE FROM files WHERE id=?`, id)
+		if deleteErr != nil {
+			return RetentionResult{}, fmt.Errorf("delete expired missing file %d: %w", id, deleteErr)
+		}
+		count, countErr := deleted.RowsAffected()
+		if countErr != nil {
+			return RetentionResult{}, countErr
+		}
+		result.DeletedFiles += int(count)
+	}
+	if err := tx.Commit(); err != nil {
+		return RetentionResult{}, fmt.Errorf("commit retention transaction: %w", err)
+	}
+	return result, nil
+}
+
+func retentionJobItems(ctx context.Context, tx *sql.Tx) ([]observability.RetentionItem, error) {
+	rows, err := tx.QueryContext(ctx, `
+SELECT jobs.id,COALESCE(jobs.finished_at,jobs.started_at),
+ CASE WHEN jobs.result='processing'
+   OR EXISTS(SELECT 1 FROM replacement_journal WHERE replacement_journal.job_id=jobs.id)
+   OR EXISTS(SELECT 1 FROM failure_issues WHERE failure_issues.resolved_at IS NULL AND (failure_issues.origin_job_id=jobs.id OR failure_issues.file_id=jobs.file_id))
+   OR EXISTS(SELECT 1 FROM recovery_audit WHERE recovery_audit.job_id=jobs.id OR recovery_audit.original_job_id=jobs.id)
+   OR EXISTS(SELECT 1 FROM files WHERE files.id=jobs.file_id AND files.backup_file IS NOT NULL)
+ THEN 1 ELSE 0 END
+FROM jobs`)
+	if err != nil {
+		return nil, fmt.Errorf("load retention jobs: %w", err)
+	}
+	defer rows.Close()
+	items := make([]observability.RetentionItem, 0)
+	for rows.Next() {
+		var item observability.RetentionItem
+		var raw string
+		var protected int
+		if err := rows.Scan(&item.ID, &raw, &protected); err != nil {
+			return nil, fmt.Errorf("scan retention job: %w", err)
+		}
+		item.Timestamp, err = parseTime(raw)
+		if err != nil {
+			return nil, fmt.Errorf("parse retention job time: %w", err)
+		}
+		item.Protected = protected != 0
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate retention jobs: %w", err)
+	}
+	return items, nil
+}
+
+func retentionFileItems(ctx context.Context, tx *sql.Tx) ([]observability.RetentionItem, error) {
+	rows, err := tx.QueryContext(ctx, `
+SELECT files.id,files.missing_at,
+ CASE WHEN files.backup_file IS NOT NULL
+   OR EXISTS(SELECT 1 FROM jobs WHERE jobs.file_id=files.id)
+   OR EXISTS(SELECT 1 FROM replacement_journal WHERE replacement_journal.file_id=files.id)
+   OR EXISTS(SELECT 1 FROM failure_issues WHERE failure_issues.file_id=files.id AND failure_issues.resolved_at IS NULL)
+   OR EXISTS(SELECT 1 FROM recovery_audit WHERE recovery_audit.file_id=files.id)
+ THEN 1 ELSE 0 END
+FROM files WHERE files.missing_at IS NOT NULL`)
+	if err != nil {
+		return nil, fmt.Errorf("load retention files: %w", err)
+	}
+	defer rows.Close()
+	items := make([]observability.RetentionItem, 0)
+	for rows.Next() {
+		var item observability.RetentionItem
+		var raw string
+		var protected int
+		if err := rows.Scan(&item.ID, &raw, &protected); err != nil {
+			return nil, fmt.Errorf("scan retention file: %w", err)
+		}
+		item.Timestamp, err = parseTime(raw)
+		if err != nil {
+			return nil, fmt.Errorf("parse retention file time: %w", err)
+		}
+		item.Protected = protected != 0
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate retention files: %w", err)
+	}
+	return items, nil
+}
+
 func (r *Repository) AddJob(ctx context.Context, job JobRecord) (JobRecord, error) {
 	return addJob(ctx, r.db, job, time.Now())
 }
@@ -292,10 +427,40 @@ func (r *Repository) RestartJob(ctx context.Context, id int64) (JobRecord, error
 	now := time.Now()
 	return scanJob(r.db.QueryRowContext(ctx, `
 UPDATE jobs
-SET trigger_source = ?, result = ?, final_error = NULL, started_at = ?, finished_at = NULL
+SET trigger_source = ?, result = ?, final_error = NULL, failure_code = NULL,
+    quality_assessment = NULL, started_at = ?, finished_at = NULL
 WHERE id = ? AND ignored = 0 AND result = ?
+  AND COALESCE(failure_code, '') <> 'manual_recovery'
 RETURNING `+jobSelectColumns,
 		string(DiscoveryManual), string(JobResultProcessing), formatTime(now), id, string(JobResultFailed)))
+}
+
+func (r *Repository) StartManualRetryJob(ctx context.Context, file FileFacts, parentJobID int64) (FileFacts, JobRecord, error) {
+	original, err := r.JobByID(ctx, parentJobID)
+	if err != nil {
+		return FileFacts{}, JobRecord{}, err
+	}
+	if original.FileID != file.ID || original.Result != JobResultFailed || original.FailureCode == "manual_recovery" {
+		return FileFacts{}, JobRecord{}, sql.ErrNoRows
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return FileFacts{}, JobRecord{}, fmt.Errorf("begin manual retry transaction: %w", err)
+	}
+	defer tx.Rollback()
+	now := time.Now()
+	persisted, err := upsertFile(ctx, tx, file, now)
+	if err != nil {
+		return FileFacts{}, JobRecord{}, err
+	}
+	retry, err := addJob(ctx, tx, JobRecord{FileID: persisted.ID, ParentJobID: parentJobID, TriggerSource: DiscoveryManual, Result: JobResultProcessing}, now)
+	if err != nil {
+		return FileFacts{}, JobRecord{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return FileFacts{}, JobRecord{}, fmt.Errorf("commit manual retry transaction: %w", err)
+	}
+	return persisted, retry, nil
 }
 
 func (r *Repository) IgnoreJob(ctx context.Context, id int64) (JobRecord, error) {
@@ -349,23 +514,44 @@ func addJob(ctx context.Context, queryer interface {
 	if job.Result != JobResultProcessing && finishedAt.IsZero() {
 		finishedAt = now
 	}
+	qualityAssessment, err := marshalQualityAssessment(job.QualityAssessment)
+	if err != nil {
+		return JobRecord{}, err
+	}
 	row := queryer.QueryRowContext(ctx, `
 INSERT INTO jobs (
   file_id,
+	parent_job_id,
   trigger_source,
   result,
   final_error,
+	  failure_code,
+	  quality_assessment, failure_stage, failure_category, failure_summary, failure_advice, retry_strategy, unlock_condition,
   started_at,
   finished_at
-) VALUES (?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING `+jobSelectColumns,
 		job.FileID,
+		nullableInt64(job.ParentJobID),
 		string(job.TriggerSource),
 		string(job.Result),
 		nullableString(job.FinalError),
+		nullableString(job.FailureCode),
+		qualityAssessment,
+		nullableString(job.FailureStage), nullableString(job.FailureCategory), nullableString(job.FailureSummary),
+		nullableString(job.FailureAdvice), nullableString(job.RetryStrategy), nullableString(job.UnlockCondition),
 		formatTime(startedAt),
 		nullableTime(finishedAt))
 	return scanJob(row)
+}
+
+func (r *Repository) SetJobFailureDetails(ctx context.Context, jobID int64, details FailureDetails) error {
+	result, err := r.db.ExecContext(ctx, `UPDATE jobs SET failure_code=?,failure_stage=?,failure_category=?,failure_summary=?,failure_advice=?,retry_strategy=?,unlock_condition=? WHERE id=?`,
+		nullableString(details.Code), nullableString(details.Stage), nullableString(details.Category), nullableString(details.Summary), nullableString(details.Advice), nullableString(details.RetryStrategy), nullableString(details.UnlockCondition), jobID)
+	if err != nil {
+		return err
+	}
+	return requireAffectedRow(result, "set job failure details")
 }
 
 func (r *Repository) FinishJob(ctx context.Context, id int64, result JobResult, finalError string) (JobRecord, error) {
@@ -377,11 +563,12 @@ func finishJob(ctx context.Context, queryer interface {
 }, id int64, result JobResult, finalError string, now time.Time) (JobRecord, error) {
 	row := queryer.QueryRowContext(ctx, `
 UPDATE jobs
-SET result = ?, final_error = ?, finished_at = ?
+SET result = ?, final_error = ?, failure_code = ?, finished_at = ?
 WHERE id = ?
 RETURNING `+jobSelectColumns,
 		string(result),
 		nullableString(finalError),
+		nullableStringForResult(result, failureCodeFromFinalError(finalError)),
 		formatTime(now),
 		id)
 	return scanJob(row)
@@ -410,8 +597,12 @@ func (r *Repository) FinishProcessJob(ctx context.Context, id int64, file FileFa
 	if err != nil {
 		return FileFacts{}, JobRecord{}, err
 	}
+	journalPhase := ReplacementCommitted
+	if result == JobResultFailed && file.BackupFile != "" {
+		journalPhase = ReplacementManualRecovery
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE replacement_journal SET phase = ?, updated_at = ? WHERE job_id = ?`,
-		string(ReplacementCommitted), formatTime(now), id); err != nil {
+		string(journalPhase), formatTime(now), id); err != nil {
 		return FileFacts{}, JobRecord{}, fmt.Errorf("commit replacement journal: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -513,8 +704,76 @@ WHERE job_id = ?`, string(ReplacementBackupReady), size, mtimeNS,
 	return requireAffectedRow(result, "mark replacement backup ready")
 }
 
+func (r *Repository) RecordReplacementQuality(ctx context.Context, jobID int64, output replacement.Evidence, report media.QualityAssessment) error {
+	if jobID < 1 {
+		return errors.New("replacement quality requires job_id")
+	}
+	if report.SchemaVersion != media.QualitySchemaVersion || len(report.Checks) == 0 {
+		return errors.New("replacement quality requires a current-schema assessment with checks")
+	}
+	if report.Passed && !output.Matches(output) {
+		return errors.New("passed replacement quality requires complete output evidence")
+	}
+	encoded, err := marshalQualityAssessment(&report)
+	if err != nil {
+		return err
+	}
+	return recordReplacementQualityTransaction(ctx, sqlMigrationBeginner{db: r.db}, jobID, output, encoded, time.Now())
+}
+
+func recordReplacementQualityTransaction(ctx context.Context, beginner sqliteMigrationBeginner, jobID int64, output replacement.Evidence, encoded any, now time.Time) error {
+	tx, err := beginner.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin replacement quality transaction: %w", err)
+	}
+	defer tx.Rollback()
+	journalResult, err := tx.ExecContext(ctx, `
+UPDATE replacement_journal
+SET output_size = ?, output_mtime_ns = ?, output_audio_signature = ?,
+    output_video_signature = ?, quality_assessment = ?, updated_at = ?
+WHERE job_id = ? AND phase = ?`,
+		output.Size, output.MTimeNS, output.AudioSignature, output.VideoSignature,
+		encoded, formatTime(now), jobID, string(ReplacementBackupReady))
+	if err != nil {
+		return fmt.Errorf("record replacement journal quality: %w", err)
+	}
+	if err := requireAffectedRow(journalResult, "record replacement journal quality"); err != nil {
+		return err
+	}
+	jobResult, err := tx.ExecContext(ctx, `UPDATE jobs SET quality_assessment = ? WHERE id = ? AND result = ?`,
+		encoded, jobID, string(JobResultProcessing))
+	if err != nil {
+		return fmt.Errorf("record process job quality: %w", err)
+	}
+	if err := requireAffectedRow(jobResult, "record process job quality"); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit replacement quality: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) MarkReplacementInstalling(ctx context.Context, jobID int64) error {
+	result, err := r.db.ExecContext(ctx, `
+UPDATE replacement_journal
+SET phase = ?, updated_at = ?
+WHERE job_id = ? AND phase = ? AND quality_assessment IS NOT NULL
+  AND output_size > 0 AND output_mtime_ns > 0
+  AND output_audio_signature IS NOT NULL AND output_video_signature IS NOT NULL`,
+		string(ReplacementInstalling), formatTime(time.Now()), jobID, string(ReplacementBackupReady))
+	if err != nil {
+		return fmt.Errorf("mark replacement installing: %w", err)
+	}
+	return requireAffectedRow(result, "mark replacement installing")
+}
+
 func (r *Repository) ReplacementJournalByJob(ctx context.Context, jobID int64) (ReplacementJournal, error) {
 	return scanReplacementJournal(r.db.QueryRowContext(ctx, `SELECT `+replacementJournalSelectColumns+` FROM replacement_journal WHERE job_id = ?`, jobID))
+}
+
+func (r *Repository) ReplacementJournalByFile(ctx context.Context, fileID int64) (ReplacementJournal, error) {
+	return scanReplacementJournal(r.db.QueryRowContext(ctx, `SELECT `+replacementJournalSelectColumns+` FROM replacement_journal WHERE file_id = ?`, fileID))
 }
 
 func (r *Repository) ReplacementJournals(ctx context.Context) ([]ReplacementJournal, error) {
@@ -532,6 +791,158 @@ func (r *Repository) ReplacementJournals(ctx context.Context) ([]ReplacementJour
 		records = append(records, record)
 	}
 	return records, rows.Err()
+}
+
+func (r *Repository) RecordFailureIssue(ctx context.Context, issue FailureIssue) (FailureIssue, error) {
+	now := time.Now()
+	if issue.OccurrenceCount < 1 {
+		issue.OccurrenceCount = 1
+	}
+	return scanFailureIssue(r.db.QueryRowContext(ctx, `
+INSERT INTO failure_issues (file_id, origin_job_id, stage, category, code, summary, advice,
+ retry_strategy, unlock_condition, next_retry_at, file_size, file_mtime_ns, policy_version,
+	 occurrence_count, last_attempt_source, confirmed_at, created_at, last_seen_at, resolved_at, attempt_number, max_attempts)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+ON CONFLICT(file_id) WHERE resolved_at IS NULL DO UPDATE SET
+ origin_job_id=excluded.origin_job_id, stage=excluded.stage, category=excluded.category,
+ code=excluded.code, summary=excluded.summary, advice=excluded.advice,
+ retry_strategy=excluded.retry_strategy, unlock_condition=excluded.unlock_condition,
+ next_retry_at=excluded.next_retry_at, file_size=excluded.file_size,
+ file_mtime_ns=excluded.file_mtime_ns, policy_version=excluded.policy_version,
+ occurrence_count=failure_issues.occurrence_count+1,
+ last_attempt_source=excluded.last_attempt_source, confirmed_at=excluded.confirmed_at,
+	 attempt_number=excluded.attempt_number, max_attempts=excluded.max_attempts,
+ last_seen_at=excluded.last_seen_at
+RETURNING `+failureIssueReturningColumns,
+		issue.FileID, nullableInt64(issue.OriginJobID), issue.Stage, issue.Category, issue.Code,
+		issue.Summary, issue.Advice, issue.RetryStrategy, issue.UnlockCondition,
+		nullableTimePtr(issue.NextRetryAt), issue.FileSize, issue.FileMTimeNS, issue.PolicyVersion,
+		issue.OccurrenceCount, nullableString(issue.LastAttemptSource), nullableTimePtr(issue.ConfirmedAt),
+		formatTime(now), formatTime(now), issue.AttemptNumber, issue.MaxAttempts))
+}
+
+func (r *Repository) ActiveFailureIssueByFile(ctx context.Context, fileID int64) (FailureIssue, error) {
+	return scanFailureIssue(r.db.QueryRowContext(ctx, `SELECT `+failureIssueSelectColumns+` FROM failure_issues JOIN files ON files.id=failure_issues.file_id WHERE failure_issues.file_id=? AND resolved_at IS NULL`, fileID))
+}
+
+func (r *Repository) ActiveFailureIssues(ctx context.Context) ([]FailureIssue, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+failureIssueSelectColumns+` FROM failure_issues JOIN files ON files.id=failure_issues.file_id WHERE resolved_at IS NULL ORDER BY last_seen_at DESC, failure_issues.id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	issues := make([]FailureIssue, 0)
+	for rows.Next() {
+		issue, scanErr := scanFailureIssue(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		issues = append(issues, issue)
+	}
+	return issues, rows.Err()
+}
+
+// EvaluateFailureSuppression atomically confirms an unchanged suppressed issue or resolves it after change.
+func (r *Repository) EvaluateFailureSuppression(ctx context.Context, fileID, size, mtimeNS int64, policyVersion int) (bool, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var issueID, storedSize, storedMTime int64
+	var storedPolicy int
+	var strategy string
+	err = tx.QueryRowContext(ctx, `SELECT id,file_size,file_mtime_ns,policy_version,retry_strategy FROM failure_issues WHERE file_id=? AND resolved_at IS NULL`, fileID).Scan(&issueID, &storedSize, &storedMTime, &storedPolicy, &strategy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	now := formatTime(time.Now())
+	unchanged := storedSize == size && storedMTime == mtimeNS && storedPolicy == policyVersion
+	if unchanged && strategy == "suppress" {
+		_, err = tx.ExecContext(ctx, `UPDATE failure_issues SET occurrence_count=occurrence_count+1,last_seen_at=? WHERE id=?`, now, issueID)
+		if err != nil {
+			return false, err
+		}
+		if err = tx.Commit(); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if !unchanged {
+		_, err = tx.ExecContext(ctx, `UPDATE failure_issues SET resolved_at=?,last_seen_at=? WHERE id=?`, now, now, issueID)
+		if err != nil {
+			return false, err
+		}
+		if err = tx.Commit(); err != nil {
+			return false, err
+		}
+	}
+	return false, nil
+}
+
+func (r *Repository) ResolveFailureIssue(ctx context.Context, fileID int64) error {
+	_, err := r.db.ExecContext(ctx, `UPDATE failure_issues SET resolved_at=?,last_seen_at=? WHERE file_id=? AND resolved_at IS NULL`, formatTime(time.Now()), formatTime(time.Now()), fileID)
+	return err
+}
+
+func (r *Repository) ConfirmFailureAttempt(ctx context.Context, fileID int64, source string) error {
+	result, err := r.db.ExecContext(ctx, `UPDATE failure_issues SET last_attempt_source=?,confirmed_at=?,last_seen_at=? WHERE file_id=? AND resolved_at IS NULL`, source, formatTime(time.Now()), formatTime(time.Now()), fileID)
+	if err != nil {
+		return err
+	}
+	return requireAffectedRow(result, "confirm failure attempt")
+}
+
+func (r *Repository) AddRecoveryAudit(ctx context.Context, audit RecoveryAudit) error {
+	_, err := r.CreateRecoveryAudit(ctx, audit)
+	return err
+}
+
+func (r *Repository) CreateRecoveryAudit(ctx context.Context, audit RecoveryAudit) (RecoveryAudit, error) {
+	if audit.Actor == "" {
+		audit.Actor = "system"
+	}
+	var raw string
+	err := r.db.QueryRowContext(ctx, `INSERT INTO recovery_audit(file_id,job_id,original_job_id,original_failure_code,original_failure,actor,action,source,result,detail,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) RETURNING id,created_at`,
+		audit.FileID, nullableInt64(audit.JobID), nullableInt64(audit.OriginalJobID), nullableString(audit.OriginalFailureCode), nullableString(audit.OriginalFailure), audit.Actor, audit.Action, audit.Source, audit.Result, nullableString(audit.Detail), formatTime(time.Now())).Scan(&audit.ID, &raw)
+	if err != nil {
+		return RecoveryAudit{}, err
+	}
+	audit.CreatedAt, err = parseTime(raw)
+	return audit, err
+}
+
+func (r *Repository) CompleteRecoveryAuditForJob(ctx context.Context, jobID int64, result, detail string) error {
+	updated, err := r.db.ExecContext(ctx, `UPDATE recovery_audit SET result=?,detail=? WHERE job_id=? AND action='retry' AND result='queued'`, result, nullableString(detail), jobID)
+	if err != nil {
+		return err
+	}
+	return requireAffectedRow(updated, "complete recovery audit")
+}
+
+func (r *Repository) RecoveryAudits(ctx context.Context, fileID int64) ([]RecoveryAudit, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id,file_id,COALESCE(job_id,0),COALESCE(original_job_id,0),COALESCE(original_failure_code,''),COALESCE(original_failure,''),actor,action,source,result,COALESCE(detail,''),created_at FROM recovery_audit WHERE file_id=? ORDER BY created_at,id`, fileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]RecoveryAudit, 0)
+	for rows.Next() {
+		var item RecoveryAudit
+		var raw string
+		if err := rows.Scan(&item.ID, &item.FileID, &item.JobID, &item.OriginalJobID, &item.OriginalFailureCode, &item.OriginalFailure, &item.Actor, &item.Action, &item.Source, &item.Result, &item.Detail, &raw); err != nil {
+			return nil, err
+		}
+		item.CreatedAt, err = parseTime(raw)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (r *Repository) DeleteReplacementJournal(ctx context.Context, jobID int64) error {
@@ -588,107 +999,36 @@ func (r *Repository) init(ctx context.Context) error {
 		if err := r.validateSchema(ctx); err != nil {
 			return err
 		}
-		if _, err := r.db.ExecContext(ctx, `PRAGMA user_version = 7`); err != nil {
+		if _, err := r.db.ExecContext(ctx, `PRAGMA user_version = 10`); err != nil {
 			return fmt.Errorf("set sqlite schema version: %w", err)
 		}
 		return r.normalizeStoredTimes(ctx)
 	}
 
-	switch version {
-	case 1:
-		if err := r.validateSchemaColumns(ctx, schemaV1Columns); err != nil {
-			return err
-		}
-		if err := r.migrateV1ToV2(ctx); err != nil {
-			return err
-		}
-		if err := r.migrateV2ToV3(ctx); err != nil {
-			return err
-		}
-		if err := r.migrateV3ToV4(ctx); err != nil {
-			return err
-		}
-		if err := r.migrateV4ToV5(ctx); err != nil {
-			return err
-		}
-		if err := r.migrateV5ToV6(ctx); err != nil {
-			return err
-		}
-		if err := r.migrateV6ToV7(ctx); err != nil {
-			return err
-		}
-	case 2:
-		if err := r.validateSchemaColumns(ctx, schemaV2Columns); err != nil {
-			return err
-		}
-		if err := r.migrateV2ToV3(ctx); err != nil {
-			return err
-		}
-		if err := r.migrateV3ToV4(ctx); err != nil {
-			return err
-		}
-		if err := r.migrateV4ToV5(ctx); err != nil {
-			return err
-		}
-		if err := r.migrateV5ToV6(ctx); err != nil {
-			return err
-		}
-		if err := r.migrateV6ToV7(ctx); err != nil {
-			return err
-		}
-	case 3:
-		if err := r.validateSchemaColumns(ctx, schemaV3Columns); err != nil {
-			return err
-		}
-		if err := r.migrateV3ToV4(ctx); err != nil {
-			return err
-		}
-		if err := r.migrateV4ToV5(ctx); err != nil {
-			return err
-		}
-		if err := r.migrateV5ToV6(ctx); err != nil {
-			return err
-		}
-		if err := r.migrateV6ToV7(ctx); err != nil {
-			return err
-		}
-	case 4:
-		if err := r.validateSchemaColumns(ctx, schemaV4Columns); err != nil {
-			return err
-		}
-		if err := r.migrateV4ToV5(ctx); err != nil {
-			return err
-		}
-		if err := r.migrateV5ToV6(ctx); err != nil {
-			return err
-		}
-		if err := r.migrateV6ToV7(ctx); err != nil {
-			return err
-		}
-	case 5:
-		if err := r.validateSchemaColumns(ctx, schemaV5Columns); err != nil {
-			return err
-		}
-		if err := r.migrateV5ToV6(ctx); err != nil {
-			return err
-		}
-		if err := r.migrateV6ToV7(ctx); err != nil {
-			return err
-		}
-	case 6:
-		if err := r.validateSchemaColumns(ctx, schemaV6Columns); err != nil {
-			return err
-		}
-		if err := r.migrateV6ToV7(ctx); err != nil {
-			return err
-		}
-	case 7:
-		// Already current.
-	default:
+	versionSchemas := map[int]map[string][]string{
+		1: schemaV1Columns, 2: schemaV2Columns, 3: schemaV3Columns, 4: schemaV4Columns,
+		5: schemaV5Columns, 6: schemaV6Columns, 7: schemaV7Columns, 8: schemaV8Columns,
+		9: schemaV9Columns, 10: schemaV10Columns,
+	}
+	expected, supported := versionSchemas[version]
+	if !supported {
 		if err := r.validateSchema(ctx); err != nil {
 			return err
 		}
 		return fmt.Errorf("unsupported sqlite schema version %d", version)
+	}
+	if err := r.validateSchemaColumns(ctx, expected); err != nil {
+		return err
+	}
+	migrations := map[int]func(context.Context) error{
+		1: r.migrateV1ToV2, 2: r.migrateV2ToV3, 3: r.migrateV3ToV4,
+		4: r.migrateV4ToV5, 5: r.migrateV5ToV6, 6: r.migrateV6ToV7,
+		7: r.migrateV7ToV8, 8: r.migrateV8ToV9, 9: r.migrateV9ToV10,
+	}
+	for current := version; current < 10; current++ {
+		if err := migrations[current](ctx); err != nil {
+			return err
+		}
 	}
 	if err := r.validateSchema(ctx); err != nil {
 		return err
@@ -717,6 +1057,12 @@ func (r *Repository) normalizeStoredTimes(ctx context.Context) error {
 		{table: "jobs", idColumn: "id", column: "finished_at"},
 		{table: "replacement_journal", idColumn: "job_id", column: "created_at"},
 		{table: "replacement_journal", idColumn: "job_id", column: "updated_at"},
+		{table: "failure_issues", idColumn: "id", column: "next_retry_at"},
+		{table: "failure_issues", idColumn: "id", column: "confirmed_at"},
+		{table: "failure_issues", idColumn: "id", column: "created_at"},
+		{table: "failure_issues", idColumn: "id", column: "last_seen_at"},
+		{table: "failure_issues", idColumn: "id", column: "resolved_at"},
+		{table: "recovery_audit", idColumn: "id", column: "created_at"},
 	}
 	for _, target := range columns {
 		if err := normalizeStoredTimeColumn(ctx, tx, target); err != nil {
@@ -764,9 +1110,7 @@ func normalizeStoredTimeColumn(ctx context.Context, tx *sql.Tx, target storedTim
 		rows.Close()
 		return fmt.Errorf("iterate %s.%s timestamps: %w", target.table, target.column, err)
 	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close %s.%s timestamps: %w", target.table, target.column, err)
-	}
+	rows.Close()
 	for _, update := range updates {
 		statement := fmt.Sprintf("UPDATE %s SET %s = ? WHERE %s = ?", target.table, target.column, target.idColumn)
 		if _, err := tx.ExecContext(ctx, statement, update.value, update.id); err != nil {
@@ -777,11 +1121,11 @@ func normalizeStoredTimeColumn(ctx context.Context, tx *sql.Tx, target storedTim
 }
 
 func (r *Repository) validateSchema(ctx context.Context) error {
-	return r.validateSchemaColumns(ctx, schemaV7Columns)
+	return r.validateSchemaColumns(ctx, schemaV10Columns)
 }
 
 func (r *Repository) validateSchemaColumns(ctx context.Context, expected map[string][]string) error {
-	for _, table := range []string{"files", "jobs", "backups", "replacement_journal"} {
+	for _, table := range []string{"files", "jobs", "backups", "replacement_journal", "failure_issues", "recovery_audit"} {
 		want, exists := expected[table]
 		if !exists {
 			continue
@@ -804,9 +1148,11 @@ func (r *Repository) validateSchemaColumns(ctx context.Context, expected map[str
 			}
 			columns = append(columns, name)
 		}
-		if err := rows.Close(); err != nil {
-			return fmt.Errorf("close %s schema rows: %w", table, err)
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("iterate %s schema rows: %w", table, err)
 		}
+		rows.Close()
 		if len(columns) != len(want) {
 			return fmt.Errorf("unsupported %s schema columns: got %v, want %v", table, columns, want)
 		}
@@ -820,12 +1166,7 @@ func (r *Repository) validateSchemaColumns(ctx context.Context, expected map[str
 }
 
 func (r *Repository) migrateV1ToV2(ctx context.Context) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin sqlite v1 to v2 migration: %w", err)
-	}
-	defer tx.Rollback()
-	statements := []string{
+	return runSQLiteMigration(ctx, sqlMigrationBeginner{db: r.db}, "v1 to v2", []string{
 		`ALTER TABLE files ADD COLUMN compliance_status TEXT NULL
 CHECK (compliance_status IS NULL OR compliance_status IN ('compliant', 'noncompliant'))`,
 		`ALTER TABLE files ADD COLUMN audio_policy_version INTEGER NULL
@@ -840,16 +1181,7 @@ CHECK (
   )
 )`,
 		`PRAGMA user_version = 2`,
-	}
-	for _, stmt := range statements {
-		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("migrate sqlite v1 to v2: %w", err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit sqlite v1 to v2 migration: %w", err)
-	}
-	return nil
+	})
 }
 
 func (r *Repository) migrateV2ToV3(ctx context.Context) error {
@@ -884,9 +1216,11 @@ ORDER BY backups.created_at DESC, backups.id DESC`)
 			usable[fileID] = append(usable[fileID], path)
 		}
 	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close legacy backup rows: %w", err)
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate legacy backup rows: %w", err)
 	}
+	rows.Close()
 	for fileID, paths := range usable {
 		if len(paths) > 1 {
 			return fmt.Errorf("file %d has %d usable legacy backups; resolve them before migration", fileID, len(paths))
@@ -931,13 +1265,7 @@ ORDER BY backups.created_at DESC, backups.id DESC`)
 }
 
 func (r *Repository) migrateV3ToV4(ctx context.Context) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin sqlite v3 to v4 migration: %w", err)
-	}
-	defer tx.Rollback()
-
-	statements := []string{
+	return runSQLiteMigration(ctx, sqlMigrationBeginner{db: r.db}, "v3 to v4", []string{
 		`CREATE TABLE jobs_v4 (
   id INTEGER PRIMARY KEY,
   file_id INTEGER NOT NULL,
@@ -1004,37 +1332,14 @@ WHERE jobs.kind = 'process'`,
 		`CREATE INDEX idx_jobs_file_id_finished_at ON jobs(file_id, finished_at DESC, id DESC)`,
 		`CREATE INDEX idx_replacement_journal_phase ON replacement_journal(phase, updated_at)`,
 		`PRAGMA user_version = 4`,
-	}
-	for _, stmt := range statements {
-		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("migrate sqlite v3 to v4: %w", err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit sqlite v3 to v4 migration: %w", err)
-	}
-	return nil
+	})
 }
 
 func (r *Repository) migrateV4ToV5(ctx context.Context) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin sqlite v4 to v5 migration: %w", err)
-	}
-	defer tx.Rollback()
-	statements := []string{
+	return runSQLiteMigration(ctx, sqlMigrationBeginner{db: r.db}, "v4 to v5", []string{
 		`ALTER TABLE jobs ADD COLUMN ignored INTEGER NOT NULL DEFAULT 0 CHECK(ignored IN (0,1))`,
 		`PRAGMA user_version = 5`,
-	}
-	for _, stmt := range statements {
-		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("migrate sqlite v4 to v5: %w", err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit sqlite v4 to v5 migration: %w", err)
-	}
-	return nil
+	})
 }
 
 func (r *Repository) migrateV5ToV6(ctx context.Context) error {
@@ -1049,6 +1354,101 @@ func (r *Repository) migrateV6ToV7(ctx context.Context) error {
 		`ALTER TABLE files ADD COLUMN compatibility_assessment TEXT NULL`,
 		`PRAGMA user_version = 7`,
 	})
+}
+
+func (r *Repository) migrateV7ToV8(ctx context.Context) error {
+	return runSQLiteMigration(ctx, sqlMigrationBeginner{db: r.db}, "v7 to v8", []string{
+		`ALTER TABLE jobs ADD COLUMN failure_code TEXT NULL`,
+		`ALTER TABLE jobs ADD COLUMN quality_assessment TEXT NULL`,
+		`CREATE TABLE replacement_journal_v8 (
+  job_id INTEGER PRIMARY KEY,
+  file_id INTEGER NOT NULL UNIQUE,
+  original_path TEXT NOT NULL UNIQUE,
+  temporary_backup_path TEXT NOT NULL UNIQUE,
+  output_path TEXT,
+  phase TEXT NOT NULL CHECK(phase IN ('prepared','backup_ready','installing','output_installed','restoring','manual_recovery','committed')),
+  original_size INTEGER NOT NULL CHECK(original_size >= 0),
+  original_mtime_ns INTEGER NOT NULL CHECK(original_mtime_ns >= 0),
+  original_audio_signature TEXT,
+  original_video_signature TEXT,
+  output_size INTEGER NULL CHECK(output_size IS NULL OR output_size >= 0),
+  output_mtime_ns INTEGER NULL CHECK(output_mtime_ns IS NULL OR output_mtime_ns >= 0),
+  output_audio_signature TEXT,
+  output_video_signature TEXT,
+  quality_assessment TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE RESTRICT,
+  FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE RESTRICT
+)`,
+		`INSERT INTO replacement_journal_v8 (
+  job_id, file_id, original_path, temporary_backup_path, output_path, phase,
+  original_size, original_mtime_ns, original_audio_signature, original_video_signature,
+  last_error, created_at, updated_at
+)
+SELECT job_id, file_id, original_path, temporary_backup_path, output_path, phase,
+  original_size, original_mtime_ns, original_audio_signature, original_video_signature,
+  last_error, created_at, updated_at
+FROM replacement_journal`,
+		`DROP TABLE replacement_journal`,
+		`ALTER TABLE replacement_journal_v8 RENAME TO replacement_journal`,
+		`CREATE INDEX idx_replacement_journal_phase ON replacement_journal(phase, updated_at)`,
+		`PRAGMA user_version = 8`,
+	})
+}
+
+func (r *Repository) migrateV8ToV9(ctx context.Context) error {
+	return runSQLiteMigration(ctx, sqlMigrationBeginner{db: r.db}, "v8 to v9", failureGovernanceV9Schema())
+}
+
+func failureGovernanceV9Schema() []string {
+	return []string{
+		`CREATE TABLE failure_issues (id INTEGER PRIMARY KEY,file_id INTEGER NOT NULL,origin_job_id INTEGER,stage TEXT NOT NULL,category TEXT NOT NULL,code TEXT NOT NULL,summary TEXT NOT NULL,advice TEXT NOT NULL,retry_strategy TEXT NOT NULL CHECK(retry_strategy IN ('suppress','backoff','conditional','manual_recovery')),unlock_condition TEXT NOT NULL,next_retry_at TEXT,file_size INTEGER NOT NULL,file_mtime_ns INTEGER NOT NULL,policy_version INTEGER NOT NULL,occurrence_count INTEGER NOT NULL DEFAULT 1 CHECK(occurrence_count>=1),last_attempt_source TEXT,confirmed_at TEXT,created_at TEXT NOT NULL,last_seen_at TEXT NOT NULL,resolved_at TEXT,FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE RESTRICT,FOREIGN KEY(origin_job_id) REFERENCES jobs(id) ON DELETE SET NULL)`,
+		`CREATE UNIQUE INDEX idx_failure_issues_active_file ON failure_issues(file_id) WHERE resolved_at IS NULL`,
+		`CREATE INDEX idx_failure_issues_active ON failure_issues(resolved_at,last_seen_at)`,
+		`CREATE TABLE recovery_audit (id INTEGER PRIMARY KEY,file_id INTEGER NOT NULL,job_id INTEGER,action TEXT NOT NULL,source TEXT NOT NULL,result TEXT NOT NULL,detail TEXT,created_at TEXT NOT NULL,FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE RESTRICT,FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE SET NULL)`,
+		`CREATE INDEX idx_recovery_audit_file ON recovery_audit(file_id,created_at,id)`,
+		`PRAGMA user_version = 9`,
+	}
+}
+
+func (r *Repository) migrateV9ToV10(ctx context.Context) error {
+	return runSQLiteMigration(ctx, sqlMigrationBeginner{db: r.db}, "v9 to v10", []string{
+		`ALTER TABLE jobs ADD COLUMN parent_job_id INTEGER NULL REFERENCES jobs(id) ON DELETE SET NULL`,
+		`ALTER TABLE jobs ADD COLUMN failure_stage TEXT NULL`,
+		`ALTER TABLE jobs ADD COLUMN failure_category TEXT NULL`,
+		`ALTER TABLE jobs ADD COLUMN failure_summary TEXT NULL`,
+		`ALTER TABLE jobs ADD COLUMN failure_advice TEXT NULL`,
+		`ALTER TABLE jobs ADD COLUMN retry_strategy TEXT NULL`,
+		`ALTER TABLE jobs ADD COLUMN unlock_condition TEXT NULL`,
+		`ALTER TABLE failure_issues ADD COLUMN attempt_number INTEGER NOT NULL DEFAULT 0 CHECK(attempt_number>=0)`,
+		`ALTER TABLE failure_issues ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 0 CHECK(max_attempts>=0)`,
+		`ALTER TABLE recovery_audit ADD COLUMN actor TEXT NOT NULL DEFAULT 'system'`,
+		`ALTER TABLE recovery_audit ADD COLUMN original_job_id INTEGER NULL REFERENCES jobs(id) ON DELETE SET NULL`,
+		`ALTER TABLE recovery_audit ADD COLUMN original_failure_code TEXT NULL`,
+		`ALTER TABLE recovery_audit ADD COLUMN original_failure TEXT NULL`,
+		`PRAGMA user_version = 10`,
+	})
+}
+
+func failureGovernanceSchema(ifNotExists, versionPrefix string) []string {
+	return []string{
+		`CREATE TABLE ` + ifNotExists + `failure_issues (
+ id INTEGER PRIMARY KEY, file_id INTEGER NOT NULL, origin_job_id INTEGER,
+ stage TEXT NOT NULL, category TEXT NOT NULL, code TEXT NOT NULL, summary TEXT NOT NULL, advice TEXT NOT NULL,
+ retry_strategy TEXT NOT NULL CHECK(retry_strategy IN ('suppress','backoff','conditional','manual_recovery')),
+ unlock_condition TEXT NOT NULL, next_retry_at TEXT, file_size INTEGER NOT NULL, file_mtime_ns INTEGER NOT NULL,
+	 policy_version INTEGER NOT NULL, occurrence_count INTEGER NOT NULL DEFAULT 1 CHECK(occurrence_count>=1),
+ last_attempt_source TEXT, confirmed_at TEXT, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, resolved_at TEXT,
+	 attempt_number INTEGER NOT NULL DEFAULT 0 CHECK(attempt_number>=0), max_attempts INTEGER NOT NULL DEFAULT 0 CHECK(max_attempts>=0),
+ FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE RESTRICT, FOREIGN KEY(origin_job_id) REFERENCES jobs(id) ON DELETE SET NULL)`,
+		`CREATE UNIQUE INDEX ` + ifNotExists + `idx_failure_issues_active_file ON failure_issues(file_id) WHERE resolved_at IS NULL`,
+		`CREATE INDEX ` + ifNotExists + `idx_failure_issues_active ON failure_issues(resolved_at,last_seen_at)`,
+		`CREATE TABLE ` + ifNotExists + `recovery_audit (id INTEGER PRIMARY KEY,file_id INTEGER NOT NULL,job_id INTEGER,action TEXT NOT NULL,source TEXT NOT NULL,result TEXT NOT NULL,detail TEXT,created_at TEXT NOT NULL,actor TEXT NOT NULL DEFAULT 'system',original_job_id INTEGER,original_failure_code TEXT,original_failure TEXT,FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE RESTRICT,FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE SET NULL,FOREIGN KEY(original_job_id) REFERENCES jobs(id) ON DELETE SET NULL)`,
+		`CREATE INDEX ` + ifNotExists + `idx_recovery_audit_file ON recovery_audit(file_id,created_at,id)`,
+		versionPrefix + `PRAGMA user_version = 10`,
+	}
 }
 
 type sqliteMigrationBeginner interface {
@@ -1175,6 +1575,34 @@ var schemaV7Columns = map[string][]string{
 	},
 }
 
+var schemaV8Columns = map[string][]string{
+	"files": schemaV7Columns["files"],
+	"jobs": {
+		"id", "file_id", "trigger_source", "result", "final_error", "started_at", "finished_at", "ignored",
+		"failure_code", "quality_assessment",
+	},
+	"replacement_journal": {
+		"job_id", "file_id", "original_path", "temporary_backup_path", "output_path", "phase",
+		"original_size", "original_mtime_ns", "original_audio_signature", "original_video_signature",
+		"output_size", "output_mtime_ns", "output_audio_signature", "output_video_signature", "quality_assessment",
+		"last_error", "created_at", "updated_at",
+	},
+}
+
+var schemaV9Columns = map[string][]string{
+	"files": schemaV8Columns["files"], "jobs": schemaV8Columns["jobs"], "replacement_journal": schemaV8Columns["replacement_journal"],
+	"failure_issues": {"id", "file_id", "origin_job_id", "stage", "category", "code", "summary", "advice", "retry_strategy", "unlock_condition", "next_retry_at", "file_size", "file_mtime_ns", "policy_version", "occurrence_count", "last_attempt_source", "confirmed_at", "created_at", "last_seen_at", "resolved_at"},
+	"recovery_audit": {"id", "file_id", "job_id", "action", "source", "result", "detail", "created_at"},
+}
+
+var schemaV10Columns = map[string][]string{
+	"files":               schemaV9Columns["files"],
+	"jobs":                append(append([]string{}, schemaV9Columns["jobs"]...), "parent_job_id", "failure_stage", "failure_category", "failure_summary", "failure_advice", "retry_strategy", "unlock_condition"),
+	"replacement_journal": schemaV9Columns["replacement_journal"],
+	"failure_issues":      append(append([]string{}, schemaV9Columns["failure_issues"]...), "attempt_number", "max_attempts"),
+	"recovery_audit":      append(append([]string{}, schemaV9Columns["recovery_audit"]...), "actor", "original_job_id", "original_failure_code", "original_failure"),
+}
+
 func ensureParentDir(path string) error {
 	if path == "" {
 		return errors.New("sqlite repository path is empty")
@@ -1295,6 +1723,37 @@ func marshalCompatibilityAssessment(assessment *compatibility.Assessment) (any, 
 	return string(data), nil
 }
 
+func marshalQualityAssessment(assessment *media.QualityAssessment) (any, error) {
+	if assessment == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(assessment)
+	if err != nil {
+		return nil, fmt.Errorf("marshal quality_assessment: %w", err)
+	}
+	return string(data), nil
+}
+
+func nullableStringForResult(result JobResult, value string) any {
+	if result != JobResultFailed {
+		return nil
+	}
+	return nullableString(value)
+}
+
+func failureCodeFromFinalError(finalError string) string {
+	prefix, _, found := strings.Cut(finalError, ":")
+	if !found {
+		return "failed"
+	}
+	switch prefix {
+	case "source_changed", "manual_recovery", "verification_failed", "timeout", "ffprobe_error", "restore_stat_error", "restore_probe_error", "unsupported", "interrupted_replacement":
+		return prefix
+	default:
+		return "failed"
+	}
+}
+
 func scanFileFactsRows(rows *sql.Rows) ([]FileFacts, error) {
 	files := make([]FileFacts, 0)
 	for rows.Next() {
@@ -1316,6 +1775,11 @@ func scanReplacementJournal(row rowScanner) (ReplacementJournal, error) {
 	var phase string
 	var audioSignature sql.NullString
 	var videoSignature sql.NullString
+	var outputSize sql.NullInt64
+	var outputMTimeNS sql.NullInt64
+	var outputAudioSignature sql.NullString
+	var outputVideoSignature sql.NullString
+	var qualityAssessment sql.NullString
 	var lastError sql.NullString
 	var createdAt string
 	var updatedAt string
@@ -1330,6 +1794,11 @@ func scanReplacementJournal(row rowScanner) (ReplacementJournal, error) {
 		&journal.OriginalMTimeNS,
 		&audioSignature,
 		&videoSignature,
+		&outputSize,
+		&outputMTimeNS,
+		&outputAudioSignature,
+		&outputVideoSignature,
+		&qualityAssessment,
 		&lastError,
 		&createdAt,
 		&updatedAt,
@@ -1340,6 +1809,16 @@ func scanReplacementJournal(row rowScanner) (ReplacementJournal, error) {
 	journal.Phase = ReplacementPhase(phase)
 	journal.OriginalAudioSignature = nullableStringValue(audioSignature)
 	journal.OriginalVideoSignature = nullableStringValue(videoSignature)
+	journal.OutputSize = nullableInt64Value(outputSize)
+	journal.OutputMTimeNS = nullableInt64Value(outputMTimeNS)
+	journal.OutputAudioSignature = nullableStringValue(outputAudioSignature)
+	journal.OutputVideoSignature = nullableStringValue(outputVideoSignature)
+	if qualityAssessment.Valid {
+		journal.QualityAssessment = &media.QualityAssessment{}
+		if err := json.Unmarshal([]byte(qualityAssessment.String), journal.QualityAssessment); err != nil {
+			return ReplacementJournal{}, fmt.Errorf("parse replacement journal quality_assessment: %w", err)
+		}
+	}
 	journal.LastError = nullableStringValue(lastError)
 	var err error
 	journal.CreatedAt, err = parseTime(createdAt)
@@ -1358,6 +1837,10 @@ func scanHistoryRecord(row rowScanner) (JobHistoryRecord, error) {
 	var triggerSource string
 	var result string
 	var finalError sql.NullString
+	var failureCode sql.NullString
+	var qualityAssessment sql.NullString
+	var parentJobID sql.NullInt64
+	var failureStage, failureCategory, failureSummary, failureAdvice, retryStrategy, unlockCondition sql.NullString
 	var startedAt string
 	var finishedAt sql.NullString
 
@@ -1368,6 +1851,15 @@ func scanHistoryRecord(row rowScanner) (JobHistoryRecord, error) {
 		&triggerSource,
 		&result,
 		&finalError,
+		&failureCode,
+		&qualityAssessment,
+		&parentJobID,
+		&failureStage,
+		&failureCategory,
+		&failureSummary,
+		&failureAdvice,
+		&retryStrategy,
+		&unlockCondition,
 		&startedAt,
 		&finishedAt,
 	)
@@ -1387,6 +1879,20 @@ func scanHistoryRecord(row rowScanner) (JobHistoryRecord, error) {
 	record.TriggerSource = DiscoverySource(triggerSource)
 	record.Result = JobResult(result)
 	record.FinalError = nullableStringValue(finalError)
+	record.FailureCode = nullableStringValue(failureCode)
+	record.ParentJobID = nullableInt64Value(parentJobID)
+	record.FailureStage = nullableStringValue(failureStage)
+	record.FailureCategory = nullableStringValue(failureCategory)
+	record.FailureSummary = nullableStringValue(failureSummary)
+	record.FailureAdvice = nullableStringValue(failureAdvice)
+	record.RetryStrategy = nullableStringValue(retryStrategy)
+	record.UnlockCondition = nullableStringValue(unlockCondition)
+	if qualityAssessment.Valid {
+		record.QualityAssessment = &media.QualityAssessment{}
+		if err := json.Unmarshal([]byte(qualityAssessment.String), record.QualityAssessment); err != nil {
+			return JobHistoryRecord{}, fmt.Errorf("parse history quality_assessment: %w", err)
+		}
+	}
 	return record, nil
 }
 
@@ -1410,6 +1916,10 @@ func scanJob(row rowScanner) (JobRecord, error) {
 	var triggerSource string
 	var result string
 	var finalError sql.NullString
+	var failureCode sql.NullString
+	var qualityAssessment sql.NullString
+	var parentJobID sql.NullInt64
+	var failureStage, failureCategory, failureSummary, failureAdvice, retryStrategy, unlockCondition sql.NullString
 	var startedAt string
 	var finishedAt sql.NullString
 	var ignored int
@@ -1422,6 +1932,15 @@ func scanJob(row rowScanner) (JobRecord, error) {
 		&startedAt,
 		&finishedAt,
 		&ignored,
+		&failureCode,
+		&qualityAssessment,
+		&parentJobID,
+		&failureStage,
+		&failureCategory,
+		&failureSummary,
+		&failureAdvice,
+		&retryStrategy,
+		&unlockCondition,
 	); err != nil {
 		return JobRecord{}, err
 	}
@@ -1437,6 +1956,20 @@ func scanJob(row rowScanner) (JobRecord, error) {
 	job.TriggerSource = DiscoverySource(triggerSource)
 	job.Result = JobResult(result)
 	job.FinalError = nullableStringValue(finalError)
+	job.FailureCode = nullableStringValue(failureCode)
+	job.ParentJobID = nullableInt64Value(parentJobID)
+	job.FailureStage = nullableStringValue(failureStage)
+	job.FailureCategory = nullableStringValue(failureCategory)
+	job.FailureSummary = nullableStringValue(failureSummary)
+	job.FailureAdvice = nullableStringValue(failureAdvice)
+	job.RetryStrategy = nullableStringValue(retryStrategy)
+	job.UnlockCondition = nullableStringValue(unlockCondition)
+	if qualityAssessment.Valid {
+		job.QualityAssessment = &media.QualityAssessment{}
+		if err := json.Unmarshal([]byte(qualityAssessment.String), job.QualityAssessment); err != nil {
+			return JobRecord{}, fmt.Errorf("parse job quality_assessment: %w", err)
+		}
+	}
 	job.Ignored = ignored != 0
 	return job, nil
 }
@@ -1489,6 +2022,13 @@ func nullableTime(value time.Time) any {
 		return nil
 	}
 	return formatTime(value)
+}
+
+func nullableTimePtr(value *time.Time) any {
+	if value == nil || value.IsZero() {
+		return nil
+	}
+	return formatTime(*value)
 }
 
 func nullableInt64(value int64) any {
@@ -1549,6 +2089,15 @@ const historySelectColumns = `
 	  jobs.trigger_source,
 	  jobs.result,
 	  jobs.final_error,
+	  jobs.failure_code,
+	  jobs.quality_assessment,
+	  jobs.parent_job_id,
+	  jobs.failure_stage,
+	  jobs.failure_category,
+	  jobs.failure_summary,
+	  jobs.failure_advice,
+	  jobs.retry_strategy,
+	  jobs.unlock_condition,
 	  jobs.started_at,
 	  jobs.finished_at`
 
@@ -1558,9 +2107,18 @@ const jobSelectColumns = `
   trigger_source,
   result,
   final_error,
-  started_at,
-  finished_at,
-  ignored`
+	  started_at,
+	  finished_at,
+	  ignored,
+	  failure_code,
+	  quality_assessment,
+	  parent_job_id,
+	  failure_stage,
+	  failure_category,
+	  failure_summary,
+	  failure_advice,
+	  retry_strategy,
+	  unlock_condition`
 
 const replacementJournalSelectColumns = `
   job_id,
@@ -1572,10 +2130,67 @@ const replacementJournalSelectColumns = `
   original_size,
   original_mtime_ns,
   original_audio_signature,
-  original_video_signature,
+	  original_video_signature,
+	  output_size,
+	  output_mtime_ns,
+	  output_audio_signature,
+	  output_video_signature,
+	  quality_assessment,
   last_error,
   created_at,
   updated_at`
+
+const failureIssueSelectColumns = `
+  failure_issues.id, failure_issues.file_id, files.file_path, COALESCE(failure_issues.origin_job_id, 0),
+  failure_issues.stage, failure_issues.category, failure_issues.code, failure_issues.summary, failure_issues.advice,
+  failure_issues.retry_strategy, failure_issues.unlock_condition, failure_issues.next_retry_at,
+  failure_issues.file_size, failure_issues.file_mtime_ns, failure_issues.policy_version,
+	  failure_issues.occurrence_count, COALESCE(failure_issues.last_attempt_source, ''), failure_issues.confirmed_at,
+	  failure_issues.created_at, failure_issues.last_seen_at, failure_issues.resolved_at,
+	  failure_issues.attempt_number, failure_issues.max_attempts`
+
+const failureIssueReturningColumns = `
+  id, file_id, (SELECT file_path FROM files WHERE files.id = failure_issues.file_id), COALESCE(origin_job_id, 0),
+  stage, category, code, summary, advice, retry_strategy, unlock_condition, next_retry_at,
+	  file_size, file_mtime_ns, policy_version, occurrence_count, COALESCE(last_attempt_source, ''), confirmed_at,
+	  created_at, last_seen_at, resolved_at, attempt_number, max_attempts`
+
+func scanFailureIssue(row rowScanner) (FailureIssue, error) {
+	var issue FailureIssue
+	var next, confirmed, resolved sql.NullString
+	var created, lastSeen string
+	if err := row.Scan(&issue.ID, &issue.FileID, &issue.Path, &issue.OriginJobID, &issue.Stage, &issue.Category, &issue.Code, &issue.Summary, &issue.Advice, &issue.RetryStrategy, &issue.UnlockCondition, &next, &issue.FileSize, &issue.FileMTimeNS, &issue.PolicyVersion, &issue.OccurrenceCount, &issue.LastAttemptSource, &confirmed, &created, &lastSeen, &resolved, &issue.AttemptNumber, &issue.MaxAttempts); err != nil {
+		return FailureIssue{}, err
+	}
+	var err error
+	if issue.NextRetryAt, err = parseNullableTimePtr(next); err != nil {
+		return FailureIssue{}, err
+	}
+	if issue.ConfirmedAt, err = parseNullableTimePtr(confirmed); err != nil {
+		return FailureIssue{}, err
+	}
+	if issue.ResolvedAt, err = parseNullableTimePtr(resolved); err != nil {
+		return FailureIssue{}, err
+	}
+	if issue.CreatedAt, err = parseTime(created); err != nil {
+		return FailureIssue{}, err
+	}
+	if issue.LastSeenAt, err = parseTime(lastSeen); err != nil {
+		return FailureIssue{}, err
+	}
+	return issue, nil
+}
+
+func parseNullableTimePtr(value sql.NullString) (*time.Time, error) {
+	if !value.Valid {
+		return nil, nil
+	}
+	parsed, err := parseTime(value.String)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
+}
 
 var schemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS files (
@@ -1611,9 +2226,19 @@ var schemaStatements = []string{
   result TEXT NOT NULL CHECK(result IN ('processing','compatible','succeeded','failed')),
   final_error TEXT,
   started_at TEXT NOT NULL,
-  finished_at TEXT,
-	ignored INTEGER NOT NULL DEFAULT 0 CHECK(ignored IN (0,1)),
+	finished_at TEXT,
+	  ignored INTEGER NOT NULL DEFAULT 0 CHECK(ignored IN (0,1)),
+	  failure_code TEXT NULL,
+	  quality_assessment TEXT NULL,
+	  parent_job_id INTEGER NULL,
+	  failure_stage TEXT NULL,
+	  failure_category TEXT NULL,
+	  failure_summary TEXT NULL,
+	  failure_advice TEXT NULL,
+	  retry_strategy TEXT NULL,
+	  unlock_condition TEXT NULL,
   FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE RESTRICT,
+	FOREIGN KEY(parent_job_id) REFERENCES jobs(id) ON DELETE SET NULL,
   CHECK((result = 'failed' AND final_error IS NOT NULL) OR (result <> 'failed' AND final_error IS NULL)),
   CHECK((result = 'processing' AND finished_at IS NULL) OR (result <> 'processing' AND finished_at IS NOT NULL))
 );`,
@@ -1623,11 +2248,16 @@ var schemaStatements = []string{
 	  original_path TEXT NOT NULL UNIQUE,
 	  temporary_backup_path TEXT NOT NULL UNIQUE,
 	  output_path TEXT,
-	  phase TEXT NOT NULL CHECK(phase IN ('prepared','backup_ready','output_installed','restoring','committed')),
+	  phase TEXT NOT NULL CHECK(phase IN ('prepared','backup_ready','installing','output_installed','restoring','manual_recovery','committed')),
 	  original_size INTEGER NOT NULL CHECK(original_size >= 0),
 	  original_mtime_ns INTEGER NOT NULL CHECK(original_mtime_ns >= 0),
 	  original_audio_signature TEXT,
 	  original_video_signature TEXT,
+	  output_size INTEGER NULL CHECK(output_size IS NULL OR output_size >= 0),
+	  output_mtime_ns INTEGER NULL CHECK(output_mtime_ns IS NULL OR output_mtime_ns >= 0),
+	  output_audio_signature TEXT,
+	  output_video_signature TEXT,
+	  quality_assessment TEXT,
 	  last_error TEXT,
 	  created_at TEXT NOT NULL,
 	  updated_at TEXT NOT NULL,
@@ -1639,4 +2269,9 @@ var schemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS idx_jobs_result_finished_at ON jobs(result, finished_at DESC, id DESC);`,
 	`CREATE INDEX IF NOT EXISTS idx_jobs_file_id_finished_at ON jobs(file_id, finished_at DESC, id DESC);`,
 	`CREATE INDEX IF NOT EXISTS idx_replacement_journal_phase ON replacement_journal(phase, updated_at);`,
+}
+
+func init() {
+	governance := failureGovernanceSchema("IF NOT EXISTS ", "")
+	schemaStatements = append(schemaStatements, governance[:len(governance)-1]...)
 }

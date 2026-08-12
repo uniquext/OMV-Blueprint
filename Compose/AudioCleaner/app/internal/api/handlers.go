@@ -49,6 +49,7 @@ type Deps struct {
 	History      HistoryStore
 	Files        FilesStore
 	RuntimeLogs  RuntimeLogStore
+	Recovery     RecoveryStore
 }
 
 type StatusProvider interface {
@@ -86,13 +87,60 @@ type RuntimeLogStore interface {
 	RuntimeLogs(ctx context.Context, lines int) (any, error)
 }
 
+type RecoveryStore interface {
+	ListRecovery(ctx context.Context) (any, error)
+	ListFailures(ctx context.Context) (any, error)
+	RetryHistoryContext(ctx context.Context, id int64) (any, error)
+	RetryFileContext(ctx context.Context, id int64) (any, error)
+	RetryRecoveryContext(ctx context.Context, id int64) (any, error)
+	RetryRecovery(ctx context.Context, id int64) (any, error)
+	RetainRecovery(ctx context.Context, id int64) (any, error)
+	RestoreRecovery(ctx context.Context, id int64) (any, error)
+	DeleteRecoveryBackup(ctx context.Context, id int64) (any, error)
+}
+
+func (s *Server) handleListFailures(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Recovery == nil {
+		writeOK(w, []any{})
+		return
+	}
+	result, err := s.deps.Recovery.ListFailures(r.Context())
+	writeDependencyResult(w, result, err)
+}
+
+func (s *Server) handleRestoreRecovery(w http.ResponseWriter, r *http.Request) {
+	s.handleRecoveryAction(w, r, func(ctx context.Context, id int64) (any, error) { return s.deps.Recovery.RestoreRecovery(ctx, id) })
+}
+
+func (s *Server) handleDeleteRecoveryBackup(w http.ResponseWriter, r *http.Request) {
+	s.handleRecoveryAction(w, r, func(ctx context.Context, id int64) (any, error) { return s.deps.Recovery.DeleteRecoveryBackup(ctx, id) })
+}
+
+func (s *Server) handleRecoveryAction(w http.ResponseWriter, r *http.Request, action func(context.Context, int64) (any, error)) {
+	id, ok := parsePathID(w, r, "file_id")
+	if !ok {
+		return
+	}
+	if s.deps.Recovery == nil {
+		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	result, err := action(r.Context(), id)
+	writeDependencyResult(w, result, err)
+}
+
 type RuntimeLogResult struct {
 	Content string `json:"content"`
 	Lines   int    `json:"lines"`
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeOK(w, map[string]string{"status": "ok"})
+	if s.deps.Status == nil {
+		writeOK(w, map[string]string{"status": "ok"})
+		return
+	}
+	status, err := s.deps.Status.Status(r.Context())
+	writeDependencyResult(w, status, err)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -137,6 +185,59 @@ func (s *Server) handleRetryHistoryJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.deps.History.RetryHistoryJob(r.Context(), id)
+	writeDependencyResult(w, result, err)
+}
+
+func (s *Server) handleRetryHistoryContext(w http.ResponseWriter, r *http.Request) {
+	id, ok := parsePathID(w, r, "job_id")
+	if !ok {
+		return
+	}
+	if s.deps.Recovery == nil {
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	}
+	result, err := s.deps.Recovery.RetryHistoryContext(r.Context(), id)
+	writeDependencyResult(w, result, err)
+}
+
+func (s *Server) handleRetryFileContext(w http.ResponseWriter, r *http.Request) {
+	s.handleRecoveryAction(w, r, func(ctx context.Context, id int64) (any, error) {
+		return s.deps.Recovery.RetryFileContext(ctx, id)
+	})
+}
+
+func (s *Server) handleRetryRecoveryContext(w http.ResponseWriter, r *http.Request) {
+	s.handleRecoveryAction(w, r, func(ctx context.Context, id int64) (any, error) {
+		return s.deps.Recovery.RetryRecoveryContext(ctx, id)
+	})
+}
+
+func (s *Server) handleRetryRecovery(w http.ResponseWriter, r *http.Request) {
+	s.handleRecoveryAction(w, r, func(ctx context.Context, id int64) (any, error) {
+		return s.deps.Recovery.RetryRecovery(ctx, id)
+	})
+}
+
+func (s *Server) handleListRecovery(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Recovery == nil {
+		writeOK(w, []any{})
+		return
+	}
+	result, err := s.deps.Recovery.ListRecovery(r.Context())
+	writeDependencyResult(w, result, err)
+}
+
+func (s *Server) handleRetainRecovery(w http.ResponseWriter, r *http.Request) {
+	id, ok := parsePathID(w, r, "file_id")
+	if !ok {
+		return
+	}
+	if s.deps.Recovery == nil {
+		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	result, err := s.deps.Recovery.RetainRecovery(r.Context(), id)
 	writeDependencyResult(w, result, err)
 }
 

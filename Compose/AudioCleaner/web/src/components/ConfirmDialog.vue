@@ -7,6 +7,7 @@ const props = defineProps<{
   message: string
   confirmText: string
   cancelText: string
+	confirmDisabled?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -41,7 +42,7 @@ watch(
       <p class="confirm-dialog__message">{{ message }}</p>
       <div class="confirm-dialog__actions">
         <button class="button" type="button" @click="emit('cancel')">{{ cancelText }}</button>
-        <button class="button primary" type="submit">{{ confirmText }}</button>
+		<button class="button primary" type="submit" :disabled="confirmDisabled">{{ confirmText }}</button>
       </div>
     </form>
   </dialog>

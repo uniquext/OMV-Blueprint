@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -24,22 +26,39 @@ import (
 	"omv-blueprint/compose/audiocleaner/internal/compatibility"
 	"omv-blueprint/compose/audiocleaner/internal/config"
 	"omv-blueprint/compose/audiocleaner/internal/eventbus"
+	"omv-blueprint/compose/audiocleaner/internal/failure"
 	"omv-blueprint/compose/audiocleaner/internal/media"
+	"omv-blueprint/compose/audiocleaner/internal/observability"
 	"omv-blueprint/compose/audiocleaner/internal/pipeline"
+	"omv-blueprint/compose/audiocleaner/internal/replacement"
 	"omv-blueprint/compose/audiocleaner/internal/repository"
 	"omv-blueprint/compose/audiocleaner/internal/settings"
 )
 
 const (
-	defaultConfigPath = "/app/config/config.json"
-	defaultDBPath     = "/app/data/audiocleaner.db"
-	defaultBackupRoot = "/app/backups"
-	defaultHTTPAddr   = ":9830"
-	defaultLogPath    = "/app/logs/audiocleaner.log"
-	defaultWorkRoot   = "/app/work"
-	defaultWebDir     = "/app/web/dist"
+	defaultConfigPath  = "/app/config/config.json"
+	defaultDBPath      = "/app/data/audiocleaner.db"
+	defaultBackupRoot  = "/app/backups"
+	defaultHTTPAddr    = ":9830"
+	defaultLogPath     = "/app/logs/audiocleaner.log"
+	defaultWorkRoot    = "/app/work"
+	defaultWebDir      = "/app/web/dist"
+	defaultLogMaxBytes = int64(10 * 1024 * 1024)
+	defaultLogBackups  = 5
+	defaultLogMaxAge   = 30 * 24 * time.Hour
 
 	startupCriticalRecoveryPrefix = "startup recovered interrupted critical phase "
+)
+
+var defaultRetentionPolicy = repository.RetentionPolicy{
+	HistoryMaxAge: 90 * 24 * time.Hour, HistoryMaxCount: 10_000,
+	MissingFileMaxAge: 30 * 24 * time.Hour, MissingFileMaxCount: 5_000,
+}
+
+var (
+	restartSleep          = time.Sleep
+	retentionLoopInterval = 24 * time.Hour
+	systemExec            = syscall.Exec
 )
 
 const (
@@ -53,6 +72,13 @@ type RecoveryRepository interface {
 	FailProcessingJob(ctx context.Context, id int64, finalError string) (repository.FileFacts, repository.JobRecord, error)
 }
 
+type statusRepository interface {
+	JobOutcomeCounts(context.Context) (repository.OutcomeCounts, error)
+	FilesWithBackup(context.Context) ([]repository.FileFacts, error)
+	ProcessJobStats(context.Context) (repository.ProcessJobStats, error)
+	ActiveFailureIssues(context.Context) ([]repository.FailureIssue, error)
+}
+
 type Options struct {
 	ConfigPath string
 	DBPath     string
@@ -63,13 +89,17 @@ type Options struct {
 	HTTPAddr   string
 	Logger     *log.Logger
 
-	FFmpegName  string
-	FFprobeName string
-	Prober      pipeline.WorkerProber
-	Restart     func() error
+	FFmpegName      string
+	FFprobeName     string
+	Prober          pipeline.WorkerProber
+	Restart         func() error
+	Space           observability.SpaceProvider
+	RetentionPolicy *repository.RetentionPolicy
 
-	afterHTTPBind func()
-	logCloser     func() error
+	afterHTTPBind  func()
+	logCloser      func() error
+	cleanupOrphans func(*Service, context.Context) error
+	startupScan    func(*Service) error
 }
 
 type runtimeWatcher interface {
@@ -84,16 +114,28 @@ type Service struct {
 	cfgMu                    sync.RWMutex
 	configPath               string
 	db                       *repository.Repository
+	statusDB                 statusRepository
 	compatibilityCacheUpsert func(context.Context, repository.FileFacts) (repository.FileFacts, error)
+	fileByID                 func(context.Context, int64) (repository.FileFacts, error)
+	jobByID                  func(context.Context, int64) (repository.JobRecord, error)
+	ignoreJob                func(context.Context, int64) (repository.JobRecord, error)
+	enqueueExistingJobFn     func(string, pipeline.JobSource, int64) bool
+	enqueueScanCandidateFn   func(string) (enqueueDisposition, error)
+	evaluateSuppressionFn    func(context.Context, int64, int64, int64, int) (bool, error)
+	reconcilePresenceFn      func(context.Context, []int64, []int64, time.Time) error
 	events                   *eventbus.Bus
 	queue                    *pipeline.Queue
 	watcher                  runtimeWatcher
 	watcherMu                sync.Mutex
 	newWatcher               watcherFactory
 	server                   *http.Server
+	shutdownServer           func(context.Context) error
+	closeRepository          func() error
 	logger                   *log.Logger
 	logCloser                func() error
 	logPath                  string
+	space                    observability.SpaceProvider
+	retentionPolicy          repository.RetentionPolicy
 
 	backupRoot  string
 	workRoot    string
@@ -106,6 +148,8 @@ type Service struct {
 
 	restoreProbeTimeout   time.Duration
 	restorePersistTimeout time.Duration
+	walkMediaRoot         func(string, fs.WalkDirFunc) error
+	removeOrphan          func(string) error
 
 	workerCtx       context.Context
 	cancelWorker    context.CancelFunc
@@ -133,6 +177,7 @@ type Service struct {
 	discoveryNextAt        time.Time
 	discoveryLastResult    *ReconciliationResult
 	discoveryRecovery      *RecoveryResult
+	reconciliationInterval func(config.Config) time.Duration
 }
 
 type workerJob struct {
@@ -207,6 +252,8 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 		logger:            opts.Logger,
 		logCloser:         opts.logCloser,
 		logPath:           opts.LogPath,
+		space:             opts.Space,
+		retentionPolicy:   defaultRetentionPolicy,
 		backupRoot:        opts.BackupRoot,
 		workRoot:          opts.WorkRoot,
 		webDir:            opts.WebDir,
@@ -218,6 +265,12 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 		workerCtx:         workerCtx,
 		cancelWorker:      cancelWorker,
 		pathMutationPaths: make(map[string]struct{}),
+	}
+	if service.space == nil {
+		service.space = diskSpaceProvider{}
+	}
+	if opts.RetentionPolicy != nil {
+		service.retentionPolicy = *opts.RetentionPolicy
 	}
 	service.accepting.Store(true)
 	service.restartState.Store(restartRunning)
@@ -247,9 +300,14 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 		cancelWorker()
 		return nil, fmt.Errorf("recover startup jobs: %w", err)
 	}
-	if err := service.cleanupOrphanTempOutputs(ctx); err != nil {
+	cleanupOrphans := opts.cleanupOrphans
+	if cleanupOrphans == nil {
+		cleanupOrphans = func(service *Service, ctx context.Context) error { return service.cleanupOrphanTempOutputs(ctx) }
+	}
+	if err := cleanupOrphans(service, ctx); err != nil {
 		service.logf("startup temp cleanup failed: %v", err)
 	}
+	service.runRetention(ctx)
 	if cfg.Scan.WatchdogEnabled {
 		if err := service.startWatcher(); err != nil {
 			service.logf("watcher start failed: %v", err)
@@ -260,9 +318,17 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 	}
 	service.startWorkers()
 	service.startReconciliationLoop()
+	service.startRetentionLoop()
 	service.serveHTTP(listener)
 	if cfg.Scan.StartupScanEnabled {
-		if _, _, err := service.startManagedScan(ScanSourceStartup, false); err != nil {
+		startupScan := opts.startupScan
+		if startupScan == nil {
+			startupScan = func(service *Service) error {
+				_, _, err := service.startManagedScan(ScanSourceStartup, false)
+				return err
+			}
+		}
+		if err := startupScan(service); err != nil {
 			service.logf("startup scan failed: %v", err)
 		}
 	}
@@ -275,82 +341,169 @@ func (s *Service) recoverReplacementJournals(ctx context.Context) error {
 		return err
 	}
 	for _, journal := range journals {
-		if journal.Phase == repository.ReplacementCommitted {
-			file, fileErr := s.db.FileByID(ctx, journal.FileID)
-			if fileErr == nil && file.BackupFile == journal.TemporaryBackupPath {
-				if err := s.db.DeleteReplacementJournal(ctx, journal.JobID); err != nil {
-					return err
-				}
-				continue
-			}
-			if fileErr != nil && !errors.Is(fileErr, sql.ErrNoRows) {
-				return fileErr
-			}
-			if err := s.cleanupReplacementJournal(ctx, journal); err != nil {
-				return err
-			}
-			continue
-		}
-		file, err := s.db.FileByID(ctx, journal.FileID)
+		criticalCtx, cancel := context.WithTimeout(context.Background(), defaultStartupCriticalTimeout)
+		err := s.recoverReplacementJournal(criticalCtx, journal)
+		cancel()
 		if err != nil {
-			return err
-		}
-		finalError := startupCriticalRecoveryPrefix + string(journal.Phase)
-		if journal.Phase == repository.ReplacementOutputInstalled || journal.Phase == repository.ReplacementRestoring {
-			restoreErr := s.restoreJournalBackup(ctx, journal, &file)
-			if restoreErr != nil {
-				file.BackupFile = journal.TemporaryBackupPath
-				finalError += "; automatic restore failed: " + restoreErr.Error()
-				if _, _, err := s.db.FinishProcessJob(ctx, journal.JobID, file, repository.JobResultFailed, finalError); err != nil {
-					return err
-				}
-				if err := s.db.DeleteReplacementJournal(ctx, journal.JobID); err != nil {
-					return err
-				}
-				s.logf("startup preserved unresolved backup file_id=%d path=%s backup_file=%s error=%v", file.ID, file.Path, file.BackupFile, restoreErr)
-				continue
-			}
-		}
-		if _, _, err := s.db.FinishProcessJob(ctx, journal.JobID, file, repository.JobResultFailed, finalError); err != nil {
-			return err
-		}
-		if err := s.cleanupReplacementJournal(ctx, journal); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *Service) restoreJournalBackup(ctx context.Context, journal repository.ReplacementJournal, file *repository.FileFacts) error {
-	cfg := s.config()
-	if _, err := backup.Restore(backup.RestoreRequest{
-		OriginalPath: journal.OriginalPath,
-		BackupPath:   journal.TemporaryBackupPath,
-		BackupRoot:   s.backupRoot,
-		MediaRoots:   cfg.Media.Roots,
-	}); err != nil {
-		return err
+const defaultStartupCriticalTimeout = 5 * time.Minute
+
+type recoveryObservation struct {
+	replacement.Observation
+	info  os.FileInfo
+	probe media.ProbeData
+}
+
+func (s *Service) recoverReplacementJournal(ctx context.Context, journal repository.ReplacementJournal) error {
+	if journal.Phase == repository.ReplacementCommitted {
+		return s.cleanupReplacementJournal(ctx, journal)
 	}
-	info, err := os.Stat(journal.OriginalPath)
+	file, err := s.db.FileByID(ctx, journal.FileID)
 	if err != nil {
 		return err
+	}
+	if journal.Phase == repository.ReplacementManualRecovery {
+		if file.BackupFile == journal.TemporaryBackupPath {
+			return nil
+		}
+		return s.db.SetFileBackup(ctx, file.ID, journal.TemporaryBackupPath)
+	}
+	if journal.Phase == repository.ReplacementPrepared || journal.Phase == repository.ReplacementBackupReady {
+		return s.finishInterruptedReplacement(ctx, journal, file, recoveryObservation{}, "installation did not start")
+	}
+
+	observed, observeErr := s.observeRecoveryPath(ctx, journal.OriginalPath)
+	if observeErr != nil {
+		return s.preserveManualRecovery(ctx, journal, file, recoveryObservation{}, "observe original path: "+observeErr.Error())
+	}
+	action := replacement.DecideRecovery(journal.Phase, observed.Observation, journal.OriginalEvidence(), journal.OutputEvidence())
+	switch action {
+	case replacement.RecoveryCommitInstalled:
+		return s.commitRecoveredInstallation(ctx, journal, file, observed)
+	case replacement.RecoveryAbort, replacement.RecoveryRestored:
+		return s.finishInterruptedReplacement(ctx, journal, file, observed, string(action))
+	case replacement.RecoveryRestore:
+		return s.restoreInterruptedReplacement(ctx, journal, file)
+	default:
+		return s.preserveManualRecovery(ctx, journal, file, observed, "replacement evidence is ambiguous")
+	}
+}
+
+func (s *Service) observeRecoveryPath(ctx context.Context, path string) (recoveryObservation, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return recoveryObservation{}, nil
+	}
+	if err != nil {
+		return recoveryObservation{}, err
+	}
+	prober := s.prober
+	if prober == nil {
+		prober = ffprobeProber{name: s.ffprobeName}
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, s.restoreProbeDeadline())
 	defer cancel()
-	probe, err := s.prober.Probe(probeCtx, journal.OriginalPath)
+	probe, err := prober.Probe(probeCtx, path)
 	if err != nil {
+		return recoveryObservation{}, err
+	}
+	evidence := replacement.Evidence{
+		Size: info.Size(), MTimeNS: info.ModTime().UnixNano(),
+		AudioSignature: probe.AudioSignature(), VideoSignature: probe.VideoSignature(),
+	}
+	return recoveryObservation{Observation: replacement.Observation{Exists: true, Evidence: evidence}, info: info, probe: probe}, nil
+}
+
+func (s *Service) commitRecoveredInstallation(ctx context.Context, journal repository.ReplacementJournal, file repository.FileFacts, observed recoveryObservation) error {
+	if journal.QualityAssessment == nil || !journal.QualityAssessment.Passed {
+		return s.preserveManualRecovery(ctx, journal, file, observed, "installed output has no passed quality assessment")
+	}
+	s.applyRecoveryObservation(&file, observed)
+	if file.ComplianceStatus != repository.ComplianceCompliant {
+		return s.preserveManualRecovery(ctx, journal, file, observed, "installed output is not compatible")
+	}
+	file.BackupFile = ""
+	if _, _, err := s.db.FinishProcessJob(ctx, journal.JobID, file, repository.JobResultSucceeded, ""); err != nil {
 		return err
 	}
-	if info.Size() != journal.OriginalSize ||
-		(journal.OriginalAudioSignature != "" && probe.AudioSignature() != journal.OriginalAudioSignature) ||
-		(journal.OriginalVideoSignature != "" && probe.VideoSignature() != journal.OriginalVideoSignature) {
-		return errors.New("restored file does not match replacement journal")
+	return s.cleanupReplacementJournal(ctx, journal)
+}
+
+func (s *Service) restoreInterruptedReplacement(ctx context.Context, journal repository.ReplacementJournal, file repository.FileFacts) error {
+	if err := s.db.UpdateReplacementPhase(ctx, journal.JobID, repository.ReplacementRestoring, "startup automatic restore"); err != nil {
+		return err
 	}
-	file.Size = info.Size()
-	file.MTimeNS = info.ModTime().UnixNano()
-	file.AudioSignature = probe.AudioSignature()
-	file.VideoSignature = probe.VideoSignature()
+	cfg := s.config()
+	if _, err := backup.Restore(backup.RestoreRequest{
+		OriginalPath: journal.OriginalPath, BackupPath: journal.TemporaryBackupPath,
+		BackupRoot: s.backupRoot, MediaRoots: cfg.Media.Roots,
+	}); err != nil {
+		return s.preserveManualRecovery(ctx, journal, file, recoveryObservation{}, "automatic restore failed: "+err.Error())
+	}
+	observed, err := s.observeRecoveryPath(ctx, journal.OriginalPath)
+	if err != nil || !journal.OriginalEvidence().Matches(observed.Evidence) {
+		reason := "restored file does not match original evidence"
+		if err != nil {
+			reason = "observe restored file: " + err.Error()
+		}
+		return s.preserveManualRecovery(ctx, journal, file, observed, reason)
+	}
+	return s.finishInterruptedReplacement(ctx, journal, file, observed, "automatic restore completed")
+}
+
+func (s *Service) finishInterruptedReplacement(ctx context.Context, journal repository.ReplacementJournal, file repository.FileFacts, observed recoveryObservation, reason string) error {
+	if observed.Exists {
+		s.applyRecoveryObservation(&file, observed)
+	}
+	file.BackupFile = ""
+	finalError := "interrupted_replacement: " + reason
+	if _, _, err := s.db.FinishProcessJob(ctx, journal.JobID, file, repository.JobResultFailed, finalError); err != nil {
+		return err
+	}
+	return s.cleanupReplacementJournal(ctx, journal)
+}
+
+func (s *Service) preserveManualRecovery(ctx context.Context, journal repository.ReplacementJournal, file repository.FileFacts, observed recoveryObservation, reason string) error {
+	if observed.Exists {
+		s.applyRecoveryObservation(&file, observed)
+	}
+	file.BackupFile = journal.TemporaryBackupPath
+	finalError := "manual_recovery: " + reason
+	if _, _, err := s.db.FinishProcessJob(ctx, journal.JobID, file, repository.JobResultFailed, finalError); err != nil {
+		return err
+	}
+	s.logf("startup preserved replacement candidates file_id=%d path=%s backup=%s output=%s reason=%s", file.ID, file.Path, journal.TemporaryBackupPath, journal.OutputPath, reason)
 	return nil
+}
+
+func (s *Service) applyRecoveryObservation(file *repository.FileFacts, observed recoveryObservation) {
+	file.Size = observed.info.Size()
+	file.MTimeNS = observed.info.ModTime().UnixNano()
+	file.AudioSignature = observed.probe.AudioSignature()
+	file.VideoSignature = observed.probe.VideoSignature()
+	cfg := s.config()
+	decision := media.Decide(file.Path, observed.probe, media.DecisionConfig{
+		Extensions: cfg.Media.Extensions, IncompatibleCodecs: cfg.Audio.IncompatibleCodecs,
+	})
+	file.AudioPolicyVersion = cfg.Audio.Version
+	switch decision.Action {
+	case media.ActionAlreadyCompatible:
+		file.ComplianceStatus = repository.ComplianceCompliant
+	case media.ActionTranscode:
+		file.ComplianceStatus = repository.ComplianceNoncompliant
+	default:
+		file.ComplianceStatus = repository.ComplianceUnknown
+		file.AudioPolicyVersion = 0
+	}
+	assessment := compatibility.BuildAssessment(observed.probe, decision, compatibility.Policy{
+		Version: cfg.Audio.Version, IncompatibleCodecs: cfg.Audio.IncompatibleCodecs,
+	}, time.Now())
+	file.CompatibilityAssessment = &assessment
 }
 
 func (s *Service) cleanupReplacementJournal(ctx context.Context, journal repository.ReplacementJournal) error {
@@ -409,15 +562,45 @@ func newFileLogger(path string, stderr io.Writer) (*log.Logger, func() error, er
 	if path == "" {
 		return log.New(stderr, "audiocleaner: ", log.LstdFlags), func() error { return nil }, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, nil, err
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	file, err := observability.NewRotatingFileWriterWithAge(path, defaultLogMaxBytes, defaultLogBackups, defaultLogMaxAge)
 	if err != nil {
 		return nil, nil, err
 	}
 	writer := io.MultiWriter(stderr, file)
 	return log.New(writer, "audiocleaner: ", log.LstdFlags), file.Close, nil
+}
+
+func (s *Service) startRetentionLoop() {
+	s.workers.Add(1)
+	go func() {
+		defer s.workers.Done()
+		ticker := time.NewTicker(retentionLoopInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.workerCtx.Done():
+				return
+			case <-ticker.C:
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+				s.runRetention(ctx)
+				cancel()
+			}
+		}
+	}()
+}
+
+func (s *Service) runRetention(ctx context.Context) {
+	if s.db == nil {
+		return
+	}
+	result, err := s.db.PruneRetention(ctx, s.retentionPolicy, time.Now())
+	if err != nil {
+		s.logf("retention cleanup failed: %v", err)
+		return
+	}
+	if result.DeletedJobs > 0 || result.DeletedFiles > 0 {
+		s.logf("retention cleanup completed deleted_jobs=%d deleted_files=%d", result.DeletedJobs, result.DeletedFiles)
+	}
 }
 
 func closeOptionsLog(opts Options) {
@@ -516,90 +699,7 @@ func (s *Service) workerLoop(stop <-chan struct{}) {
 		}
 		job, ok := s.nextActiveJob()
 		if ok {
-			snapshot := s.config()
-			worker := s.newWorker(snapshot)
-			var result pipeline.AttemptResult
-			var processErr error
-			if job.ctx.Err() == nil {
-				result, processErr = worker.ProcessAttempt(job.ctx, job.task)
-			}
-			job.cancel()
-			if job.task.JobID == 0 && result.JobID != 0 && !s.queue.BindJob(job.task.Path, result.JobID) {
-				s.logf("worker failed to bind job id=%d path=%s", result.JobID, job.task.Path)
-			}
-			retryScheduled := false
-			if processErr != nil && result.Retryable {
-				pipelineConfig := s.config().Pipeline
-				retryScheduled = s.scheduleRetry(
-					job.task.Path,
-					pipelineConfig.RetryDelay(),
-					result.LastError,
-					pipelineConfig.MaxRetries,
-				)
-			}
-			if retryScheduled {
-				s.publishWorkerEvent(pipeline.WorkerEvent{
-					FileID:  result.FileID,
-					Path:    job.task.Path,
-					Kind:    "phase_transition",
-					Code:    string(pipeline.RuntimeRetryWait),
-					Phase:   pipeline.RuntimeRetryWait,
-					Attempt: job.task.AttemptNumber,
-					Error:   result.LastError,
-				})
-			} else {
-				if processErr != nil && result.JobID != 0 {
-					finalError := result.FinalError
-					if finalError == "" {
-						finalError = processErr.Error()
-					}
-					finishCtx, cancelFinish := context.WithTimeout(context.Background(), 30*time.Second)
-					_, _, finishErr := s.db.FinishProcessJob(
-						finishCtx,
-						result.JobID,
-						result.FinalFile,
-						repository.JobResultFailed,
-						finalError,
-					)
-					cancelFinish()
-					if finishErr != nil {
-						s.logf("finish failed job id=%d: %v", result.JobID, finishErr)
-					} else {
-						if result.FinalFile.BackupFile != "" {
-							journalCtx, cancelJournal := context.WithTimeout(context.Background(), 30*time.Second)
-							err := s.db.DeleteReplacementJournal(journalCtx, result.JobID)
-							cancelJournal()
-							if err != nil {
-								s.logf("delete unresolved backup journal job_id=%d: %v", result.JobID, err)
-							}
-							if s.events != nil {
-								s.events.Publish("file.backup_created", map[string]any{
-									"file_id": result.FinalFile.ID, "path": result.FinalFile.Path,
-									"backup_file": result.FinalFile.BackupFile,
-								})
-							}
-						}
-						outcome := result.FailureOutcome
-						if outcome == "" {
-							outcome = "failed"
-						}
-						s.publishWorkerEvent(pipeline.WorkerEvent{
-							FileID:  result.FileID,
-							Path:    job.task.Path,
-							Kind:    "status_change",
-							Code:    "failed",
-							Status:  "failed",
-							Outcome: outcome,
-							Attempt: job.task.AttemptNumber,
-							Error:   result.LastError,
-						})
-					}
-				}
-				s.queue.Done(job.task.Path)
-			}
-			if processErr != nil {
-				s.logf("worker error: %v", processErr)
-			}
+			s.processActiveJob(job)
 		}
 		select {
 		case <-s.workerCtx.Done():
@@ -609,6 +709,104 @@ func (s *Service) workerLoop(stop <-chan struct{}) {
 		case <-ticker.C:
 		}
 	}
+}
+
+func (s *Service) processActiveJob(job workerJob) {
+	snapshot := s.config()
+	worker := s.newWorker(snapshot)
+	var result pipeline.AttemptResult
+	var processErr error
+	if job.ctx.Err() == nil {
+		result, processErr = worker.ProcessAttempt(job.ctx, job.task)
+	}
+	job.cancel()
+	s.processAttemptResult(job.task, result, processErr)
+}
+
+func (s *Service) processAttemptResult(task pipeline.QueueJob, result pipeline.AttemptResult, processErr error) {
+	if task.JobID == 0 && result.JobID != 0 && !s.queue.BindJob(task.Path, result.JobID) {
+		s.logf("worker failed to bind job id=%d path=%s", result.JobID, task.Path)
+	}
+	retryScheduled := false
+	classification := failure.Classify(failureCode(result.FinalError), result.LastError)
+	if processErr != nil && shouldRetryAttempt(classification, result) {
+		pipelineConfig := s.config().Pipeline
+		retryScheduled = s.scheduleRetryFor(
+			task.Path,
+			failure.RetryDelay(pipelineConfig.RetryDelay(), task.AttemptNumber),
+			result.LastError,
+			pipelineConfig.MaxRetries,
+			classification,
+			result.FinalFile.Size,
+		)
+	}
+	if retryScheduled {
+		recordCtx, cancelRecord := context.WithTimeout(context.Background(), 30*time.Second)
+		s.recordFailureIssue(recordCtx, result, task, classification, true)
+		cancelRecord()
+		waitPhase := pipeline.RuntimeRetryWait
+		if classification.Category == failure.Capacity {
+			waitPhase = pipeline.RuntimeCapacityWait
+		}
+		s.publishWorkerEvent(pipeline.WorkerEvent{FileID: result.FileID, Path: task.Path, Kind: "phase_transition", Code: string(waitPhase), Phase: waitPhase, Attempt: task.AttemptNumber, Error: result.LastError})
+	} else {
+		if processErr != nil && result.JobID != 0 {
+			finalError := result.FinalError
+			if finalError == "" {
+				finalError = processErr.Error()
+			}
+			finishCtx, cancelFinish := context.WithTimeout(context.Background(), 30*time.Second)
+			_, _, finishErr := s.db.FinishProcessJob(finishCtx, result.JobID, result.FinalFile, repository.JobResultFailed, finalError)
+			if finishErr == nil {
+				s.recordFailureIssue(finishCtx, result, task, classification, false)
+				s.completeRetryAudit(finishCtx, result.JobID, "failed", finalError)
+			}
+			cancelFinish()
+			if finishErr != nil {
+				s.logf("finish failed job id=%d: %v", result.JobID, finishErr)
+			} else if result.FinalFile.BackupFile != "" {
+				journalCtx, cancelJournal := context.WithTimeout(context.Background(), 30*time.Second)
+				err := s.db.DeleteReplacementJournal(journalCtx, result.JobID)
+				cancelJournal()
+				if err != nil {
+					s.logf("delete unresolved backup journal job_id=%d: %v", result.JobID, err)
+				}
+				if s.events != nil {
+					s.events.Publish("file.backup_created", map[string]any{"file_id": result.FinalFile.ID, "path": result.FinalFile.Path, "backup_file": result.FinalFile.BackupFile})
+				}
+			}
+			outcome := result.FailureOutcome
+			if outcome == "" {
+				outcome = "failed"
+			}
+			s.publishWorkerEvent(pipeline.WorkerEvent{FileID: result.FileID, Path: task.Path, Kind: "status_change", Code: "failed", Status: "failed", Outcome: outcome, Attempt: task.AttemptNumber, Error: result.LastError})
+		} else if result.FailureOutcome != "" && result.JobID != 0 {
+			recordCtx, cancelRecord := context.WithTimeout(context.Background(), 30*time.Second)
+			s.recordFailureIssue(recordCtx, result, task, classification, false)
+			s.completeRetryAudit(recordCtx, result.JobID, "failed", result.FinalError)
+			cancelRecord()
+		} else if processErr == nil && result.FileID != 0 {
+			recordCtx, cancelRecord := context.WithTimeout(context.Background(), 30*time.Second)
+			if err := s.db.ResolveFailureIssue(recordCtx, result.FileID); err != nil {
+				s.logf("resolve successful failure issue file_id=%d: %v", result.FileID, err)
+			}
+			if result.JobID != 0 {
+				s.completeRetryAudit(recordCtx, result.JobID, "succeeded", "analysis completed")
+			}
+			cancelRecord()
+		}
+		s.queue.Done(task.Path)
+	}
+	if processErr != nil {
+		s.logf("worker error: %v", processErr)
+	}
+}
+
+func shouldRetryAttempt(classification failure.Classification, result pipeline.AttemptResult) bool {
+	if !classification.AutoRetry {
+		return false
+	}
+	return classification.Category != failure.SourceChanged || result.Retryable
 }
 
 func (s *Service) newWorker(snapshot config.Config) *pipeline.Worker {
@@ -622,6 +820,7 @@ func (s *Service) newWorker(snapshot config.Config) *pipeline.Worker {
 		BackupRoot:     s.backupRoot,
 		WorkRoot:       s.workRoot,
 		FFmpegName:     s.ffmpegName,
+		Space:          s.space,
 	})
 }
 
@@ -664,6 +863,7 @@ func (s *Service) prepareHTTPServer() (net.Listener, error) {
 		History:          s,
 		Files:            s,
 		RuntimeLogs:      s,
+		Recovery:         s,
 	})
 	s.server = &http.Server{
 		Addr:              s.httpAddr,
@@ -705,7 +905,7 @@ func (s *Service) RequestRestart(before, after config.Config) error {
 	for attempt := 1; attempt <= 3; attempt++ {
 		if err := s.restart(); err != nil {
 			s.logf("restart attempt %d failed: %v", attempt, err)
-			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
+			restartSleep(time.Duration(attempt) * 200 * time.Millisecond)
 			continue
 		}
 		return nil
@@ -733,22 +933,30 @@ func (s *Service) waitForCriticalPhaseClear() {
 }
 
 func (s *Service) Status(ctx context.Context) (any, error) {
-	status := "running"
+	processStatus := "running"
 	switch s.restartState.Load() {
 	case restartPending:
-		status = "restarting"
+		processStatus = "restarting"
 	case restartFailed:
-		status = "restart_failed"
+		processStatus = "restart_failed"
 	}
-	outcomeCounts, err := s.db.JobOutcomeCounts(ctx)
+	statusDB := s.statusDB
+	if statusDB == nil {
+		statusDB = s.db
+	}
+	outcomeCounts, err := statusDB.JobOutcomeCounts(ctx)
 	if err != nil {
 		return nil, err
 	}
-	filesWithBackup, err := s.db.FilesWithBackup(ctx)
+	filesWithBackup, err := statusDB.FilesWithBackup(ctx)
 	if err != nil {
 		return nil, err
 	}
-	transcodeStats, err := s.db.ProcessJobStats(ctx)
+	transcodeStats, err := statusDB.ProcessJobStats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	issues, err := statusDB.ActiveFailureIssues(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -765,8 +973,32 @@ func (s *Service) Status(ctx context.Context) (any, error) {
 		}
 		backupUsage += info.Size()
 	}
+	cfg := s.config()
+	capacity := serviceCapacitySnapshot(s.space, s.backupRoot, s.workRoot, cfg.Media.Roots, 0, 0)
+	manualFiles := make(map[int64]struct{}, len(filesWithBackup))
+	for _, file := range filesWithBackup {
+		manualFiles[file.ID] = struct{}{}
+	}
+	for _, issue := range issues {
+		if issue.Category == string(failure.Recovery) {
+			manualFiles[issue.FileID] = struct{}{}
+		}
+	}
+	s.scanMu.RLock()
+	watcherStatus := s.discoveryWatcherStatus
+	watcherError := s.discoveryWatcherError
+	s.scanMu.RUnlock()
+	health := observability.EvaluateHealth(observability.HealthInput{
+		ProcessStatus: processStatus, CapacityReady: capacity.Ready, CapacityReasons: capacity.Blocking,
+		WatcherStatus: watcherStatus, WatcherError: watcherError, ManualRecoveryCount: len(manualFiles),
+	})
+	intakeAccepting := s.accepting.Load() && health.Status != observability.StatusIntakeStopped && health.Status != observability.StatusManualRecovery
 	return map[string]any{
-		"status":                  status,
+		"status":                  health.Status,
+		"process_status":          health.ProcessStatus,
+		"health_reasons":          health.Reasons,
+		"capacity":                capacity,
+		"intake_accepting":        intakeAccepting,
 		"counts":                  counts,
 		"backup_usage_bytes":      backupUsage,
 		"unresolved_backup_count": len(filesWithBackup),
@@ -833,30 +1065,50 @@ func (s *Service) RetryHistoryJob(ctx context.Context, id int64) (any, error) {
 		if !s.canEnqueueLocked(file.Path) || s.queue.Contains(file.Path) {
 			return api.ErrProcessing
 		}
-		if !s.queue.EnqueueExistingJob(file.Path, pipeline.JobSourceManual, job.ID) {
-			return api.ErrProcessing
-		}
-		retried, err = s.db.RestartJob(ctx, job.ID)
+		_, retried, err = s.db.StartManualRetryJob(ctx, file, job.ID)
 		if err != nil {
-			s.queue.Done(file.Path)
 			if errors.Is(err, sql.ErrNoRows) {
 				return api.ErrJobNotActionable
 			}
 			return err
 		}
+		if !s.enqueueExistingJob(file.Path, pipeline.JobSourceManual, retried.ID) {
+			_, _ = s.db.FinishJob(ctx, retried.ID, repository.JobResultFailed, "queue_error: unable to enqueue manual retry")
+			return api.ErrProcessing
+		}
 		path = file.Path
+		_, err = s.db.CreateRecoveryAudit(ctx, repository.RecoveryAudit{
+			FileID: retried.FileID, JobID: retried.ID, OriginalJobID: job.ID,
+			OriginalFailureCode: job.FailureCode, OriginalFailure: job.FinalError, Actor: "local_operator",
+			Action: "retry", Source: "manual_history", Result: "queued", Detail: "failure suppression bypassed once",
+		})
+		if err != nil {
+			s.queue.Done(file.Path)
+			_, _ = s.db.FinishJob(ctx, retried.ID, repository.JobResultFailed, "audit_error: "+err.Error())
+			return err
+		}
 		return nil
 	}()
 	if err != nil {
 		return nil, err
 	}
 	s.logf("history job retry queued job_id=%d file_id=%d path=%s", retried.ID, retried.FileID, path)
+	if err := s.db.ConfirmFailureAttempt(ctx, retried.FileID, "manual_history"); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		s.logf("confirm history retry issue job_id=%d: %v", retried.ID, err)
+	}
 	if s.events != nil {
 		s.events.Publish("job.retry_queued", map[string]any{
 			"job_id": retried.ID, "file_id": retried.FileID, "path": path,
 		})
 	}
 	return map[string]any{"status": "queued", "job_id": retried.ID, "file_id": retried.FileID, "path": path}, nil
+}
+
+func (s *Service) enqueueExistingJob(path string, source pipeline.JobSource, jobID int64) bool {
+	if s.enqueueExistingJobFn != nil {
+		return s.enqueueExistingJobFn(path, source, jobID)
+	}
+	return s.queue.EnqueueExistingJob(path, source, jobID)
 }
 
 func (s *Service) IgnoreHistoryJob(ctx context.Context, id int64) (any, error) {
@@ -867,7 +1119,11 @@ func (s *Service) IgnoreHistoryJob(ctx context.Context, id int64) (any, error) {
 	if job.Ignored || job.Result != repository.JobResultFailed {
 		return nil, api.ErrJobNotActionable
 	}
-	ignored, err := s.db.IgnoreJob(ctx, id)
+	ignoreJob := s.ignoreJob
+	if ignoreJob == nil {
+		ignoreJob = s.db.IgnoreJob
+	}
+	ignored, err := ignoreJob(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, api.ErrJobNotActionable
 	}
@@ -917,22 +1173,36 @@ func (s *Service) ProcessFile(ctx context.Context, id int64) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if file.ComplianceStatus != repository.ComplianceNoncompliant || file.BackupFile != "" {
+	issue, issueErr := s.db.ActiveFailureIssueByFile(ctx, id)
+	if issueErr != nil && !errors.Is(issueErr, sql.ErrNoRows) {
+		return nil, issueErr
+	}
+	if (file.ComplianceStatus != repository.ComplianceNoncompliant && errors.Is(issueErr, sql.ErrNoRows)) || file.BackupFile != "" {
 		return nil, api.ErrFileNotProcessable
 	}
-	if !s.enqueueWithSource(file.Path, pipeline.JobSourceManual) {
+	var jobID int64
+	if issueErr == nil {
+		jobID, err = s.retryFailedFile(ctx, file, issue, "manual_file")
+		if err != nil {
+			return nil, err
+		}
+	} else if !s.enqueueWithSource(file.Path, pipeline.JobSourceManual) {
 		return nil, api.ErrProcessing
 	}
 	s.logf("manual process queued file_id=%d path=%s", file.ID, file.Path)
-	return map[string]any{
+	response := map[string]any{
 		"status":  "queued",
 		"file_id": file.ID,
 		"path":    file.Path,
-	}, nil
+	}
+	if jobID != 0 {
+		response["job_id"] = jobID
+	}
+	return response, nil
 }
 
 func (s *Service) RestoreFileBackup(ctx context.Context, id int64) (any, error) {
-	file, err := s.db.FileByID(ctx, id)
+	file, err := s.loadFileByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -944,7 +1214,7 @@ func (s *Service) RestoreFileBackup(ctx context.Context, id int64) (any, error) 
 	}
 	defer s.finishPathMutation(file.Path)
 
-	file, err = s.db.FileByID(ctx, id)
+	file, err = s.loadFileByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -952,6 +1222,10 @@ func (s *Service) RestoreFileBackup(ctx context.Context, id int64) (any, error) 
 		return nil, sql.ErrNoRows
 	}
 	backupPath := file.BackupFile
+	journal, journalErr := s.db.ReplacementJournalByFile(ctx, file.ID)
+	if journalErr != nil && !errors.Is(journalErr, sql.ErrNoRows) {
+		return nil, journalErr
+	}
 	cfg := s.config()
 	result, err := backup.Restore(backup.RestoreRequest{
 		OriginalPath: file.Path,
@@ -962,12 +1236,24 @@ func (s *Service) RestoreFileBackup(ctx context.Context, id int64) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	if err := s.persistRestoredFile(file, backupPath); err != nil {
+	var expectedEvidence *replacement.Evidence
+	if journalErr == nil {
+		evidence := journal.OriginalEvidence()
+		expectedEvidence = &evidence
+	}
+	if err := s.persistRestoredFileWithEvidence(file, backupPath, expectedEvidence); err != nil {
 		return nil, err
+	}
+	if journalErr == nil {
+		if err := s.cleanupReplacementJournal(ctx, journal); err != nil {
+			return nil, err
+		}
 	}
 	if s.events != nil {
 		s.events.Publish("file.backup_restored", map[string]any{"file_id": file.ID, "path": file.Path})
 	}
+	_ = s.db.ResolveFailureIssue(ctx, file.ID)
+	_ = s.db.AddRecoveryAudit(ctx, repository.RecoveryAudit{FileID: file.ID, JobID: journal.JobID, Action: "restore", Source: "recovery_center", Result: "restored", Detail: backupPath})
 	return result, nil
 }
 
@@ -986,7 +1272,7 @@ func (s *Service) restorePersistDeadline() time.Duration {
 }
 
 func (s *Service) DeleteFileBackup(ctx context.Context, id int64) (any, error) {
-	file, err := s.db.FileByID(ctx, id)
+	file, err := s.loadFileByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -995,9 +1281,14 @@ func (s *Service) DeleteFileBackup(ctx context.Context, id int64) (any, error) {
 	}
 	defer s.finishPathMutation(file.Path)
 
-	file, err = s.db.FileByID(ctx, id)
+	file, err = s.loadFileByID(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	if _, journalErr := s.db.ReplacementJournalByFile(ctx, file.ID); journalErr == nil {
+		return nil, api.ErrFileNotProcessable
+	} else if !errors.Is(journalErr, sql.ErrNoRows) {
+		return nil, journalErr
 	}
 	if file.BackupFile != "" {
 		if err := backup.Remove(file.BackupFile, s.backupRoot); err != nil {
@@ -1011,13 +1302,22 @@ func (s *Service) DeleteFileBackup(ctx context.Context, id int64) (any, error) {
 	if s.events != nil {
 		s.events.Publish("file.backup_deleted", map[string]any{"file_id": file.ID, "path": file.Path})
 	}
+	_ = s.db.AddRecoveryAudit(ctx, repository.RecoveryAudit{FileID: file.ID, Action: "delete", Source: "recovery_center", Result: "deleted", Detail: file.BackupFile})
 	return map[string]string{"status": "deleted"}, nil
 }
 
 func (s *Service) cleanupOrphanTempOutputs(ctx context.Context) error {
 	cfg := s.config()
+	walkRoot := s.walkMediaRoot
+	if walkRoot == nil {
+		walkRoot = filepath.WalkDir
+	}
+	removeOrphan := s.removeOrphan
+	if removeOrphan == nil {
+		removeOrphan = os.Remove
+	}
 	for _, root := range cfg.Media.Roots {
-		if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err := walkRoot(root, func(path string, entry os.DirEntry, err error) error {
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
 					return nil
@@ -1035,7 +1335,7 @@ func (s *Service) cleanupOrphanTempOutputs(ctx context.Context) error {
 				return ctx.Err()
 			default:
 			}
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := removeOrphan(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
 			return nil
@@ -1044,6 +1344,20 @@ func (s *Service) cleanupOrphanTempOutputs(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *Service) loadFileByID(ctx context.Context, id int64) (repository.FileFacts, error) {
+	if s.fileByID != nil {
+		return s.fileByID(ctx, id)
+	}
+	return s.db.FileByID(ctx, id)
+}
+
+func (s *Service) loadJobByID(ctx context.Context, id int64) (repository.JobRecord, error) {
+	if s.jobByID != nil {
+		return s.jobByID(ctx, id)
+	}
+	return s.db.JobByID(ctx, id)
 }
 
 func (s *Service) RuntimeLogs(ctx context.Context, lines int) (any, error) {
@@ -1081,12 +1395,256 @@ func (s *Service) enqueueWithSourceResult(path string, source pipeline.JobSource
 }
 
 func (s *Service) scheduleRetry(path string, delay time.Duration, lastError string, maxRetries int) bool {
+	return s.scheduleRetryFor(path, delay, lastError, maxRetries, failure.Classification{}, 0)
+}
+
+func (s *Service) scheduleRetryFor(path string, delay time.Duration, lastError string, maxRetries int, classification failure.Classification, fileSize int64) bool {
 	s.workerIntakeMu.Lock()
 	defer s.workerIntakeMu.Unlock()
 	if s.queue == nil || !s.isCandidatePath(path) {
 		return false
 	}
+	checkInterval := delay
+	if checkInterval > 30*time.Second {
+		checkInterval = 30 * time.Second
+	}
+	if checkInterval < time.Second {
+		checkInterval = time.Second
+	}
+	switch classification.Category {
+	case failure.Capacity:
+		return s.queue.ScheduleRetryWithObservation(path, delay, checkInterval, lastError, maxRetries, pipeline.RuntimeCapacityWait, lastError, "三处容量均达到安全余量", func() bool {
+			cfg := s.config()
+			maxOutput := workerOutputEstimate(fileSize, cfg.Validation.MaxSizeRatio, cfg.Validation.MaxSizeIncreaseMegabyte)
+			return serviceCapacitySnapshot(s.space, s.backupRoot, s.workRoot, []string{path}, fileSize, maxOutput).Ready
+		})
+	case failure.SourceChanged:
+		quiet := s.config().Pipeline.StatQuietDuration()
+		return s.queue.ScheduleRetryWithCondition(path, delay, checkInterval, lastError, maxRetries, func() bool {
+			return retrySourceStable(path, quiet, time.Now())
+		})
+	}
 	return s.queue.ScheduleRetry(path, delay, lastError, maxRetries)
+}
+
+func retryCapacityAvailable(path string, fileSize int64) bool {
+	var stats syscall.Statfs_t
+	if err := syscall.Statfs(filepath.Dir(path), &stats); err != nil {
+		return false
+	}
+	available := int64(stats.Bavail) * int64(stats.Bsize)
+	if fileSize < 0 {
+		fileSize = 0
+	}
+	const reserve = int64(64 * 1024 * 1024)
+	if fileSize > (math.MaxInt64-reserve)/2 {
+		return false
+	}
+	required := fileSize*2 + reserve
+	return available >= required
+}
+
+func workerOutputEstimate(sourceBytes int64, ratio float64, maxIncreaseMB int64) int64 {
+	maxOutput := math.Max(float64(sourceBytes)*ratio, float64(sourceBytes)+float64(maxIncreaseMB*1024*1024))
+	if math.IsNaN(maxOutput) || maxOutput < 0 {
+		return -1
+	}
+	if maxOutput > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(maxOutput)
+}
+
+func serviceCapacitySnapshot(space observability.SpaceProvider, backupRoot, workRoot string, mediaRoots []string, sourceBytes, maxOutputBytes int64) observability.CapacityResult {
+	mediaPath := ""
+	if len(mediaRoots) > 0 {
+		mediaPath = mediaRoots[0]
+	}
+	result := observability.EvaluateCapacity(space, observability.CapacityRequest{
+		SourceBytes: sourceBytes, MaxOutputBytes: maxOutputBytes, ReserveBytes: observability.DefaultReserveBytes,
+		BackupPath: backupRoot, WorkPath: workRoot, MediaPath: mediaPath,
+	})
+	for _, root := range mediaRoots[1:] {
+		extra := observability.EvaluateCapacity(space, observability.CapacityRequest{
+			SourceBytes: sourceBytes, MaxOutputBytes: maxOutputBytes, ReserveBytes: observability.DefaultReserveBytes,
+			BackupPath: backupRoot, WorkPath: workRoot, MediaPath: root,
+		})
+		media := extra.Volumes[2]
+		result.Volumes = append(result.Volumes, media)
+		if !media.Ready {
+			result.Ready = false
+			result.Blocking = append(result.Blocking, extra.Blocking[len(extra.Blocking)-1])
+		}
+	}
+	return result
+}
+
+type diskSpaceProvider struct {
+	stat   func(string) (os.FileInfo, error)
+	statfs func(string, *syscall.Statfs_t) error
+	access func(string, uint32) error
+}
+
+const (
+	accessExecute uint32 = 1
+	accessWrite   uint32 = 2
+	accessRead    uint32 = 4
+)
+
+func (provider diskSpaceProvider) AvailableBytes(path string) (int64, error) {
+	stat := provider.stat
+	if stat == nil {
+		stat = os.Stat
+	}
+	statfs := provider.statfs
+	if statfs == nil {
+		statfs = syscall.Statfs
+	}
+	current := filepath.Clean(path)
+	for {
+		if _, err := stat(current); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return 0, err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return 0, fmt.Errorf("no existing parent for %s", path)
+		}
+		current = parent
+	}
+	var stats syscall.Statfs_t
+	if err := statfs(current, &stats); err != nil {
+		return 0, err
+	}
+	return int64(stats.Bavail) * int64(stats.Bsize), nil
+}
+
+func (provider diskSpaceProvider) CheckCapability(path, capability string) error {
+	stat := provider.stat
+	if stat == nil {
+		stat = os.Stat
+	}
+	access := provider.access
+	if access == nil {
+		access = syscall.Access
+	}
+	current := filepath.Clean(path)
+	info, err := stat(current)
+	if err != nil {
+		if capability == "media" || !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("check %s path %s: %w", capability, path, err)
+		}
+		for errors.Is(err, os.ErrNotExist) {
+			parent := filepath.Dir(current)
+			if parent == current {
+				return fmt.Errorf("no existing parent for %s", path)
+			}
+			current = parent
+			info, err = stat(current)
+		}
+		if err != nil {
+			return fmt.Errorf("check %s path %s: %w", capability, path, err)
+		}
+	}
+
+	switch capability {
+	case "backup", "work":
+		if !info.IsDir() {
+			return fmt.Errorf("%s path is not a directory: %s", capability, current)
+		}
+		if err := access(current, accessWrite|accessExecute); err != nil {
+			return fmt.Errorf("%s path is not writable: %w", capability, err)
+		}
+	case "media":
+		if info.IsDir() {
+			if err := access(current, accessRead|accessWrite|accessExecute); err != nil {
+				return fmt.Errorf("media directory is not readable and writable: %w", err)
+			}
+			return nil
+		}
+		if err := access(current, accessRead); err != nil {
+			return fmt.Errorf("media file is not readable: %w", err)
+		}
+		parent := filepath.Dir(current)
+		parentInfo, err := stat(parent)
+		if err != nil {
+			return fmt.Errorf("check media parent %s: %w", parent, err)
+		}
+		if !parentInfo.IsDir() {
+			return fmt.Errorf("media parent is not a directory: %s", parent)
+		}
+		if err := access(parent, accessWrite|accessExecute); err != nil {
+			return fmt.Errorf("media directory is not writable: %w", err)
+		}
+	default:
+		return fmt.Errorf("unknown storage capability %q", capability)
+	}
+	return nil
+}
+
+func retrySourceStable(path string, quiet time.Duration, now time.Time) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	if quiet < 0 {
+		quiet = 0
+	}
+	return !info.ModTime().After(now) && now.Sub(info.ModTime()) >= quiet
+}
+
+func failureCode(finalError string) string {
+	code, _, found := strings.Cut(finalError, ":")
+	if !found {
+		return finalError
+	}
+	return code
+}
+
+func (s *Service) recordFailureIssue(ctx context.Context, result pipeline.AttemptResult, task pipeline.QueueJob, classification failure.Classification, retryScheduled ...bool) {
+	if result.FileID < 1 {
+		return
+	}
+	var nextRetryAt *time.Time
+	willRetry := classification.AutoRetry && (len(retryScheduled) == 0 || retryScheduled[0])
+	if willRetry {
+		delay := failure.RetryDelay(s.config().Pipeline.RetryDelay(), task.AttemptNumber)
+		next := time.Now().Add(delay)
+		nextRetryAt = &next
+	}
+	policyVersion := result.FinalFile.AudioPolicyVersion
+	if policyVersion < 1 {
+		policyVersion = s.config().Audio.Version
+	}
+	if result.JobID != 0 {
+		err := s.db.SetJobFailureDetails(ctx, result.JobID, repository.FailureDetails{
+			Stage: classification.Stage, Category: string(classification.Category), Code: classification.Code,
+			Summary: classification.Summary, Advice: classification.Advice,
+			RetryStrategy: string(classification.Strategy), UnlockCondition: classification.UnlockCondition,
+		})
+		if err != nil {
+			s.logf("record job failure details job_id=%d: %v", result.JobID, err)
+		}
+	}
+	_, err := s.db.RecordFailureIssue(ctx, repository.FailureIssue{
+		FileID: result.FileID, OriginJobID: result.JobID, Stage: classification.Stage,
+		Category: string(classification.Category), Code: classification.Code,
+		Summary: classification.Summary, Advice: classification.Advice,
+		RetryStrategy: string(classification.Strategy), UnlockCondition: classification.UnlockCondition,
+		NextRetryAt: nextRetryAt, FileSize: result.FinalFile.Size, FileMTimeNS: result.FinalFile.MTimeNS,
+		PolicyVersion: policyVersion, LastAttemptSource: string(task.Source), AttemptNumber: task.AttemptNumber,
+		MaxAttempts: s.config().Pipeline.MaxRetries + 1,
+	})
+	if err != nil {
+		s.logf("record failure governance job_id=%d: %v", result.JobID, err)
+	}
+}
+
+func (s *Service) completeRetryAudit(ctx context.Context, jobID int64, result, detail string) {
+	if err := s.db.CompleteRecoveryAuditForJob(ctx, jobID, result, detail); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		s.logf("complete retry audit job_id=%d: %v", jobID, err)
+	}
 }
 
 func (s *Service) canEnqueueLocked(path string) bool {
@@ -1141,6 +1699,10 @@ func (s *Service) isPathMutating(path string) bool {
 }
 
 func (s *Service) persistRestoredFile(file repository.FileFacts, backupPath string) error {
+	return s.persistRestoredFileWithEvidence(file, backupPath, nil)
+}
+
+func (s *Service) persistRestoredFileWithEvidence(file repository.FileFacts, backupPath string, expected *replacement.Evidence) error {
 	info, statErr := os.Stat(file.Path)
 	prober := s.prober
 	if prober == nil {
@@ -1168,6 +1730,15 @@ func (s *Service) persistRestoredFile(file repository.FileFacts, backupPath stri
 	}
 	file.AudioSignature = probe.AudioSignature()
 	file.VideoSignature = probe.VideoSignature()
+	if expected != nil {
+		observed := replacement.Evidence{
+			Size: info.Size(), MTimeNS: info.ModTime().UnixNano(),
+			AudioSignature: file.AudioSignature, VideoSignature: file.VideoSignature,
+		}
+		if !expected.Matches(observed) {
+			return errors.New("manual recovery result does not match original evidence")
+		}
+	}
 	analysisConfig := s.config()
 	decision := media.Decide(file.Path, probe, media.DecisionConfig{
 		Extensions:         analysisConfig.Media.Extensions,
@@ -1328,6 +1899,12 @@ func (s *Service) setConfig(cfg config.Config) {
 }
 
 func (s *Service) publishWorkerEvent(event pipeline.WorkerEvent) {
+	if s.queue != nil && event.Kind == "progress" {
+		s.queue.UpdateProgress(event.Path, pipeline.RuntimeProgress{
+			PositionSeconds: event.PositionSeconds, Speed: event.Speed, OutputBytes: event.OutputBytes,
+			ETASeconds: event.ETASeconds, LastProgressAt: event.LastProgressAt,
+		})
+	}
 	if s.queue != nil && event.Phase != pipeline.RuntimeRetryWait {
 		s.queue.UpdatePhase(event.Path, event.Phase)
 	}
@@ -1345,16 +1922,20 @@ func (s *Service) publishWorkerEvent(event pipeline.WorkerEvent) {
 	)
 	if s.events != nil {
 		s.events.Publish(event.Code, map[string]any{
-			"file_id": event.FileID,
-			"path":    event.Path,
-			"status":  event.Status,
-			"phase":   event.Phase,
-			"kind":    event.Kind,
-			"code":    event.Code,
-			"outcome": event.Outcome,
-			"attempt": event.Attempt,
-			"message": event.Message,
-			"error":   event.Error,
+			"file_id":          event.FileID,
+			"path":             event.Path,
+			"status":           event.Status,
+			"phase":            event.Phase,
+			"kind":             event.Kind,
+			"code":             event.Code,
+			"outcome":          event.Outcome,
+			"attempt":          event.Attempt,
+			"message":          event.Message,
+			"error":            event.Error,
+			"position_seconds": event.PositionSeconds,
+			"speed":            event.Speed,
+			"output_bytes":     event.OutputBytes,
+			"eta_seconds":      event.ETASeconds,
 		})
 	}
 }
@@ -1412,7 +1993,7 @@ func (p ffprobeProber) Probe(ctx context.Context, path string) (media.ProbeData,
 }
 
 func execSelf() error {
-	return syscall.Exec(os.Args[0], os.Args, os.Environ())
+	return systemExec(os.Args[0], os.Args, os.Environ())
 }
 
 func tailLogFile(ctx context.Context, path string, lineLimit int) (string, int, error) {

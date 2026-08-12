@@ -13,13 +13,17 @@ type StableStat struct {
 }
 
 func WaitForStableFile(ctx context.Context, path string, quiet time.Duration) (StableStat, error) {
+	return waitForStableFile(ctx, path, quiet, stableStat, time.After)
+}
+
+func waitForStableFile(ctx context.Context, path string, quiet time.Duration, stat func(string) (StableStat, error), after func(time.Duration) <-chan time.Time) (StableStat, error) {
 	select {
 	case <-ctx.Done():
 		return StableStat{}, ctx.Err()
 	default:
 	}
 
-	first, err := stableStat(path)
+	first, err := stat(path)
 	if err != nil {
 		return StableStat{}, err
 	}
@@ -27,15 +31,13 @@ func WaitForStableFile(ctx context.Context, path string, quiet time.Duration) (S
 		return StableStat{}, errors.New("file is empty")
 	}
 
-	timer := time.NewTimer(quiet)
-	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return StableStat{}, ctx.Err()
-	case <-timer.C:
+	case <-after(quiet):
 	}
 
-	second, err := stableStat(path)
+	second, err := stat(path)
 	if err != nil {
 		return StableStat{}, err
 	}

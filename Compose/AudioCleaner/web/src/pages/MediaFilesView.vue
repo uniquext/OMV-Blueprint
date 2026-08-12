@@ -18,8 +18,9 @@ import {
   ruleMatchSummary
 } from '../lib/compatibility'
 import { semanticBadgeClass } from '../lib/semantic'
+import { retryContextDetails } from '../lib/failureRecovery'
 import { formatServiceTimestamp } from '../lib/time'
-import type { CompatibilityAssessment, FileRecord } from '../lib/types'
+import type { CompatibilityAssessment, FileRecord, RetryContext } from '../lib/types'
 
 type ComplianceFilter = 'all' | 'compliant' | 'noncompliant' | 'unknown'
 type BackupFilter = 'all' | 'pending' | 'none'
@@ -35,6 +36,8 @@ const operationPending = ref(false)
 const error = ref('')
 const confirmAction = ref<'process' | 'restore' | 'delete' | null>(null)
 const selectedFile = ref<FileRecord | null>(null)
+const retryContext = ref<RetryContext | null>(null)
+const contextLoading = ref(false)
 const complianceFilter = ref<ComplianceFilter>('all')
 const backupFilter = ref<BackupFilter>('all')
 const keyword = ref('')
@@ -88,7 +91,15 @@ const confirmTitle = computed(() => {
 })
 const confirmMessage = computed(() => {
   const file = selectedFile.value
-  if (confirmAction.value === 'process') return `${t('filesConfirmProcessMessage')} ${file?.path || ''}`
+  if (confirmAction.value === 'process') {
+    if (contextLoading.value || !retryContext.value) return `${t('filesConfirmProcessMessage')} ${file?.path || ''}`
+    const context = retryContext.value
+    if (!context.bypasses_suppression_once) return `${t('filesConfirmProcessMessage')} ${file?.path || ''}`
+    const details = retryContextDetails(context, context.final_error)
+    const changed = details.fileChanged ? t('historyRetryFileChanged') : t('historyRetryFileUnchanged')
+    const policy = details.policyChanged ? t('historyRetryPolicyChanged') : t('historyRetryPolicyUnchanged')
+    return `${file?.path || ''}\n${details.summary}\n${changed} · ${policy}\n${t('filesRetryBypassOnce')}`
+  }
   const message = confirmAction.value === 'restore' ? t('filesConfirmRestoreMessage') : t('filesConfirmDeleteMessage')
   return `${message} ${file?.backup_file || ''}`
 })
@@ -184,19 +195,38 @@ function toggleFile(file: FileRecord): void {
   expandedFileIDs.value = next
 }
 
-function askOperation(action: 'process' | 'restore' | 'delete', file: FileRecord): void {
+async function askOperation(action: 'process' | 'restore' | 'delete', file: FileRecord): Promise<void> {
   openActionFileID.value = null
   selectedFile.value = file
   confirmAction.value = action
+  retryContext.value = null
+  if (action !== 'process') return
+  contextLoading.value = true
+  error.value = ''
+  try {
+    const value = await api.retryFileContext(file.id)
+    applyRetryContext(file.id, value)
+  } catch (caught) {
+    error.value = caught instanceof Error ? caught.message : String(caught)
+    closeConfirm()
+  } finally {
+    contextLoading.value = false
+  }
+}
+
+function applyRetryContext(fileID: number, value: RetryContext): void {
+  if (!selectedFile.value || selectedFile.value.id !== fileID || confirmAction.value !== 'process') return
+  retryContext.value = value
 }
 
 function closeConfirm(): void {
   confirmAction.value = null
   selectedFile.value = null
+  retryContext.value = null
 }
 
 async function confirmOperation(): Promise<void> {
-  if (operationPending.value || !selectedFile.value || !confirmAction.value) return
+  if (operationPending.value || !selectedFile.value || !confirmAction.value || (confirmAction.value === 'process' && !retryContext.value)) return
   const file = selectedFile.value
   const action = confirmAction.value
   closeConfirm()
@@ -272,16 +302,13 @@ function displayTimestamp(value: string): string {
   return formatServiceTimestamp(value, true) || t('filesEmptyValue')
 }
 
-watch(pageSize, () => {
+function resetPageOrClamp(currentPage = page.value): void {
   openActionFileID.value = null
-  if (page.value !== 1) page.value = 1
+  if (currentPage !== 1) page.value = 1
   else clampPage()
-})
-watch([complianceFilter, backupFilter, keyword], () => {
-  openActionFileID.value = null
-  if (page.value !== 1) page.value = 1
-  else clampPage()
-})
+}
+watch(pageSize, () => resetPageOrClamp())
+watch([complianceFilter, backupFilter, keyword], () => resetPageOrClamp())
 watch(
   () => eventStreamState.lastEvent,
   (event) => {
@@ -599,6 +626,7 @@ onBeforeUnmount(() => {
       :message="confirmMessage"
       :confirm-text="t('confirmConfirm')"
       :cancel-text="t('confirmCancel')"
+	  :confirm-disabled="contextLoading || (confirmAction === 'process' && !retryContext)"
       @confirm="confirmOperation"
       @cancel="closeConfirm"
     />

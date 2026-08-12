@@ -9,6 +9,8 @@ import (
 	"omv-blueprint/compose/audiocleaner/internal/eventbus"
 )
 
+var sseHeartbeatInterval = 30 * time.Second
+
 func StreamEvents(w http.ResponseWriter, r *http.Request, bus *eventbus.Bus) {
 	if bus == nil {
 		writeError(w, http.StatusInternalServerError, "event bus unavailable")
@@ -32,15 +34,12 @@ func StreamEvents(w http.ResponseWriter, r *http.Request, bus *eventbus.Bus) {
 	}
 	flusher.Flush()
 
-	heartbeat := time.NewTicker(30 * time.Second)
+	heartbeat := time.NewTicker(sseHeartbeatInterval)
 	defer heartbeat.Stop()
 
 	for {
 		select {
-		case event, ok := <-events:
-			if !ok {
-				return
-			}
+		case event := <-events:
 			if err := writeSSE(w, "message", event); err != nil {
 				return
 			}

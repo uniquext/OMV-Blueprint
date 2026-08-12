@@ -48,7 +48,7 @@ export function nextRefreshMode(previous: number | null, next: number): RefreshM
   return next === previous + 1 ? 'partial' : 'full'
 }
 
-function parseEventData(data: string): unknown {
+export function parseEventData(data: string): unknown {
   try {
     return JSON.parse(data)
   } catch {
@@ -56,7 +56,7 @@ function parseEventData(data: string): unknown {
   }
 }
 
-function asServerSentEvent(payload: unknown): ServerSentEvent | null {
+export function asServerSentEvent(payload: unknown): ServerSentEvent | null {
   if (!payload || typeof payload !== 'object') {
     return null
   }

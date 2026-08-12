@@ -24,6 +24,9 @@ import {
   loadAllJobPages
 } from '../lib/jobs'
 import { jobStatusTone, semanticBadgeClass } from '../lib/semantic'
+import { canRetryReplacementJob, failureCodeKey, qualityGateKey, qualityStatusKey } from '../lib/replacement'
+import { retryContextDetails } from '../lib/failureRecovery'
+import { failureAdviceKey, failureDiagnosticDetails } from '../lib/healthObservability'
 import { formatServiceTimestamp, serviceDatePart, serviceDurationMilliseconds } from '../lib/time'
 import type { HistoryRecord } from '../lib/types'
 
@@ -40,6 +43,7 @@ const operationPending = ref(false)
 const error = ref('')
 const pendingAction = ref<'retry' | 'ignore' | null>(null)
 const selectedJob = ref<HistoryRecord | null>(null)
+const retryContext = ref<Record<string, unknown> | null>(null)
 const resultFilter = ref<JobFilter>('all')
 const sourceFilter = ref<HistorySourceFilter>('all')
 const dateFrom = ref('')
@@ -79,8 +83,12 @@ const actionDialogTitle = computed(() =>
   pendingAction.value === 'retry' ? t('historyConfirmRetryTitle') : t('historyConfirmIgnoreTitle')
 )
 const actionDialogMessage = computed(() => {
-  const message = pendingAction.value === 'retry' ? t('historyConfirmRetryMessage') : t('historyConfirmIgnoreMessage')
-  return `${message} ${selectedJob.value?.path || ''}`
+	const message = pendingAction.value === 'retry' ? t('historyConfirmRetryMessage') : t('historyConfirmIgnoreMessage')
+	if (pendingAction.value !== 'retry' || !retryContext.value) return `${message} ${selectedJob.value?.path || ''}`
+	const details = retryContextDetails(retryContext.value, selectedJob.value?.final_error || '')
+	const changed = details.fileChanged ? t('historyRetryFileChanged') : t('historyRetryFileUnchanged')
+	const policy = details.policyChanged ? t('historyRetryPolicyChanged') : t('historyRetryPolicyUnchanged')
+	return `${selectedJob.value?.path || ''}\n${details.summary}\n${changed} · ${policy}\n${t('historyRetryBypassOnce')}`
 })
 const busy = computed(() => loading.value || operationPending.value)
 const historyRefreshEvents = new Set(['compatible', 'processed', 'failed', 'job.retry_queued', 'job.ignored'])
@@ -130,16 +138,29 @@ function scheduleHistoryLoad(): void {
 function askJobAction(action: 'retry' | 'ignore', job: HistoryRecord): void {
   openActionJobID.value = null
   pendingAction.value = action
-  selectedJob.value = job
+	selectedJob.value = job
+	retryContext.value = null
+	if (action === 'retry') {
+		void api.retryHistoryContext(job.id).then((value) => applyRetryContext(job.id, value)).catch((caught) => {
+			error.value = caught instanceof Error ? caught.message : String(caught)
+		})
+	}
+}
+
+function applyRetryContext(jobID: number, value: Record<string, unknown>): void {
+	if (!selectedJob.value || selectedJob.value.id !== jobID) return
+	retryContext.value = value
 }
 
 function closeActionDialog(): void {
   pendingAction.value = null
-  selectedJob.value = null
+	selectedJob.value = null
+	retryContext.value = null
 }
 
 async function confirmJobAction(): Promise<void> {
   if (operationPending.value || !pendingAction.value || !selectedJob.value) return
+	if (pendingAction.value === 'retry' && !retryContext.value) return
   const action = pendingAction.value
   const id = selectedJob.value.id
   closeActionDialog()
@@ -361,13 +382,26 @@ function jobDurationDisplay(job: HistoryRecord): string {
   return parts.join(' ')
 }
 
+function failureDisplay(job: HistoryRecord): string {
+	return t(failureCodeKey(job.failure_code))
+}
+
+function failureSummaryDisplay(job: HistoryRecord): string {
+	return failureDiagnosticDetails(job).summary || failureDisplay(job)
+}
+
+function failureAdviceDisplay(job: HistoryRecord): string {
+	return failureDiagnosticDetails(job).advice || t(failureAdviceKey(job.failure_code))
+}
+
 function openErrorDialog(job: HistoryRecord): void {
-  if (!job.final_error) {
-    return
-  }
-  selectedError.value = {
-    path: jobPath(job),
-    message: job.final_error
+	const diagnostic = failureDiagnosticDetails(job).diagnostic
+	if (!diagnostic) {
+		return
+	}
+	selectedError.value = {
+		path: jobPath(job),
+		message: diagnostic
   }
 }
 
@@ -384,22 +418,16 @@ function showDialog(element: HTMLDialogElement): void {
 }
 
 watch(page, clampPage)
-watch(pageSize, () => {
+function resetPageOrClamp(currentPage = page.value): void {
   openActionJobID.value = null
-  if (page.value !== 1) {
+  if (currentPage !== 1) {
     page.value = 1
     return
   }
   clampPage()
-})
-watch([resultFilter, sourceFilter, dateFrom, dateTo, keyword], () => {
-  openActionJobID.value = null
-  if (page.value !== 1) {
-    page.value = 1
-    return
-  }
-  clampPage()
-})
+}
+watch(pageSize, () => resetPageOrClamp())
+watch([resultFilter, sourceFilter, dateFrom, dateTo, keyword], () => resetPageOrClamp())
 watch(
   selectedError,
   (nextError) => {
@@ -649,7 +677,7 @@ onBeforeUnmount(() => {
                     role="menuitem"
                     type="button"
                     :data-testid="`history-retry-${job.id}`"
-                    :disabled="busy || job.result !== 'failed'"
+                    :disabled="busy || !canRetryReplacementJob(job)"
                     @click="askJobAction('retry', job)"
                   >
                     <RotateCcw :size="16" aria-hidden="true" />
@@ -702,14 +730,43 @@ onBeforeUnmount(() => {
                     <span class="history-detail-key">{{ t('historyDetailPath') }}:</span>
                     <span class="history-detail-value">{{ jobPath(job) }}</span>
                   </div>
-                  <div class="history-detail-field history-detail-field--wide">
-                    <span class="history-detail-key">{{ t('historyDetailFinalError') }}:</span>
-                    <span class="history-detail-value">
-                      <button v-if="job.final_error" class="history-error-link" type="button" @click="openErrorDialog(job)">
-                        {{ job.final_error }}
+				  <div class="history-detail-field history-detail-field--wide">
+					<span class="history-detail-key">{{ t('historyFailureTitle') }}:</span>
+					<span class="history-detail-value">{{ failureDisplay(job) }}</span>
+				  </div>
+				  <div class="history-detail-field history-detail-field--wide">
+					<span class="history-detail-key">{{ t('historyFailureSummary') }}:</span>
+					<span class="history-detail-value">{{ failureSummaryDisplay(job) }}</span>
+				  </div>
+				  <div class="history-detail-field history-detail-field--wide">
+					<span class="history-detail-key">{{ t('historyFailureAdvice') }}:</span>
+					<span class="history-detail-value">{{ failureAdviceDisplay(job) }}</span>
+				  </div>
+				  <div class="history-detail-field history-detail-field--wide">
+					<span class="history-detail-key">{{ t('historyDetailFinalError') }}:</span>
+					<span class="history-detail-value">
+					  <button v-if="job.final_error" class="history-error-link" type="button" @click="openErrorDialog(job)">
+						{{ t('historyViewDiagnostic') }}
                       </button>
                       <span v-else>{{ emptyValue }}</span>
                     </span>
+                  </div>
+                  <div v-if="job.quality_assessment" class="history-quality history-detail-field--wide">
+                    <div class="history-quality-heading">
+                      <span class="history-detail-key">{{ t('historyQualityTitle') }}:</span>
+                      <span :class="semanticBadgeClass(job.quality_assessment.passed ? 'success' : 'danger')">
+                        {{ t(job.quality_assessment.passed ? 'historyQualityPassed' : 'historyQualityFailed') }}
+                      </span>
+                    </div>
+                    <div class="history-quality-checks">
+                      <div v-for="check in job.quality_assessment.checks" :key="check.gate" class="history-quality-check">
+                        <span class="history-quality-gate">{{ t(qualityGateKey(check.gate)) }}</span>
+                        <span :class="semanticBadgeClass(check.status === 'passed' ? 'success' : check.status === 'failed' ? 'danger' : 'muted')">
+                          {{ t(qualityStatusKey(check.status)) }}
+                        </span>
+                        <span class="history-quality-detail">{{ check.detail }}</span>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </td>
@@ -733,6 +790,7 @@ onBeforeUnmount(() => {
       :message="actionDialogMessage"
       :confirm-text="t('confirmConfirm')"
       :cancel-text="t('confirmCancel')"
+	  :confirm-disabled="pendingAction === 'retry' && !retryContext"
       @confirm="confirmJobAction"
       @cancel="closeActionDialog"
     />

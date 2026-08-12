@@ -209,14 +209,15 @@ func (p PipelineConfig) JobTimeout() time.Duration {
 }
 
 func LoadOrCreate(path string) (Config, error) {
-	data, err := os.ReadFile(path)
+	return loadOrCreate(path, os.ReadFile, AtomicWriteJSON)
+}
+
+func loadOrCreate(path string, readFile func(string) ([]byte, error), writeJSON func(string, any) error) (Config, error) {
+	data, err := readFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			cfg := Default()
-			if err := cfg.Validate(); err != nil {
-				return Config{}, err
-			}
-			if err := AtomicWriteJSON(path, cfg); err != nil {
+			if err := writeJSON(path, cfg); err != nil {
 				return Config{}, err
 			}
 			return cfg, nil

@@ -10,13 +10,14 @@ import (
 type RuntimePhase string
 
 const (
-	RuntimeQueued      RuntimePhase = "queued"
-	RuntimeRetryWait   RuntimePhase = "retry_wait"
-	RuntimeChecking    RuntimePhase = "checking"
-	RuntimeTranscoding RuntimePhase = "transcoding"
-	RuntimeVerifying   RuntimePhase = "verifying"
-	RuntimeBackingUp   RuntimePhase = "backing_up"
-	RuntimeReplacing   RuntimePhase = "replacing"
+	RuntimeQueued       RuntimePhase = "queued"
+	RuntimeRetryWait    RuntimePhase = "retry_wait"
+	RuntimeCapacityWait RuntimePhase = "capacity_wait"
+	RuntimeChecking     RuntimePhase = "checking"
+	RuntimeTranscoding  RuntimePhase = "transcoding"
+	RuntimeVerifying    RuntimePhase = "verifying"
+	RuntimeBackingUp    RuntimePhase = "backing_up"
+	RuntimeReplacing    RuntimePhase = "replacing"
 )
 
 type JobSource string
@@ -36,9 +37,29 @@ type QueueJob struct {
 }
 
 type RuntimeTask struct {
-	Path   string       `json:"path"`
-	Source JobSource    `json:"source,omitempty"`
-	Phase  RuntimePhase `json:"phase"`
+	Path                 string       `json:"path"`
+	Source               JobSource    `json:"source,omitempty"`
+	Phase                RuntimePhase `json:"phase"`
+	StartedAt            time.Time    `json:"started_at"`
+	PhaseStartedAt       time.Time    `json:"phase_started_at"`
+	ElapsedSeconds       int64        `json:"elapsed_seconds"`
+	PhaseElapsedSeconds  int64        `json:"phase_elapsed_seconds"`
+	MediaPositionSeconds float64      `json:"media_position_seconds,omitempty"`
+	Speed                float64      `json:"speed,omitempty"`
+	OutputBytes          int64        `json:"output_bytes,omitempty"`
+	ETASeconds           float64      `json:"eta_seconds,omitempty"`
+	WaitReason           string       `json:"wait_reason,omitempty"`
+	UnlockCondition      string       `json:"unlock_condition,omitempty"`
+	LastProgressAt       time.Time    `json:"last_progress_at,omitempty"`
+	Stalled              bool         `json:"stalled"`
+}
+
+type RuntimeProgress struct {
+	PositionSeconds float64
+	Speed           float64
+	OutputBytes     int64
+	ETASeconds      float64
+	LastProgressAt  time.Time
 }
 
 type RuntimeTaskSnapshot struct {
@@ -67,14 +88,26 @@ type runtimeTask struct {
 }
 
 type Queue struct {
-	mu        sync.Mutex
-	jobs      []QueueJob
-	tasks     map[string]*runtimeTask
-	nextOrder uint64
+	mu         sync.Mutex
+	jobs       []QueueJob
+	tasks      map[string]*runtimeTask
+	nextOrder  uint64
+	now        func() time.Time
+	stallAfter time.Duration
 }
 
 func NewQueue() *Queue {
-	return &Queue{tasks: make(map[string]*runtimeTask)}
+	return newQueueWithClock(time.Now, 2*time.Minute)
+}
+
+func newQueueWithClock(now func() time.Time, stallAfter time.Duration) *Queue {
+	if now == nil {
+		now = time.Now
+	}
+	if stallAfter < 0 {
+		stallAfter = 0
+	}
+	return &Queue{tasks: make(map[string]*runtimeTask), now: now, stallAfter: stallAfter}
 }
 
 func (q *Queue) Enqueue(path string) bool {
@@ -100,8 +133,12 @@ func (q *Queue) enqueueLocked(path string, source JobSource, jobID int64) bool {
 	if _, exists := q.tasks[path]; exists {
 		return false
 	}
+	now := q.now()
 	task := &runtimeTask{
-		RuntimeTask:   RuntimeTask{Path: path, Source: source, Phase: RuntimeQueued},
+		RuntimeTask: RuntimeTask{
+			Path: path, Source: source, Phase: RuntimeQueued, StartedAt: now, PhaseStartedAt: now,
+			WaitReason: "等待可用处理槽位", UnlockCondition: "处理槽位可用",
+		},
 		queued:        true,
 		order:         q.nextTaskOrder(),
 		jobID:         jobID,
@@ -139,6 +176,9 @@ func (q *Queue) ClaimNext(cancel context.CancelFunc) (QueueJob, bool) {
 		task.active = true
 		task.cancel = cancel
 		task.Phase = RuntimeChecking
+		task.PhaseStartedAt = q.now()
+		task.WaitReason = ""
+		task.UnlockCondition = ""
 		task.order = q.nextTaskOrder()
 		return QueueJob{
 			Path:          task.Path,
@@ -165,11 +205,19 @@ func (q *Queue) BindJob(path string, jobID int64) bool {
 }
 
 func (q *Queue) ScheduleRetry(path string, delay time.Duration, lastError string, maxRetries int) bool {
+	return q.ScheduleRetryWithCondition(path, delay, delay, lastError, maxRetries, nil)
+}
+
+func (q *Queue) ScheduleRetryWithCondition(path string, delay, checkInterval time.Duration, lastError string, maxRetries int, condition func() bool) bool {
+	return q.ScheduleRetryWithObservation(path, delay, checkInterval, lastError, maxRetries, RuntimeRetryWait, lastError, "等待重试时间", condition)
+}
+
+func (q *Queue) ScheduleRetryWithObservation(path string, delay, checkInterval time.Duration, lastError string, maxRetries int, phase RuntimePhase, waitReason, unlockCondition string, condition func() bool) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	task, ok := q.tasks[path]
-	if !ok || !task.active || task.retryCount >= maxRetries {
+	if !ok || !task.active || task.retryCount >= maxRetries || (phase != RuntimeRetryWait && phase != RuntimeCapacityWait) {
 		return false
 	}
 	if task.retryTimer != nil {
@@ -178,7 +226,10 @@ func (q *Queue) ScheduleRetry(path string, delay time.Duration, lastError string
 	task.active = false
 	task.queued = false
 	task.cancel = nil
-	task.Phase = RuntimeRetryWait
+	task.Phase = phase
+	task.PhaseStartedAt = q.now()
+	task.WaitReason = waitReason
+	task.UnlockCondition = unlockCondition
 	task.retryCount++
 	task.attemptNumber = task.retryCount + 1
 	task.lastRetryError = lastError
@@ -186,21 +237,41 @@ func (q *Queue) ScheduleRetry(path string, delay time.Duration, lastError string
 	task.order = q.nextTaskOrder()
 	generation := task.retryGeneration
 	task.retryTimer = time.AfterFunc(delay, func() {
-		q.activateRetry(path, generation)
+		q.activateRetryWhen(path, generation, checkInterval, condition)
 	})
 	return true
+}
+
+func (q *Queue) activateRetryWhen(path string, generation uint64, checkInterval time.Duration, condition func() bool) {
+	if condition != nil && !condition() {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		task, ok := q.tasks[path]
+		if !ok || task.retryGeneration != generation || !isRetryWaitPhase(task.Phase) {
+			return
+		}
+		if checkInterval <= 0 {
+			checkInterval = time.Second
+		}
+		task.retryTimer = time.AfterFunc(checkInterval, func() { q.activateRetryWhen(path, generation, checkInterval, condition) })
+		return
+	}
+	q.activateRetry(path, generation)
 }
 
 func (q *Queue) activateRetry(path string, generation uint64) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	task, ok := q.tasks[path]
-	if !ok || task.retryGeneration != generation || task.Phase != RuntimeRetryWait {
+	if !ok || task.retryGeneration != generation || !isRetryWaitPhase(task.Phase) {
 		return
 	}
 	task.retryTimer = nil
 	task.queued = true
 	task.Phase = RuntimeQueued
+	task.PhaseStartedAt = q.now()
+	task.WaitReason = "等待可用处理槽位"
+	task.UnlockCondition = "处理槽位可用"
 	task.order = q.nextTaskOrder()
 	q.jobs = append(q.jobs, QueueJob{Path: task.Path, Source: task.Source})
 }
@@ -303,7 +374,32 @@ func (q *Queue) UpdatePhase(path string, phase RuntimePhase) {
 	if !ok || !task.active || !isActivePhase(phase) {
 		return
 	}
-	task.Phase = phase
+	if task.Phase != phase {
+		task.Phase = phase
+		task.PhaseStartedAt = q.now()
+	}
+	task.WaitReason = ""
+	task.UnlockCondition = ""
+}
+
+func (q *Queue) UpdateProgress(path string, progress RuntimeProgress) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	task, ok := q.tasks[path]
+	if !ok || !task.active {
+		return
+	}
+	if progress.PositionSeconds >= task.MediaPositionSeconds {
+		task.MediaPositionSeconds = progress.PositionSeconds
+		task.Speed = progress.Speed
+		task.ETASeconds = progress.ETASeconds
+	}
+	if progress.OutputBytes >= task.OutputBytes {
+		task.OutputBytes = progress.OutputBytes
+	}
+	if !progress.LastProgressAt.Before(task.LastProgressAt) {
+		task.LastProgressAt = progress.LastProgressAt
+	}
 }
 
 func (q *Queue) Snapshot() RuntimeTaskSnapshot {
@@ -316,8 +412,13 @@ func (q *Queue) Snapshot() RuntimeTaskSnapshot {
 	}
 	waiting := make([]orderedTask, 0)
 	active := make([]orderedTask, 0)
+	now := q.now()
 	for _, task := range q.tasks {
-		item := orderedTask{task: task.RuntimeTask, order: task.order}
+		snapshot := task.RuntimeTask
+		snapshot.ElapsedSeconds = elapsedSeconds(snapshot.StartedAt, now)
+		snapshot.PhaseElapsedSeconds = elapsedSeconds(snapshot.PhaseStartedAt, now)
+		snapshot.Stalled = task.active && snapshot.Phase == RuntimeTranscoding && q.stallAfter > 0 && !snapshot.LastProgressAt.IsZero() && now.Sub(snapshot.LastProgressAt) >= q.stallAfter
+		item := orderedTask{task: snapshot, order: task.order}
 		if task.active {
 			active = append(active, item)
 		} else {
@@ -338,6 +439,17 @@ func (q *Queue) Snapshot() RuntimeTaskSnapshot {
 		snapshot.Active[index] = item.task
 	}
 	return snapshot
+}
+
+func elapsedSeconds(start, now time.Time) int64 {
+	if start.IsZero() || now.Before(start) {
+		return 0
+	}
+	return int64(now.Sub(start) / time.Second)
+}
+
+func isRetryWaitPhase(phase RuntimePhase) bool {
+	return phase == RuntimeRetryWait || phase == RuntimeCapacityWait
 }
 
 func (q *Queue) CancelActive(includeCritical bool) {

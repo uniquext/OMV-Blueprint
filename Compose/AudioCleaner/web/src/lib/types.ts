@@ -107,9 +107,26 @@ export interface ScanConfig {
 export type JobStatus = 'compatible' | 'processing' | 'processed' | 'failed' | string
 export type DiscoverySource = 'scan' | 'watchdog' | 'manual' | string
 export type JobResult = 'processing' | 'compatible' | 'succeeded' | 'failed'
+export type QualityGate = 'structure' | 'video' | 'audio' | 'duration' | 'size' | string
+export type QualityStatus = 'passed' | 'failed' | 'not_run' | string
+
+export interface QualityCheck {
+  gate: QualityGate
+  status: QualityStatus
+  detail: string
+}
+
+export interface QualityAssessment {
+  schema_version: number
+  passed: boolean
+  checks: QualityCheck[]
+  evaluated_at: string
+}
+
 export type RuntimePhase =
   | 'queued'
   | 'retry_wait'
+  | 'capacity_wait'
   | 'checking'
   | 'transcoding'
   | 'verifying'
@@ -122,6 +139,15 @@ export interface HistoryRecord {
   trigger_source: DiscoverySource
   result: JobResult
   final_error: string
+  failure_code: string
+	parent_job_id: number
+	failure_stage: string
+	failure_category: string
+	failure_summary: string
+	failure_advice: string
+	retry_strategy: string
+	unlock_condition: string
+  quality_assessment?: QualityAssessment
   started_at: string
   finished_at: string
 }
@@ -129,6 +155,45 @@ export interface HistoryRecord {
 export interface RuntimeLogResponse {
   content: string
   lines: number
+}
+
+export interface FailureIssue {
+  id: number; file_id: number; path: string; origin_job_id: number
+  stage: string; category: string; code: string; summary: string; advice: string
+  retry_strategy: string; unlock_condition: string; next_retry_at?: string
+  file_size: number; file_mtime_ns: number; policy_version: number; occurrence_count: number
+	attempt_number: number; max_attempts: number
+  last_attempt_source: string; confirmed_at?: string; created_at: string; last_seen_at: string
+}
+
+export interface RecoveryAudit {
+  id: number; file_id: number; job_id: number; action: string; source: string; result: string; detail: string; created_at: string
+	original_job_id: number; original_failure_code: string; original_failure: string; actor: string
+}
+
+export interface RecoveryJournal {
+  job_id: number; file_id: number; original_path: string; temporary_backup_path: string; output_path: string; phase: string; last_error: string
+}
+
+export interface RecoveryItem {
+  file_id: number; path: string; issue?: FailureIssue; journal?: RecoveryJournal
+  backup_path: string; output_path: string; recommendation: string; risk: string
+	original_exists: boolean; backup_exists: boolean; output_exists: boolean
+  actions: Array<'restore' | 'retain' | 'delete' | 'retry'>; audit: RecoveryAudit[]
+}
+
+export interface RetryContext {
+  job_id: number
+  original_job_id: number
+  file_id: number
+  path: string
+  failure_code: string
+  final_error: string
+  issue?: FailureIssue | null
+  file_changed: boolean
+  policy_changed: boolean
+  source: 'manual_history' | 'manual_file' | 'recovery_center' | string
+  bypasses_suppression_once: boolean
 }
 
 export interface AudioTrackEvidence {
@@ -183,7 +248,11 @@ export interface FileRecord {
 }
 
 export interface ServiceStatus {
-  status: 'running' | 'restarting' | 'restart_failed' | string
+  status: 'normal' | 'degraded' | 'intake_stopped' | 'manual_recovery' | string
+  process_status: 'running' | 'restarting' | 'restart_failed' | string
+  health_reasons: HealthReason[]
+  capacity: CapacityStatus
+  intake_accepting: boolean
   counts: Record<string, number>
 	backup_usage_bytes: number
 	unresolved_backup_count: number
@@ -194,6 +263,41 @@ export interface RuntimeTask {
   path: string
   phase: RuntimePhase
   source?: DiscoverySource
+  started_at: string
+  phase_started_at: string
+  elapsed_seconds: number
+  phase_elapsed_seconds: number
+  media_position_seconds?: number
+  speed?: number
+  output_bytes?: number
+  eta_seconds?: number
+  wait_reason?: string
+  unlock_condition?: string
+  last_progress_at?: string
+  stalled: boolean
+}
+
+export interface HealthReason {
+  code: string
+  summary: string
+  affected_capability: string
+  advice: string
+}
+
+export interface VolumeCapacity {
+  capability: 'backup' | 'work' | 'media' | string
+  path: string
+  available_bytes: number
+  required_bytes: number
+  ready: boolean
+  code?: string
+  error?: string
+}
+
+export interface CapacityStatus {
+  ready: boolean
+  volumes: VolumeCapacity[]
+  blocking_reasons: HealthReason[]
 }
 
 export interface RuntimeTasksSnapshot {

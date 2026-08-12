@@ -15,6 +15,7 @@ const navigation = computed(() => [
   { to: '/', label: t('navDashboard'), icon: 'dashboard' },
   { to: '/files', label: t('navFiles'), icon: 'files' },
   { to: '/history', label: t('navHistory'), icon: 'history' },
+  { to: '/recovery', label: t('navRecovery'), icon: 'recovery' },
   { to: '/settings', label: t('navSettings'), icon: 'settings' },
   { to: '/logs', label: t('navLogs'), icon: 'logs' }
 ])
@@ -101,6 +102,9 @@ onMounted(() => {
 			<svg v-else-if="item.icon === 'files'" viewBox="0 0 24 24" fill="none">
 				<path d="M6 3h8l4 4v14H6V3Z" stroke="currentColor" stroke-width="2" />
 				<path d="M14 3v5h5M9 12h6M9 16h6" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+            </svg>
+            <svg v-else-if="item.icon === 'recovery'" viewBox="0 0 24 24" fill="none">
+              <path d="M5 8V4m0 0h4M5 4l3 3a7 7 0 1 1-2 8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
             </svg>
             <svg v-else-if="item.icon === 'settings'" viewBox="0 0 24 24" fill="none">
               <path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" stroke="currentColor" stroke-width="2" />

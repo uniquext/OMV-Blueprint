@@ -13,6 +13,13 @@ import (
 
 const mediaMountPath = "/media"
 
+var (
+	evalSymlinks = filepath.EvalSymlinks
+	lstatPath    = os.Lstat
+	statPath     = os.Stat
+	readDir      = os.ReadDir
+)
+
 type MediaDirectory struct {
 	Name        string `json:"name"`
 	Path        string `json:"path"`
@@ -54,13 +61,13 @@ func listMediaDirectories(ctx context.Context, mediaRoot, parent string) (MediaD
 		return MediaDirectoryListing{}, directoryError(http.StatusBadRequest, "directory_invalid", "parent must be /media or a normalized directory below it")
 	}
 
-	rootPath, err := filepath.EvalSymlinks(filepath.Clean(mediaRoot))
+	rootPath, err := evalSymlinks(filepath.Clean(mediaRoot))
 	if err != nil {
 		return MediaDirectoryListing{}, err
 	}
 	relative := strings.TrimPrefix(parent, mediaMountPath)
 	targetPath := filepath.Join(rootPath, filepath.FromSlash(strings.TrimPrefix(relative, "/")))
-	if _, err := os.Lstat(targetPath); err != nil {
+	if _, err := lstatPath(targetPath); err != nil {
 		if os.IsNotExist(err) {
 			return MediaDirectoryListing{}, directoryError(http.StatusNotFound, "directory_not_found", "directory does not exist")
 		}
@@ -69,7 +76,7 @@ func listMediaDirectories(ctx context.Context, mediaRoot, parent string) (MediaD
 		}
 		return MediaDirectoryListing{}, err
 	}
-	resolvedTarget, err := filepath.EvalSymlinks(targetPath)
+	resolvedTarget, err := evalSymlinks(targetPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return MediaDirectoryListing{}, directoryError(http.StatusNotFound, "directory_not_found", "directory does not exist")
@@ -82,7 +89,7 @@ func listMediaDirectories(ctx context.Context, mediaRoot, parent string) (MediaD
 	if !pathInsideRoot(resolvedTarget, rootPath) {
 		return MediaDirectoryListing{}, directoryError(http.StatusForbidden, "directory_forbidden", "directory resolves outside /media")
 	}
-	info, err := os.Stat(resolvedTarget)
+	info, err := statPath(resolvedTarget)
 	if err != nil {
 		return MediaDirectoryListing{}, err
 	}
@@ -90,7 +97,7 @@ func listMediaDirectories(ctx context.Context, mediaRoot, parent string) (MediaD
 		return MediaDirectoryListing{}, directoryError(http.StatusBadRequest, "directory_invalid", "parent is not a directory")
 	}
 
-	entries, err := os.ReadDir(resolvedTarget)
+	entries, err := readDir(resolvedTarget)
 	if err != nil {
 		if os.IsPermission(err) {
 			return MediaDirectoryListing{}, directoryError(http.StatusForbidden, "directory_forbidden", "directory is not readable")
@@ -124,16 +131,16 @@ func directoryError(status int, errorCode, message string) error {
 }
 
 func safeDirectoryPath(path, root string) (string, bool) {
-	resolved, err := filepath.EvalSymlinks(path)
+	resolved, err := evalSymlinks(path)
 	if err != nil || !pathInsideRoot(resolved, root) {
 		return "", false
 	}
-	info, err := os.Stat(resolved)
+	info, err := statPath(resolved)
 	return resolved, err == nil && info.IsDir()
 }
 
 func directoryHasChildren(ctx context.Context, path, root string) bool {
-	entries, err := os.ReadDir(path)
+	entries, err := readDir(path)
 	if err != nil {
 		return os.IsPermission(err)
 	}

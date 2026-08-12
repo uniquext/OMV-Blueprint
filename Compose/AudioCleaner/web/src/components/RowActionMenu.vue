@@ -21,9 +21,8 @@ const popoverStyle = ref<Record<string, string>>({})
 const positioned = ref(false)
 
 function updatePosition(): void {
-  const triggerElement = trigger.value
-  const popoverElement = popover.value
-  if (!triggerElement || !popoverElement) return
+  const triggerElement = trigger.value!
+  const popoverElement = popover.value!
 
   const rect = triggerElement.getBoundingClientRect()
   const edge = 8
@@ -40,8 +39,7 @@ function updatePosition(): void {
 }
 
 function handleDocumentPointerDown(event: PointerEvent): void {
-  const target = event.target
-  if (!(target instanceof Node)) return
+  const target = event.target as Node
   if (root.value?.contains(target) || popover.value?.contains(target)) return
   emit('close')
 }

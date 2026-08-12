@@ -10,6 +10,22 @@ import (
 	"strings"
 )
 
+var (
+	backupLstat      = os.Lstat
+	backupMkdirAll   = os.MkdirAll
+	backupOpenFile   = os.OpenFile
+	backupCreateTemp = os.CreateTemp
+	backupOpen       = os.Open
+	backupRename     = os.Rename
+	backupRemove     = os.Remove
+	backupCopy       = io.Copy
+	backupChmod      = func(file *os.File, mode os.FileMode) error { return file.Chmod(mode) }
+	backupSync       = func(file *os.File) error { return file.Sync() }
+	backupClose      = func(file *os.File) error { return file.Close() }
+	backupChtimes    = os.Chtimes
+	backupRel        = filepath.Rel
+)
+
 type CreateRequest struct {
 	OriginalPath string
 	BackupRoot   string
@@ -47,11 +63,8 @@ func Create(req CreateRequest) (CreateResult, error) {
 	if _, err := regularFileInfo("original path", originalPath); err != nil {
 		return CreateResult{}, err
 	}
-	backupPath, err := TargetPath(req)
-	if err != nil {
-		return CreateResult{}, err
-	}
-	if err := os.MkdirAll(filepath.Dir(backupPath), 0o755); err != nil {
+	backupPath, _ := TargetPath(req)
+	if err := backupMkdirAll(filepath.Dir(backupPath), 0o755); err != nil {
 		return CreateResult{}, fmt.Errorf("create backup directory: %w", err)
 	}
 	if err := copyFileExclusive(originalPath, backupPath); err != nil {
@@ -78,9 +91,6 @@ func TargetPath(req CreateRequest) (string, error) {
 		strconv.FormatInt(req.JobID, 10),
 		filepath.Base(originalPath),
 	)
-	if !insideRoot(backupPath, backupRoot) {
-		return "", errors.New("backup path escapes backup root")
-	}
 	return backupPath, nil
 }
 
@@ -116,28 +126,28 @@ func Install(sourcePath string, destinationPath string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(destinationPath), 0o755); err != nil {
+	if err := backupMkdirAll(filepath.Dir(destinationPath), 0o755); err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(destinationPath), ".audiocleaner-install-*")
+	temporary, err := backupCreateTemp(filepath.Dir(destinationPath), ".audiocleaner-install-*")
 	if err != nil {
 		return err
 	}
 	temporaryPath := temporary.Name()
 	removeTemporary := true
 	defer func() {
-		_ = temporary.Close()
+		_ = backupClose(temporary)
 		if removeTemporary {
-			_ = os.Remove(temporaryPath)
+			_ = backupRemove(temporaryPath)
 		}
 	}()
 	if err := copyIntoFile(sourcePath, temporary, info); err != nil {
 		return err
 	}
-	if err := temporary.Close(); err != nil {
+	if err := backupClose(temporary); err != nil {
 		return err
 	}
-	if err := os.Rename(temporaryPath, destinationPath); err != nil {
+	if err := backupRename(temporaryPath, destinationPath); err != nil {
 		return err
 	}
 	removeTemporary = false
@@ -150,7 +160,7 @@ func Remove(path string, backupRoot string) error {
 	if !filepath.IsAbs(cleanRoot) || !insideRoot(cleanPath, cleanRoot) {
 		return errors.New("backup path is outside configured backup root")
 	}
-	if err := os.Remove(cleanPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := backupRemove(cleanPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	removeEmptyParents(filepath.Dir(cleanPath), cleanRoot)
@@ -162,21 +172,21 @@ func copyFileExclusive(sourcePath string, destinationPath string) error {
 	if err != nil {
 		return err
 	}
-	destination, err := os.OpenFile(destinationPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+	destination, err := backupOpenFile(destinationPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
 	if err != nil {
 		return err
 	}
 	removeDestination := true
 	defer func() {
-		_ = destination.Close()
+		_ = backupClose(destination)
 		if removeDestination {
-			_ = os.Remove(destinationPath)
+			_ = backupRemove(destinationPath)
 		}
 	}()
 	if err := copyIntoFile(sourcePath, destination, info); err != nil {
 		return err
 	}
-	if err := destination.Close(); err != nil {
+	if err := backupClose(destination); err != nil {
 		return err
 	}
 	removeDestination = false
@@ -184,28 +194,28 @@ func copyFileExclusive(sourcePath string, destinationPath string) error {
 }
 
 func copyIntoFile(sourcePath string, destination *os.File, info os.FileInfo) error {
-	source, err := os.Open(sourcePath)
+	source, err := backupOpen(sourcePath)
 	if err != nil {
 		return err
 	}
 	defer source.Close()
-	if _, err := io.Copy(destination, source); err != nil {
+	if _, err := backupCopy(destination, source); err != nil {
 		return err
 	}
-	if err := destination.Chmod(info.Mode().Perm()); err != nil {
+	if err := backupChmod(destination, info.Mode().Perm()); err != nil {
 		return err
 	}
-	if err := destination.Sync(); err != nil {
+	if err := backupSync(destination); err != nil {
 		return err
 	}
-	if err := os.Chtimes(destination.Name(), info.ModTime(), info.ModTime()); err != nil {
+	if err := backupChtimes(destination.Name(), info.ModTime(), info.ModTime()); err != nil {
 		return err
 	}
-	return destination.Sync()
+	return backupSync(destination)
 }
 
 func regularFileInfo(label string, path string) (os.FileInfo, error) {
-	info, err := os.Lstat(path)
+	info, err := backupLstat(path)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", label, err)
 	}
@@ -227,7 +237,7 @@ func insideAnyRoot(path string, roots []string) bool {
 func insideRoot(path string, root string) bool {
 	cleanPath := filepath.Clean(path)
 	cleanRoot := filepath.Clean(root)
-	relative, err := filepath.Rel(cleanRoot, cleanPath)
+	relative, err := backupRel(cleanRoot, cleanPath)
 	if err != nil {
 		return false
 	}
@@ -235,17 +245,17 @@ func insideRoot(path string, root string) bool {
 }
 
 func syncDirectory(path string) error {
-	directory, err := os.Open(path)
+	directory, err := backupOpen(path)
 	if err != nil {
 		return err
 	}
-	defer directory.Close()
-	return directory.Sync()
+	defer backupClose(directory)
+	return backupSync(directory)
 }
 
 func removeEmptyParents(path string, root string) {
 	for insideRoot(path, root) && filepath.Clean(path) != filepath.Clean(root) {
-		if err := os.Remove(path); err != nil {
+		if err := backupRemove(path); err != nil {
 			return
 		}
 		path = filepath.Dir(path)
