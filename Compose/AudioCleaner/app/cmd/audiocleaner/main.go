@@ -11,17 +11,11 @@ import (
 	"omv-blueprint/compose/audiocleaner/internal/app"
 )
 
-var (
-	notifyContext = signal.NotifyContext
-	runApp        = app.Run
-	fatal         = log.Fatal
-)
-
 func main() {
-	ctx, stop := notifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := runApp(ctx, app.Options{}); err != nil && !errors.Is(err, context.Canceled) {
-		fatal(err)
+	if err := app.Run(ctx, app.Options{}); err != nil && !errors.Is(err, context.Canceled) {
+		log.Fatal(err)
 	}
 }

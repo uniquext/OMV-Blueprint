@@ -249,26 +249,11 @@ func buildRecoveryItems(files []repository.FileFacts, issues []repository.Failur
 			items[file.ID] = &RecoveryItem{FileID: file.ID, Path: file.Path, BackupPath: file.BackupFile, Recommendation: "恢复已验证的原始副本", Risk: "删除副本可能导致原始内容无法恢复", Actions: []string{"restore", "retain", "delete"}}
 		}
 	}
-	for i := range issues {
-		issue := issues[i]
-		item := items[issue.FileID]
-		if item == nil {
-			item = &RecoveryItem{FileID: issue.FileID, Path: issue.Path}
-			items[issue.FileID] = item
-		}
-		item.Issue = &issue
-		if issue.Category == "recovery" {
-			item.Recommendation = issue.Advice
-			item.Risk = "原路径状态不确定，禁止直接重试或删除"
-			item.Actions = []string{"restore", "retain"}
-		} else if len(item.Actions) == 0 {
-			item.Recommendation = issue.Advice
-			item.Risk = "未变化的永久问题会被自动扫描抑制"
-			item.Actions = []string{"retry", "retain"}
-		}
-	}
 	for i := range journals {
 		journal := journals[i]
+		if journal.TemporaryBackupPath == "" && journal.OutputPath == "" {
+			continue
+		}
 		item := items[journal.FileID]
 		if item == nil {
 			item = &RecoveryItem{FileID: journal.FileID, Path: journal.OriginalPath}
@@ -283,6 +268,19 @@ func buildRecoveryItems(files []repository.FileFacts, issues []repository.Failur
 			item.Actions = []string{"restore", "retain"}
 		}
 	}
+	for i := range issues {
+		issue := issues[i]
+		item := items[issue.FileID]
+		if item == nil {
+			continue
+		}
+		item.Issue = &issue
+		if issue.Category == string(failure.Recovery) {
+			item.Recommendation = issue.Advice
+			item.Risk = "原路径状态不确定，禁止直接重试或删除"
+			item.Actions = []string{"restore", "retain"}
+		}
+	}
 	return items
 }
 
@@ -291,8 +289,12 @@ func (s *Service) RetainRecovery(ctx context.Context, id int64) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, issueErr := s.db.ActiveFailureIssueByFile(ctx, id)
-	if file.BackupFile == "" && errors.Is(issueErr, sql.ErrNoRows) {
+	journal, journalErr := s.db.ReplacementJournalByFile(ctx, id)
+	if journalErr != nil && !errors.Is(journalErr, sql.ErrNoRows) {
+		return nil, journalErr
+	}
+	hasJournalCandidate := journalErr == nil && (journal.TemporaryBackupPath != "" || journal.OutputPath != "")
+	if file.BackupFile == "" && !hasJournalCandidate {
 		return nil, api.ErrFileNotProcessable
 	}
 	if err := s.db.AddRecoveryAudit(ctx, repository.RecoveryAudit{FileID: id, Action: "retain", Source: "recovery_center", Result: "retained", Detail: "candidates intentionally retained"}); err != nil {

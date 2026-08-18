@@ -9,7 +9,7 @@ import (
 	"omv-blueprint/compose/audiocleaner/internal/eventbus"
 )
 
-var sseHeartbeatInterval = 30 * time.Second
+const sseHeartbeatInterval = 30 * time.Second
 
 func StreamEvents(w http.ResponseWriter, r *http.Request, bus *eventbus.Bus) {
 	if bus == nil {

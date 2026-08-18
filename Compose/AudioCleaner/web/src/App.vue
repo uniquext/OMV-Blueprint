@@ -46,7 +46,7 @@ onMounted(() => {
           v-if="sidebarCollapsed"
           type="button"
           class="brand-icon brand-icon--button"
-          data-testid="brand-expand"
+          data-ui="brand-expand"
           aria-label="展开导航"
           title="展开导航"
           @click="sidebarCollapsed = false"
@@ -60,7 +60,7 @@ onMounted(() => {
           </svg>
         </button>
 
-        <div v-else class="brand-icon" data-testid="brand-icon" aria-label="AudioCleaner">
+        <div v-else class="brand-icon" data-ui="brand-icon" aria-label="AudioCleaner">
           <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path d="M4 14v-4" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" />
             <path d="M8 18V6" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" />
@@ -78,7 +78,7 @@ onMounted(() => {
           v-if="!sidebarCollapsed"
           type="button"
           class="sidebar-toggle"
-          data-testid="sidebar-toggle"
+          data-ui="sidebar-toggle"
           aria-label="折叠导航"
           title="折叠导航"
           @click="sidebarCollapsed = true"
@@ -119,7 +119,7 @@ onMounted(() => {
         </RouterLink>
       </nav>
 
-      <div class="sidebar-version" data-testid="sidebar-version">{{ t('sidebarFooter') }}</div>
+      <div class="sidebar-version" data-ui="sidebar-version">{{ t('sidebarFooter') }}</div>
     </aside>
 
     <main class="content-shell">

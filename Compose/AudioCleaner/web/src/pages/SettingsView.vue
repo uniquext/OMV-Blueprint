@@ -329,10 +329,10 @@ onBeforeUnmount(() => {
           <template v-if="activeModule === 'media'">
             <h2>Media</h2><p class="muted">{{ t('settingsMediaDescription') }}</p>
             <div class="settings-array-list">
-              <SettingsListEditor :label="t('settingsMediaRoots')" :hint="t('settingsMediaRootsHint')" test-id="media-roots" rule="media-root" :values="drafts.media.roots" :directory-loader="api.mediaDirectories" @update:values="drafts.media.roots = $event" />
-              <SettingsListEditor :label="t('settingsMediaExtensions')" :hint="t('settingsMediaExtensionsHint')" test-id="media-extensions" rule="extension" :values="drafts.media.extensions" @update:values="drafts.media.extensions = $event" />
-              <SettingsListEditor :label="t('settingsMediaExcludeDirs')" :hint="t('settingsMediaExcludeDirsHint')" test-id="media-exclude_dirs" rule="exclude-dir" :values="drafts.media.exclude_dirs" @update:values="drafts.media.exclude_dirs = $event" />
-              <SettingsListEditor :label="t('settingsMediaExcludePatterns')" :hint="t('settingsMediaExcludePatternsHint')" :help="t('settingsMediaExcludePatternsHelp')" test-id="media-exclude_patterns" rule="exclude-pattern" :values="drafts.media.exclude_patterns" @update:values="drafts.media.exclude_patterns = $event">
+              <SettingsListEditor :label="t('settingsMediaRoots')" :hint="t('settingsMediaRootsHint')" ui-id="media-roots" rule="media-root" :values="drafts.media.roots" :directory-loader="api.mediaDirectories" @update:values="drafts.media.roots = $event" />
+              <SettingsListEditor :label="t('settingsMediaExtensions')" :hint="t('settingsMediaExtensionsHint')" ui-id="media-extensions" rule="extension" :values="drafts.media.extensions" @update:values="drafts.media.extensions = $event" />
+              <SettingsListEditor :label="t('settingsMediaExcludeDirs')" :hint="t('settingsMediaExcludeDirsHint')" ui-id="media-exclude_dirs" rule="exclude-dir" :values="drafts.media.exclude_dirs" @update:values="drafts.media.exclude_dirs = $event" />
+              <SettingsListEditor :label="t('settingsMediaExcludePatterns')" :hint="t('settingsMediaExcludePatternsHint')" :help="t('settingsMediaExcludePatternsHelp')" ui-id="media-exclude_patterns" rule="exclude-pattern" :values="drafts.media.exclude_patterns" @update:values="drafts.media.exclude_patterns = $event">
                 <template #help>
                   <div class="settings-pattern-help">
                     <strong class="settings-pattern-help__summary">{{ t('settingsPatternHelpSummary') }}</strong>
@@ -357,13 +357,13 @@ onBeforeUnmount(() => {
           <template v-else-if="activeModule === 'audio'">
             <h2>Audio</h2><p class="muted">{{ t('settingsAudioDescription') }}</p>
             <div class="settings-array-list">
-              <div class="settings-array-summary settings-array-summary--readonly" data-testid="audio-version-summary-row">
+              <div class="settings-array-summary settings-array-summary--readonly" data-ui="audio-version-summary-row">
                 <span class="settings-array-summary__label">{{ t('settingsAudioVersion') }}</span>
                 <strong class="settings-array-summary__value">v{{ drafts.audio.version }}</strong>
                 <span class="settings-array-summary__count"></span>
                 <span class="settings-array-summary__readonly">{{ t('settingsReadonly') }}</span>
               </div>
-              <SettingsListEditor :label="t('settingsIncompatibleCodecs')" :hint="t('settingsIncompatibleCodecsHint')" test-id="audio-incompatible_codecs" rule="codec" :values="drafts.audio.incompatible_codecs" @update:values="drafts.audio.incompatible_codecs = $event" />
+              <SettingsListEditor :label="t('settingsIncompatibleCodecs')" :hint="t('settingsIncompatibleCodecsHint')" ui-id="audio-incompatible_codecs" rule="codec" :values="drafts.audio.incompatible_codecs" @update:values="drafts.audio.incompatible_codecs = $event" />
             </div>
           </template>
 
@@ -372,8 +372,8 @@ onBeforeUnmount(() => {
             <div class="settings-form-grid">
               <label v-for="field in pipelineFields" :key="field" class="field settings-field--inline">
                 <span>{{ t(`settingsField_${field}`) }}</span>
-                <span class="unit-input"><input v-model.number="drafts.pipeline[field]" type="number" :data-testid="`pipeline-${field}`" /><i>{{ t(`settingsUnit_${field}`) }}</i></span>
-                <span v-if="activeErrors[field]" :data-testid="`field-error-${field}`" class="field-error">{{ activeErrors[field] }}</span>
+                <span class="unit-input"><input v-model.number="drafts.pipeline[field]" type="number" :data-ui="`pipeline-${field}`" /><i>{{ t(`settingsUnit_${field}`) }}</i></span>
+                <span v-if="activeErrors[field]" :data-ui="`field-error-${field}`" class="field-error">{{ activeErrors[field] }}</span>
               </label>
             </div>
           </template>
@@ -383,7 +383,7 @@ onBeforeUnmount(() => {
             <div class="settings-form-grid">
               <label v-for="field in validationFields" :key="field" class="field settings-field--inline">
                 <span>{{ t(`settingsField_${field}`) }}</span>
-                <span class="unit-input"><input v-model.number="drafts.validation[field]" type="number" :step="field === 'max_size_ratio' ? 0.1 : 1" :data-testid="`validation-${field}`" /><i>{{ t(`settingsUnit_${field}`) }}</i></span>
+                <span class="unit-input"><input v-model.number="drafts.validation[field]" type="number" :step="field === 'max_size_ratio' ? 0.1 : 1" :data-ui="`validation-${field}`" /><i>{{ t(`settingsUnit_${field}`) }}</i></span>
                 <span v-if="activeErrors[field]" class="field-error">{{ activeErrors[field] }}</span>
               </label>
             </div>
@@ -394,15 +394,15 @@ onBeforeUnmount(() => {
             <div class="settings-scan-rows">
               <div class="settings-scan-row">
                 <div><strong>{{ t('settingsStartupScan') }}</strong><small>{{ t('settingsStartupScanHint') }}</small></div>
-                <label class="settings-toggle-control"><span>{{ drafts.scan.startup_scan_enabled ? t('settingsEnabled') : t('settingsDisabled') }}</span><input v-model="drafts.scan.startup_scan_enabled" data-testid="scan-startup_scan_enabled" type="checkbox" /><i aria-hidden="true"></i></label>
+                <label class="settings-toggle-control"><span>{{ drafts.scan.startup_scan_enabled ? t('settingsEnabled') : t('settingsDisabled') }}</span><input v-model="drafts.scan.startup_scan_enabled" data-ui="scan-startup_scan_enabled" type="checkbox" /><i aria-hidden="true"></i></label>
               </div>
               <div class="settings-scan-row">
                 <div><strong>{{ t('settingsWatchdog') }}</strong><small>{{ t('settingsWatchdogHint') }}</small></div>
-                <label class="settings-toggle-control"><span>{{ drafts.scan.watchdog_enabled ? t('settingsEnabled') : t('settingsDisabled') }}</span><input v-model="drafts.scan.watchdog_enabled" data-testid="scan-watchdog_enabled" type="checkbox" /><i aria-hidden="true"></i></label>
+                <label class="settings-toggle-control"><span>{{ drafts.scan.watchdog_enabled ? t('settingsEnabled') : t('settingsDisabled') }}</span><input v-model="drafts.scan.watchdog_enabled" data-ui="scan-watchdog_enabled" type="checkbox" /><i aria-hidden="true"></i></label>
               </div>
               <label class="settings-scan-row">
                 <div><strong>{{ t('settingsReconciliation') }}</strong><small>{{ t('settingsReconciliationHint') }}</small></div>
-                <div class="settings-scan-number"><span class="unit-input"><input v-model.number="drafts.scan.reconciliation_interval_minutes" data-testid="scan-reconciliation_interval_minutes" type="number" min="1" max="10080" /><i>{{ t('settingsMinutes') }}</i></span><span v-if="activeErrors.reconciliation_interval_minutes" class="field-error">{{ activeErrors.reconciliation_interval_minutes }}</span></div>
+                <div class="settings-scan-number"><span class="unit-input"><input v-model.number="drafts.scan.reconciliation_interval_minutes" data-ui="scan-reconciliation_interval_minutes" type="number" min="1" max="10080" /><i>{{ t('settingsMinutes') }}</i></span><span v-if="activeErrors.reconciliation_interval_minutes" class="field-error">{{ activeErrors.reconciliation_interval_minutes }}</span></div>
               </label>
               <div class="settings-scan-row">
                 <div><strong>{{ t('settingsUniquePathRule') }}</strong><small>{{ t('settingsUniquePathRuleHint') }}</small></div><span class="settings-enforced">{{ t('settingsAlwaysEnabled') }}</span>
@@ -417,10 +417,10 @@ onBeforeUnmount(() => {
             <h2>UI</h2><p class="muted">{{ t('settingsUIDescription') }}</p>
             <div class="field settings-field--inline settings-language">
               <span id="settings-language-label">{{ t('settingsLanguage') }}</span>
-              <button type="button" class="settings-language__trigger" data-testid="language-trigger" aria-haspopup="listbox" :aria-expanded="languageOpen" aria-controls="settings-language-options" @click.stop="languageOpen = !languageOpen">
+              <button type="button" class="settings-language__trigger" data-ui="language-trigger" aria-haspopup="listbox" :aria-expanded="languageOpen" aria-controls="settings-language-options" @click.stop="languageOpen = !languageOpen">
                 <span>{{ drafts.ui.language === 'zh-CN' ? '简体中文' : 'English' }}</span><ChevronDown aria-hidden="true" />
               </button>
-              <div v-show="languageOpen" id="settings-language-options" class="settings-language__options" data-testid="language-options" role="listbox" aria-labelledby="settings-language-label">
+              <div v-show="languageOpen" id="settings-language-options" class="settings-language__options" data-ui="language-options" role="listbox" aria-labelledby="settings-language-label">
                 <button type="button" role="option" data-language="zh-CN" :aria-selected="drafts.ui.language === 'zh-CN'" @click="selectLanguage('zh-CN')">简体中文</button>
                 <button type="button" role="option" data-language="en-US" :aria-selected="drafts.ui.language === 'en-US'" @click="selectLanguage('en-US')">English</button>
               </div>
@@ -430,24 +430,24 @@ onBeforeUnmount(() => {
       </section>
 
       <div class="settings-actionbar">
-        <div class="settings-actionbar__status" data-testid="settings-status" :data-status="moduleStatus(activeModule)"><strong>{{ moduleLabel(activeModule) }}</strong><span>{{ statusText }}</span></div>
+        <div class="settings-actionbar__status" data-ui="settings-status" :data-status="moduleStatus(activeModule)"><strong>{{ moduleLabel(activeModule) }}</strong><span>{{ statusText }}</span></div>
         <div class="settings-actionbar__actions">
-          <button v-if="moduleStatus(activeModule) === 'conflict' && conflicts[activeModule]" type="button" class="button" data-testid="settings-load-conflict" @click="loadConflictBaseline">{{ t('settingsLoadServerBaseline') }}</button>
-          <button type="button" class="button" data-testid="settings-discard" :disabled="!isDirty(activeModule)" @click="discard"><X aria-hidden="true" />{{ t('settingsDiscard') }}</button>
+          <button v-if="moduleStatus(activeModule) === 'conflict' && conflicts[activeModule]" type="button" class="button" data-ui="settings-load-conflict" @click="loadConflictBaseline">{{ t('settingsLoadServerBaseline') }}</button>
+          <button type="button" class="button" data-ui="settings-discard" :disabled="!isDirty(activeModule)" @click="discard"><X aria-hidden="true" />{{ t('settingsDiscard') }}</button>
           <button type="button" class="button" @click="restoreDefault"><RotateCcw aria-hidden="true" />{{ t('settingsRestoreDefault') }}</button>
-          <button type="button" class="button primary" data-testid="settings-save" :disabled="!canSave" @click="requestSave"><Save aria-hidden="true" />{{ saveText }}</button>
+          <button type="button" class="button primary" data-ui="settings-save" :disabled="!canSave" @click="requestSave"><Save aria-hidden="true" />{{ saveText }}</button>
         </div>
       </div>
     </template>
 
     <div v-if="confirmOpen" class="settings-confirm-overlay" role="presentation">
-      <section class="settings-confirm" data-testid="settings-confirm" role="dialog" aria-modal="true" :aria-label="t('settingsConfirmTitle')">
+      <section class="settings-confirm" data-ui="settings-confirm" role="dialog" aria-modal="true" :aria-label="t('settingsConfirmTitle')">
         <h2>{{ t('settingsConfirmTitle') }} · {{ moduleLabel(activeModule) }}</h2>
         <p>{{ t('settingsConfirmSummary').replace('{count}', String(changedFields.length)) }}</p>
         <ul><li v-for="field in changedFields" :key="field"><code>{{ field }}</code></li></ul>
         <div class="settings-confirm__mode"><span>{{ t('settingsApplyMode') }}</span><code>{{ activeApplyMode }}</code></div>
         <p v-if="activeApplyMode === 'service_restart'" class="settings-confirm__warning">{{ t('settingsRestartWarning') }}</p>
-        <div class="settings-confirm__actions"><button type="button" class="button" @click="confirmOpen = false">{{ t('confirmCancel') }}</button><button type="button" class="button primary" data-testid="settings-confirm-submit" @click="confirmSave">{{ saveText }}</button></div>
+        <div class="settings-confirm__actions"><button type="button" class="button" @click="confirmOpen = false">{{ t('confirmCancel') }}</button><button type="button" class="button primary" data-ui="settings-confirm-submit" @click="confirmSave">{{ saveText }}</button></div>
       </section>
     </div>
   </div>

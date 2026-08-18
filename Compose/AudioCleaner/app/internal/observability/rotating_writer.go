@@ -3,7 +3,6 @@ package observability
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,51 +16,21 @@ type RotatingFileWriter struct {
 	maxBytes   int64
 	maxBackups int
 	maxAge     time.Duration
-	file       rotatingFile
+	file       *os.File
 	size       int64
 	modifiedAt time.Time
 	closed     bool
-	ops        rotatingFileOps
-	now        func() time.Time
-}
-
-type rotatingFile interface {
-	io.Writer
-	Close() error
-	Stat() (os.FileInfo, error)
-}
-
-type rotatingFileOps struct {
-	mkdirAll func(string, os.FileMode) error
-	openFile func(string, int, os.FileMode) (rotatingFile, error)
-	remove   func(string) error
-	rename   func(string, string) error
-	stat     func(string) (os.FileInfo, error)
-}
-
-var osRotatingFileOps = rotatingFileOps{
-	mkdirAll: os.MkdirAll,
-	openFile: func(path string, flag int, mode os.FileMode) (rotatingFile, error) {
-		return os.OpenFile(path, flag, mode)
-	},
-	remove: os.Remove,
-	rename: os.Rename,
-	stat:   os.Stat,
 }
 
 func NewRotatingFileWriter(path string, maxBytes int64, maxBackups int) (*RotatingFileWriter, error) {
-	return newRotatingFileWriter(path, maxBytes, maxBackups, osRotatingFileOps)
+	return newRotatingFileWriterWithAge(path, maxBytes, maxBackups, 0)
 }
 
 func NewRotatingFileWriterWithAge(path string, maxBytes int64, maxBackups int, maxAge time.Duration) (*RotatingFileWriter, error) {
-	return newRotatingFileWriterWithAge(path, maxBytes, maxBackups, maxAge, time.Now, osRotatingFileOps)
+	return newRotatingFileWriterWithAge(path, maxBytes, maxBackups, maxAge)
 }
 
-func newRotatingFileWriter(path string, maxBytes int64, maxBackups int, ops rotatingFileOps) (*RotatingFileWriter, error) {
-	return newRotatingFileWriterWithAge(path, maxBytes, maxBackups, 0, time.Now, ops)
-}
-
-func newRotatingFileWriterWithAge(path string, maxBytes int64, maxBackups int, maxAge time.Duration, now func() time.Time, ops rotatingFileOps) (*RotatingFileWriter, error) {
+func newRotatingFileWriterWithAge(path string, maxBytes int64, maxBackups int, maxAge time.Duration) (*RotatingFileWriter, error) {
 	if path == "" {
 		return nil, errors.New("log path is required")
 	}
@@ -74,19 +43,16 @@ func newRotatingFileWriterWithAge(path string, maxBytes int64, maxBackups int, m
 	if maxAge < 0 {
 		return nil, errors.New("log max age must not be negative")
 	}
-	if now == nil {
-		now = time.Now
-	}
-	if err := ops.mkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	file, size, modifiedAt, err := openAppendFile(path, ops.openFile)
+	file, size, modifiedAt, err := openAppendFile(path)
 	if err != nil {
 		return nil, err
 	}
 	writer := &RotatingFileWriter{
 		path: path, maxBytes: maxBytes, maxBackups: maxBackups, maxAge: maxAge,
-		file: file, size: size, modifiedAt: modifiedAt, ops: ops, now: now,
+		file: file, size: size, modifiedAt: modifiedAt,
 	}
 	if writer.size > 0 && writer.expired(writer.modifiedAt) {
 		if err := writer.rotate(); err != nil {
@@ -139,26 +105,26 @@ func (w *RotatingFileWriter) rotate() error {
 		return err
 	}
 	if w.maxBackups == 0 {
-		if err := w.ops.remove(w.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := os.Remove(w.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	} else {
 		oldest := rotatedPath(w.path, w.maxBackups)
-		if err := w.ops.remove(oldest); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := os.Remove(oldest); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		for index := w.maxBackups - 1; index >= 1; index-- {
 			from := rotatedPath(w.path, index)
 			to := rotatedPath(w.path, index+1)
-			if err := w.ops.rename(from, to); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := os.Rename(from, to); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
 		}
-		if err := w.ops.rename(w.path, rotatedPath(w.path, 1)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := os.Rename(w.path, rotatedPath(w.path, 1)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
-	file, size, modifiedAt, err := openAppendFile(w.path, w.ops.openFile)
+	file, size, modifiedAt, err := openAppendFile(w.path)
 	if err != nil {
 		return err
 	}
@@ -169,7 +135,7 @@ func (w *RotatingFileWriter) rotate() error {
 }
 
 func (w *RotatingFileWriter) expired(modifiedAt time.Time) bool {
-	return w.maxAge > 0 && !modifiedAt.IsZero() && !modifiedAt.Add(w.maxAge).After(w.now())
+	return w.maxAge > 0 && !modifiedAt.IsZero() && !modifiedAt.Add(w.maxAge).After(time.Now())
 }
 
 func (w *RotatingFileWriter) pruneExpiredBackups() error {
@@ -178,7 +144,7 @@ func (w *RotatingFileWriter) pruneExpiredBackups() error {
 	}
 	for index := 1; index <= w.maxBackups; index++ {
 		path := rotatedPath(w.path, index)
-		info, err := w.ops.stat(path)
+		info, err := os.Stat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -186,7 +152,7 @@ func (w *RotatingFileWriter) pruneExpiredBackups() error {
 			return err
 		}
 		if w.expired(info.ModTime()) {
-			if err := w.ops.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
 		}
@@ -194,8 +160,8 @@ func (w *RotatingFileWriter) pruneExpiredBackups() error {
 	return nil
 }
 
-func openAppendFile(path string, openFile func(string, int, os.FileMode) (rotatingFile, error)) (rotatingFile, int64, time.Time, error) {
-	file, err := openFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+func openAppendFile(path string) (*os.File, int64, time.Time, error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, 0, time.Time{}, err
 	}

@@ -51,6 +51,16 @@ type AudioPlanEvidence struct {
 	Bitrate     string      `json:"bitrate,omitempty"`
 }
 
+type ProcessingEvidence struct {
+	PolicyVersion int                  `json:"policy_version"`
+	AudioTracks   []AudioTrackEvidence `json:"audio_tracks"`
+	MatchedRules  []RuleMatch          `json:"matched_rules"`
+	Action        media.Action         `json:"action"`
+	AudioPlans    []AudioPlanEvidence  `json:"audio_plans"`
+	Reason        string               `json:"reason"`
+	AssessedAt    time.Time            `json:"assessed_at"`
+}
+
 type Assessment struct {
 	SchemaVersion            int                  `json:"schema_version"`
 	Source                   Source               `json:"source"`
@@ -63,6 +73,31 @@ type Assessment struct {
 	Reason                   string               `json:"reason"`
 	AssessedAt               time.Time            `json:"assessed_at"`
 	ReusedAt                 time.Time            `json:"reused_at,omitempty"`
+	LastProcessing           *ProcessingEvidence  `json:"last_processing,omitempty"`
+}
+
+func ProcessingEvidenceFrom(assessment Assessment) *ProcessingEvidence {
+	if assessment.Action != media.ActionTranscode {
+		return nil
+	}
+	return &ProcessingEvidence{
+		PolicyVersion: assessment.PolicyVersion,
+		AudioTracks:   append([]AudioTrackEvidence(nil), assessment.AudioTracks...),
+		MatchedRules:  cloneRuleMatches(assessment.MatchedRules),
+		Action:        assessment.Action,
+		AudioPlans:    append([]AudioPlanEvidence(nil), assessment.AudioPlans...),
+		Reason:        assessment.Reason,
+		AssessedAt:    assessment.AssessedAt,
+	}
+}
+
+func cloneRuleMatches(matches []RuleMatch) []RuleMatch {
+	cloned := make([]RuleMatch, len(matches))
+	for index, match := range matches {
+		cloned[index] = match
+		cloned[index].StreamIndexes = append([]int(nil), match.StreamIndexes...)
+	}
+	return cloned
 }
 
 func BuildAssessment(probe media.ProbeData, decision media.Decision, policy Policy, assessedAt time.Time) Assessment {
@@ -252,4 +287,29 @@ func symmetricDifference(left, right []string) []string {
 	}
 	sort.Strings(difference)
 	return difference
+}
+
+func PolicyFingerprint(tracks []AudioTrackEvidence, incompatibleCodecs []string) string {
+	rules := make(map[string]struct{})
+	for _, codec := range normalizeCodecs(incompatibleCodecs) {
+		rules[codec] = struct{}{}
+	}
+	codecs := make(map[string]struct{})
+	for _, track := range tracks {
+		codec := strings.ToLower(strings.TrimSpace(track.Codec))
+		if codec != "" {
+			codecs[codec] = struct{}{}
+		}
+	}
+	ordered := make([]string, 0, len(codecs))
+	for codec := range codecs {
+		ordered = append(ordered, codec)
+	}
+	sort.Strings(ordered)
+	parts := make([]string, 0, len(ordered))
+	for _, codec := range ordered {
+		_, affected := rules[codec]
+		parts = append(parts, fmt.Sprintf("%s=%t", codec, affected))
+	}
+	return strings.Join(parts, ",")
 }

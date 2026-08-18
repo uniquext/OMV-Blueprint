@@ -668,7 +668,7 @@ onBeforeUnmount(() => {
                   :open="openActionJobID === jobID(job)"
                   :label="t('rowActionsMore')"
                   :width="108"
-                  :test-id="`history-actions-${job.id}`"
+                  :ui-id="`history-actions-${job.id}`"
                   @toggle="toggleActionMenu(job)"
                   @close="openActionJobID = null"
                 >
@@ -676,7 +676,7 @@ onBeforeUnmount(() => {
                     class="row-action-item"
                     role="menuitem"
                     type="button"
-                    :data-testid="`history-retry-${job.id}`"
+                    :data-ui="`history-retry-${job.id}`"
                     :disabled="busy || !canRetryReplacementJob(job)"
                     @click="askJobAction('retry', job)"
                   >
@@ -687,7 +687,7 @@ onBeforeUnmount(() => {
                     class="row-action-item row-action-item--danger"
                     role="menuitem"
                     type="button"
-                    :data-testid="`history-ignore-${job.id}`"
+                    :data-ui="`history-ignore-${job.id}`"
                     :disabled="busy || job.result !== 'failed'"
                     @click="askJobAction('ignore', job)"
                   >

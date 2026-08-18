@@ -22,9 +22,17 @@ type Evidence struct {
 func (e Evidence) Matches(other Evidence) bool {
 	return e.complete() && other.complete() &&
 		e.Size == other.Size &&
-		e.MTimeNS == other.MTimeNS &&
+		matchesObservedMTime(e.MTimeNS, other.MTimeNS) &&
 		e.AudioSignature == other.AudioSignature &&
 		e.VideoSignature == other.VideoSignature
+}
+
+func matchesObservedMTime(expected, observed int64) bool {
+	if expected == observed {
+		return true
+	}
+	const second = int64(1_000_000_000)
+	return observed%second == 0 && expected/second == observed/second
 }
 
 func (e Evidence) complete() bool {

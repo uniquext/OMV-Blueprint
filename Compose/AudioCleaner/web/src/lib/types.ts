@@ -228,7 +228,18 @@ export interface CompatibilityAssessment {
   audio_plans: AudioPlanEvidence[]
   reason: string
   assessed_at: string
-  reused_at?: string
+	reused_at?: string
+	last_processing?: ProcessingEvidence
+}
+
+export interface ProcessingEvidence {
+	policy_version: number
+	audio_tracks: AudioTrackEvidence[]
+	matched_rules: RuleMatch[]
+	action: 'transcode' | string
+	audio_plans: AudioPlanEvidence[]
+	reason: string
+	assessed_at: string
 }
 
 export interface FileRecord {

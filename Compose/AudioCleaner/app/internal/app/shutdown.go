@@ -14,11 +14,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 
 	var shutdownErr error
 	if s.server != nil {
-		shutdownServer := s.shutdownServer
-		if shutdownServer == nil {
-			shutdownServer = s.server.Shutdown
-		}
-		if err := shutdownServer(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := s.server.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			shutdownErr = err
 		}
 	}
@@ -54,18 +50,14 @@ cancelWorkers:
 		}
 	}
 
-	closeRepository := s.closeRepository
-	if closeRepository == nil {
-		closeRepository = s.db.Close
-	}
-	if err := closeRepository(); err != nil && shutdownErr == nil {
+	if err := s.db.Close(); err != nil && shutdownErr == nil {
 		shutdownErr = err
 	}
-	if s.logCloser != nil {
-		if err := s.logCloser(); err != nil && shutdownErr == nil {
+	if s.logSink != nil {
+		if err := s.logSink.Close(); err != nil && shutdownErr == nil {
 			shutdownErr = err
 		}
-		s.logCloser = nil
+		s.logSink = nil
 	}
 	return shutdownErr
 }

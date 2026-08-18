@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"omv-blueprint/compose/audiocleaner/internal/backup"
@@ -24,11 +25,6 @@ import (
 
 var errSourceChangedDuringProbe = errors.New("source file changed during compatibility probe")
 var ErrCapacityBlocked = errors.New("capacity gate blocked new transcode")
-
-var (
-	workerMkdirAll  = os.MkdirAll
-	workerMkdirTemp = os.MkdirTemp
-)
 
 type FailureCause string
 
@@ -55,8 +51,11 @@ type CommandRunner interface {
 type ExecRunner struct{}
 
 func (ExecRunner) Run(ctx context.Context, name string, args []string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
-	return cmd.Run()
+	cmd := newProcessGroupCommand(name, args...)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return waitForCommand(ctx, cmd)
 }
 
 type ProgressCommandRunner interface {
@@ -64,20 +63,32 @@ type ProgressCommandRunner interface {
 }
 
 func (ExecRunner) RunWithProgress(ctx context.Context, name string, args []string, accept func(string)) error {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := newProcessGroupCommand(name, args...)
 	stdout, _ := cmd.StdoutPipe()
 	stderr := &boundedWriter{max: MaxDiagnosticBytes}
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		if accept != nil {
-			accept(scanner.Text())
+	scanDone := make(chan error, 1)
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			if accept != nil {
+				accept(scanner.Text())
+			}
 		}
+		scanDone <- scanner.Err()
+	}()
+	var scanErr error
+	select {
+	case scanErr = <-scanDone:
+	case <-ctx.Done():
+		terminateProcessGroup(cmd.Process.Pid)
+		scanErr = <-scanDone
+		_ = cmd.Wait()
+		return ctx.Err()
 	}
-	scanErr := scanner.Err()
 	waitErr := cmd.Wait()
 	if scanErr != nil {
 		return fmt.Errorf("read ffmpeg progress: %w", scanErr)
@@ -86,6 +97,31 @@ func (ExecRunner) RunWithProgress(ctx context.Context, name string, args []strin
 		return fmt.Errorf("%w: %s", waitErr, stderr.String())
 	}
 	return waitErr
+}
+
+func newProcessGroupCommand(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	return cmd
+}
+
+func waitForCommand(ctx context.Context, cmd *exec.Cmd) error {
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		terminateProcessGroup(cmd.Process.Pid)
+		<-done
+		return ctx.Err()
+	}
+}
+
+func terminateProcessGroup(pid int) {
+	if pid > 0 {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+	}
 }
 
 type boundedWriter struct {
@@ -355,7 +391,7 @@ func (w *Worker) ProcessAttempt(ctx context.Context, task QueueJob) (AttemptResu
 	if err := w.processFile(jobCtx, ctx, &result, task.AttemptNumber); err != nil {
 		cause := causeForFailure(err)
 		var postReplaceErr postReplacePersistenceError
-		result.Retryable = cause != CauseSourceChanged && !errors.As(err, &postReplaceErr)
+		result.Retryable = !errors.As(err, &postReplaceErr)
 		result.LastError = err.Error()
 		result.FinalError = formatFinalError(cause, err)
 		result.FailureOutcome = outcomeForCause(cause)
@@ -557,8 +593,8 @@ func (w *Worker) processFile(jobCtx context.Context, persistCtx context.Context,
 		return failure(errors.New("backup signature differs from probed source"), CauseVerificationFailed)
 	}
 	if err := w.repository.MarkReplacementBackupReady(
-		persistCtx, jobID, backupStat.Size(), backupStat.ModTime().UnixNano(),
-		backupProbe.AudioSignature(), backupProbe.VideoSignature(),
+		persistCtx, jobID, originalStat.Size, originalStat.MTimeNS,
+		originalProbe.AudioSignature(), originalProbe.VideoSignature(),
 	); err != nil {
 		return err
 	}
@@ -649,6 +685,9 @@ func (w *Worker) processFile(jobCtx context.Context, persistCtx context.Context,
 	finalAssessment := compatibility.BuildAssessment(finalProbe, finalDecision, compatibility.Policy{
 		Version: finalValidationConfig.Audio.Version, IncompatibleCodecs: finalValidationConfig.Audio.IncompatibleCodecs,
 	}, time.Now())
+	if file.CompatibilityAssessment != nil {
+		finalAssessment.LastProcessing = compatibility.ProcessingEvidenceFrom(*file.CompatibilityAssessment)
+	}
 	file.CompatibilityAssessment = &finalAssessment
 	result.FinalFile = file
 	if err := w.completeProcessJob(criticalCtx, result, repository.JobResultSucceeded, ""); err != nil {
@@ -754,6 +793,10 @@ func (w *Worker) handleInstalledFailure(
 	if err := w.completeProcessJob(recoveryCtx, result, repository.JobResultFailed, finalError); err != nil {
 		return postReplacePersistenceError{err: fmt.Errorf("persist unresolved backup %s: %w", backupPath, err)}
 	}
+	result.Retryable = false
+	result.LastError = finalError
+	result.FinalError = finalError
+	result.FailureOutcome = "restore_failed"
 	w.publish(recoveryCtx, WorkerEvent{
 		FileID: file.ID, Path: file.Path, Kind: "status_change", Code: "file.backup_created",
 		Status: "blocked", Outcome: "restore_failed", Attempt: attempt, Error: finalError,
@@ -974,10 +1017,10 @@ func (a defaultTempAllocator) Allocate(path string) (string, error) {
 	if workRoot == "" {
 		workRoot = "/app/work"
 	}
-	if err := workerMkdirAll(workRoot, 0o755); err != nil {
+	if err := os.MkdirAll(workRoot, 0o755); err != nil {
 		return "", err
 	}
-	jobDir, err := workerMkdirTemp(workRoot, "job-")
+	jobDir, err := os.MkdirTemp(workRoot, "job-")
 	if err != nil {
 		return "", err
 	}

@@ -22,10 +22,6 @@ type ScanCallbacks struct {
 	OnError     func(path string, err error)
 }
 
-var readDirEntryInfo = func(entry fs.DirEntry) (fs.FileInfo, error) {
-	return entry.Info()
-}
-
 // StreamScan walks configured roots once and reports candidates immediately.
 // Per-path filesystem errors are reported and skipped so one unreadable branch
 // does not hide the rest of a media library.
@@ -70,7 +66,7 @@ func StreamScan(ctx context.Context, cfg ScanConfig, callbacks ScanCallbacks) er
 			if IsPathExcluded(path, cfg.ExcludeDirs, cfg.ExcludePatterns) || IsAudioCleanerTempOutputPath(entry.Name()) {
 				return nil
 			}
-			info, err := readDirEntryInfo(entry)
+			info, err := entry.Info()
 			if err != nil {
 				if callbacks.OnError != nil {
 					callbacks.OnError(path, err)
@@ -120,7 +116,7 @@ func ScanRoots(cfg ScanConfig) ([]string, error) {
 			if IsAudioCleanerTempOutputPath(entry.Name()) {
 				return nil
 			}
-			info, err := readDirEntryInfo(entry)
+			info, err := entry.Info()
 			if err != nil {
 				return err
 			}

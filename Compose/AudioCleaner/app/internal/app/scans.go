@@ -101,8 +101,6 @@ type watcherDirectoryCounter interface {
 	DirectoryCount() int
 }
 
-var relativeScanPath = filepath.Rel
-
 func (s *Service) StartScan(_ context.Context) (any, error) {
 	scan, created, err := s.startManagedScan(ScanSourceManual, false)
 	if err != nil {
@@ -316,7 +314,11 @@ func (s *Service) runScanWithConfig(ctx context.Context, id string, cfg pipeline
 				return
 			}
 			if exists {
-				suppressed, suppressionErr := s.evaluateFailureSuppression(ctx, persisted.ID, info.Size(), info.ModTime().UnixNano(), audioPolicyVersion)
+				policyFingerprint := ""
+				if persisted.CompatibilityAssessment != nil {
+					policyFingerprint = compatibility.PolicyFingerprint(persisted.CompatibilityAssessment.AudioTracks, s.config().Audio.IncompatibleCodecs)
+				}
+				suppressed, suppressionErr := s.evaluateFailureSuppression(ctx, persisted.ID, info.Size(), info.ModTime().UnixNano(), audioPolicyVersion, policyFingerprint)
 				if suppressionErr != nil {
 					s.updateScan(id, func(scan *ScanSession) {
 						scan.Failed++
@@ -415,23 +417,14 @@ func (s *Service) runScanWithConfig(ctx context.Context, id string, cfg pipeline
 }
 
 func (s *Service) enqueueScanCandidate(path string) (enqueueDisposition, error) {
-	if s.enqueueScanCandidateFn != nil {
-		return s.enqueueScanCandidateFn(path)
-	}
 	return s.enqueueWithSourceResult(path, pipeline.JobSourceScan)
 }
 
-func (s *Service) evaluateFailureSuppression(ctx context.Context, fileID, size, mtimeNS int64, policyVersion int) (bool, error) {
-	if s.evaluateSuppressionFn != nil {
-		return s.evaluateSuppressionFn(ctx, fileID, size, mtimeNS, policyVersion)
-	}
-	return s.db.EvaluateFailureSuppression(ctx, fileID, size, mtimeNS, policyVersion)
+func (s *Service) evaluateFailureSuppression(ctx context.Context, fileID, size, mtimeNS int64, policyVersion int, policyFingerprint string) (bool, error) {
+	return s.db.EvaluateFailureSuppressionWithPolicy(ctx, fileID, size, mtimeNS, policyVersion, policyFingerprint)
 }
 
 func (s *Service) reconcileFilePresence(ctx context.Context, missingIDs, presentIDs []int64, observedAt time.Time) error {
-	if s.reconcilePresenceFn != nil {
-		return s.reconcilePresenceFn(ctx, missingIDs, presentIDs, observedAt)
-	}
 	return s.db.ReconcileFilePresence(ctx, missingIDs, presentIDs, observedAt)
 }
 
@@ -457,9 +450,6 @@ func evaluateCompatibilityCandidate(file repository.FileFacts, size int64, mtime
 }
 
 func (s *Service) upsertCompatibilityCache(ctx context.Context, file repository.FileFacts) (repository.FileFacts, error) {
-	if s.compatibilityCacheUpsert != nil {
-		return s.compatibilityCacheUpsert(ctx, file)
-	}
 	return s.db.UpsertFile(ctx, file)
 }
 
@@ -550,9 +540,6 @@ func (s *Service) updateScan(id string, update func(*ScanSession)) {
 
 func (s *Service) startReconciliationLoop() {
 	interval := time.Duration(s.config().Scan.ReconciliationIntervalMins) * time.Minute
-	if s.reconciliationInterval != nil {
-		interval = s.reconciliationInterval(s.config())
-	}
 	if interval <= 0 {
 		return
 	}
@@ -727,7 +714,7 @@ func pathWithinRoots(path string, roots []string) bool {
 	cleanPath := filepath.Clean(path)
 	for _, root := range roots {
 		cleanRoot := filepath.Clean(root)
-		relative, err := relativeScanPath(cleanRoot, cleanPath)
+		relative, err := filepath.Rel(cleanRoot, cleanPath)
 		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 			return true
 		}

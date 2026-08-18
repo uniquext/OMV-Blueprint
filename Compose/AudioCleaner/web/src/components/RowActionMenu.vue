@@ -6,7 +6,7 @@ const props = defineProps<{
   open: boolean
   label: string
   width: number
-  testId?: string
+  uiId?: string
 }>()
 
 const emit = defineEmits<{
@@ -93,7 +93,7 @@ onBeforeUnmount(removeListeners)
       :aria-label="label"
       aria-haspopup="menu"
       :aria-expanded="open"
-      :data-testid="testId"
+      :data-ui="uiId"
       :title="label"
       @click.stop="emit('toggle')"
     >

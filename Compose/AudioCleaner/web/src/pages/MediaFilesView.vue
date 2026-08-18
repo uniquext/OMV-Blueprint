@@ -331,7 +331,7 @@ onBeforeUnmount(() => {
     <div class="panel">
       <div class="history-toolbar files-toolbar">
         <div class="history-summary files-summary">
-          <span><span class="files-summary-icon" aria-hidden="true">📁</span> {{ t('filesSummaryTotal') }}: <strong data-testid="files-summary-total">{{ summary.total }}</strong></span>
+          <span><span class="files-summary-icon" aria-hidden="true">📁</span> {{ t('filesSummaryTotal') }}: <strong data-ui="files-summary-total">{{ summary.total }}</strong></span>
           <span><span class="files-summary-icon" aria-hidden="true">✅</span> {{ t('filesSummaryCompliant') }}: <strong>{{ summary.compliant }}</strong></span>
           <span><span class="files-summary-icon" aria-hidden="true">❌</span> {{ t('filesSummaryNoncompliant') }}: <strong>{{ summary.noncompliant }}</strong></span>
           <span><span class="files-summary-icon" aria-hidden="true">❓</span> {{ t('filesSummaryUndetermined') }}: <strong>{{ summary.undetermined }}</strong></span>
@@ -424,7 +424,7 @@ onBeforeUnmount(() => {
             <td colspan="7" class="muted">{{ t('filesNoData') }}</td>
           </tr>
           <template v-for="file in files" :key="file.id">
-            <tr data-testid="file-row">
+            <tr data-ui="file-row">
               <td class="history-expand-cell">
                 <button
                   class="button history-expand-button"
@@ -452,7 +452,7 @@ onBeforeUnmount(() => {
                   :open="openActionFileID === file.id"
                   :label="t('rowActionsMore')"
                   :width="132"
-                  :test-id="`file-actions-${file.id}`"
+                  :ui-id="`file-actions-${file.id}`"
                   @toggle="toggleActionMenu(file.id)"
                   @close="openActionFileID = null"
                 >
@@ -460,7 +460,7 @@ onBeforeUnmount(() => {
                     class="row-action-item"
                     role="menuitem"
                     type="button"
-                    :data-testid="`file-process-${file.id}`"
+                    :data-ui="`file-process-${file.id}`"
                     :disabled="busy || !canProcess(file) || isProcessing(file)"
                     @click="askOperation('process', file)"
                   >
@@ -472,7 +472,7 @@ onBeforeUnmount(() => {
                     class="row-action-item"
                     role="menuitem"
                     type="button"
-                    :data-testid="`file-restore-${file.id}`"
+                    :data-ui="`file-restore-${file.id}`"
                     :disabled="busy || !file.backup_file"
                     @click="askOperation('restore', file)"
                   >
@@ -483,7 +483,7 @@ onBeforeUnmount(() => {
                     class="row-action-item row-action-item--danger"
                     role="menuitem"
                     type="button"
-                    :data-testid="`file-delete-${file.id}`"
+                    :data-ui="`file-delete-${file.id}`"
                     :disabled="busy || !file.backup_file"
                     @click="askOperation('delete', file)"
                   >
@@ -494,7 +494,7 @@ onBeforeUnmount(() => {
               </td>
             </tr>
 
-            <tr v-if="isExpanded(file)" class="history-detail-row" data-testid="file-detail-row">
+            <tr v-if="isExpanded(file)" class="history-detail-row" data-ui="file-detail-row">
               <td class="history-detail-cell" colspan="7">
                 <div class="history-detail-grid files-detail-grid">
                   <div class="files-detail-column">
@@ -549,10 +549,10 @@ onBeforeUnmount(() => {
                 <section
                   v-if="file.compatibility_assessment"
                   class="compatibility-assessment"
-                  data-testid="compatibility-assessment"
+                  data-ui="compatibility-assessment"
                 >
                   <header class="compatibility-assessment-head">
-                    <h3>{{ t('filesAssessmentTitle') }}</h3>
+					<h3>{{ t('filesAssessmentCurrent') }}</h3>
                     <span :class="complianceTone(file.compliance_status)">
                       {{ t(assessmentActionKey(file.compatibility_assessment)) }}
                     </span>
@@ -600,8 +600,35 @@ onBeforeUnmount(() => {
                       <p v-else class="muted">{{ t('filesAssessmentNoPlan') }}</p>
                     </div>
                   </div>
+				  <section v-if="file.compatibility_assessment.last_processing" class="compatibility-processing-evidence">
+					<h3>{{ t('filesAssessmentProcessing') }}</h3>
+					<dl class="compatibility-assessment-facts">
+					  <div>
+						<dt>{{ t('filesAssessmentPolicy') }}</dt>
+						<dd>v{{ file.compatibility_assessment.last_processing.policy_version }}</dd>
+					  </div>
+					  <div class="compatibility-assessment-reason">
+						<dt>{{ t('filesAssessmentReason') }}</dt>
+						<dd>{{ file.compatibility_assessment.last_processing.reason }}</dd>
+					  </div>
+					</dl>
+					<div class="compatibility-assessment-columns">
+					  <div>
+						<h4>{{ t('filesAssessmentTracks') }}</h4>
+						<ul><li v-for="track in file.compatibility_assessment.last_processing.audio_tracks" :key="track.stream_index">{{ audioTrackSummary(track) }}</li></ul>
+					  </div>
+					  <div>
+						<h4>{{ t('filesAssessmentRules') }}</h4>
+						<ul><li v-for="rule in file.compatibility_assessment.last_processing.matched_rules" :key="rule.codec">{{ ruleMatchSummary(rule) }}</li></ul>
+					  </div>
+					  <div>
+						<h4>{{ t('filesAssessmentPlan') }}</h4>
+						<ul><li v-for="plan in file.compatibility_assessment.last_processing.audio_plans" :key="plan.stream_index">{{ audioPlanSummary(plan) }}</li></ul>
+					  </div>
+					</div>
+				  </section>
                 </section>
-                <div v-else class="compatibility-assessment-missing muted" data-testid="compatibility-assessment-missing">
+                <div v-else class="compatibility-assessment-missing muted" data-ui="compatibility-assessment-missing">
                   {{ t('filesAssessmentMissing') }}
                 </div>
               </td>

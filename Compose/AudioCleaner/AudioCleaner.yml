@@ -8,6 +8,7 @@ services:
     hostname: ${AUDIOCLEANER_HOSTNAME}
     user: "${PUID}:${PGID}"
     restart: unless-stopped
+    stop_grace_period: 30s
     ports:
       - "${AUDIOCLEANER_PORT}:9830"
     environment:

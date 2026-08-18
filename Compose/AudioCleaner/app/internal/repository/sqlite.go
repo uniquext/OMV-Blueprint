@@ -14,6 +14,7 @@ import (
 
 	_ "modernc.org/sqlite"
 	"omv-blueprint/compose/audiocleaner/internal/compatibility"
+	"omv-blueprint/compose/audiocleaner/internal/failure"
 	"omv-blueprint/compose/audiocleaner/internal/media"
 	"omv-blueprint/compose/audiocleaner/internal/observability"
 	"omv-blueprint/compose/audiocleaner/internal/replacement"
@@ -24,15 +25,11 @@ type Repository struct {
 }
 
 func Open(ctx context.Context, path string) (*Repository, error) {
-	return openRepository(ctx, path, sql.Open)
-}
-
-func openRepository(ctx context.Context, path string, opener func(string, string) (*sql.DB, error)) (*Repository, error) {
 	if err := ensureParentDir(path); err != nil {
 		return nil, err
 	}
 
-	db, err := opener("sqlite", sqliteDSN(path))
+	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite repository: %w", err)
 	}
@@ -58,9 +55,12 @@ func (r *Repository) UpsertFile(ctx context.Context, file FileFacts) (FileFacts,
 	return upsertFile(ctx, r.db, file, now)
 }
 
-func upsertFile(ctx context.Context, queryer interface {
+type fileMutationQueryer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, file FileFacts, now time.Time) (FileFacts, error) {
+}
+
+func upsertFile(ctx context.Context, queryer fileMutationQueryer, file FileFacts, now time.Time) (FileFacts, error) {
 	if err := validateFileCompliance(file); err != nil {
 		return FileFacts{}, err
 	}
@@ -76,7 +76,7 @@ func upsertFile(ctx context.Context, queryer interface {
 	if updatedAt.IsZero() {
 		updatedAt = now
 	}
-	row := queryer.QueryRowContext(ctx, `
+	_, err = queryer.ExecContext(ctx, `
 INSERT INTO files (
   file_path,
   size,
@@ -100,16 +100,17 @@ INSERT INTO files (
 	  backup_file = excluded.backup_file,
 	  compatibility_assessment = excluded.compatibility_assessment,
 	  missing_at = NULL,
-	  updated_at = ?
-RETURNING `+fileSelectColumns, file.Path,
+	  updated_at = ?`, file.Path,
 		file.Size, file.MTimeNS, nullableString(file.AudioSignature),
 		nullableString(file.VideoSignature), nullableString(string(file.ComplianceStatus)),
 		nullableInt64(int64(file.AudioPolicyVersion)), nullableString(file.BackupFile),
 		assessmentJSON,
-		formatTime(createdAt), formatTime(updatedAt),
-		formatTime(now))
+		formatTime(createdAt), formatTime(updatedAt), formatTime(now))
+	if err != nil {
+		return FileFacts{}, err
+	}
 
-	persisted, err := scanFileFacts(row)
+	persisted, err := scanFileFacts(queryer.QueryRowContext(ctx, `SELECT `+fileSelectColumns+` FROM files WHERE file_path = ?`, file.Path))
 	if err != nil {
 		return FileFacts{}, err
 	}
@@ -329,6 +330,18 @@ func (r *Repository) PruneRetention(ctx context.Context, policy RetentionPolicy,
 	}
 	fileIDs := observability.SelectExpired(fileItems, fileCutoff, policy.MissingFileMaxCount)
 	for _, id := range fileIDs {
+		if _, deleteErr := tx.ExecContext(ctx, `DELETE FROM failure_issues WHERE file_id=?`, id); deleteErr != nil {
+			return RetentionResult{}, fmt.Errorf("delete expired missing file issues %d: %w", id, deleteErr)
+		}
+		deletedJobs, deleteErr := tx.ExecContext(ctx, `DELETE FROM jobs WHERE file_id=?`, id)
+		if deleteErr != nil {
+			return RetentionResult{}, fmt.Errorf("delete expired missing file jobs %d: %w", id, deleteErr)
+		}
+		jobCount, countErr := deletedJobs.RowsAffected()
+		if countErr != nil {
+			return RetentionResult{}, countErr
+		}
+		result.DeletedJobs += int(jobCount)
 		deleted, deleteErr := tx.ExecContext(ctx, `DELETE FROM files WHERE id=?`, id)
 		if deleteErr != nil {
 			return RetentionResult{}, fmt.Errorf("delete expired missing file %d: %w", id, deleteErr)
@@ -383,10 +396,10 @@ FROM jobs`)
 func retentionFileItems(ctx context.Context, tx *sql.Tx) ([]observability.RetentionItem, error) {
 	rows, err := tx.QueryContext(ctx, `
 SELECT files.id,files.missing_at,
- CASE WHEN files.backup_file IS NOT NULL
-   OR EXISTS(SELECT 1 FROM jobs WHERE jobs.file_id=files.id)
-   OR EXISTS(SELECT 1 FROM replacement_journal WHERE replacement_journal.file_id=files.id)
-   OR EXISTS(SELECT 1 FROM failure_issues WHERE failure_issues.file_id=files.id AND failure_issues.resolved_at IS NULL)
+	CASE WHEN files.backup_file IS NOT NULL
+	   OR EXISTS(SELECT 1 FROM jobs WHERE jobs.file_id=files.id AND jobs.result='processing')
+	   OR EXISTS(SELECT 1 FROM replacement_journal WHERE replacement_journal.file_id=files.id)
+	   OR EXISTS(SELECT 1 FROM failure_issues WHERE failure_issues.file_id=files.id AND failure_issues.resolved_at IS NULL AND failure_issues.category='recovery')
    OR EXISTS(SELECT 1 FROM recovery_audit WHERE recovery_audit.file_id=files.id)
  THEN 1 ELSE 0 END
 FROM files WHERE files.missing_at IS NOT NULL`)
@@ -497,9 +510,7 @@ func (r *Repository) StartProcessJob(ctx context.Context, file FileFacts, source
 	return persisted, job, nil
 }
 
-func addJob(ctx context.Context, queryer interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, job JobRecord, now time.Time) (JobRecord, error) {
+func addJob(ctx context.Context, queryer fileMutationQueryer, job JobRecord, now time.Time) (JobRecord, error) {
 	if job.TriggerSource == "" {
 		job.TriggerSource = DiscoveryManual
 	}
@@ -518,7 +529,7 @@ func addJob(ctx context.Context, queryer interface {
 	if err != nil {
 		return JobRecord{}, err
 	}
-	row := queryer.QueryRowContext(ctx, `
+	inserted, err := queryer.ExecContext(ctx, `
 INSERT INTO jobs (
   file_id,
 	parent_job_id,
@@ -528,9 +539,8 @@ INSERT INTO jobs (
 	  failure_code,
 	  quality_assessment, failure_stage, failure_category, failure_summary, failure_advice, retry_strategy, unlock_condition,
   started_at,
-  finished_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING `+jobSelectColumns,
+	  finished_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.FileID,
 		nullableInt64(job.ParentJobID),
 		string(job.TriggerSource),
@@ -540,9 +550,15 @@ RETURNING `+jobSelectColumns,
 		qualityAssessment,
 		nullableString(job.FailureStage), nullableString(job.FailureCategory), nullableString(job.FailureSummary),
 		nullableString(job.FailureAdvice), nullableString(job.RetryStrategy), nullableString(job.UnlockCondition),
-		formatTime(startedAt),
-		nullableTime(finishedAt))
-	return scanJob(row)
+		formatTime(startedAt), nullableTime(finishedAt))
+	if err != nil {
+		return JobRecord{}, err
+	}
+	id, err := inserted.LastInsertId()
+	if err != nil {
+		return JobRecord{}, fmt.Errorf("load inserted job id: %w", err)
+	}
+	return scanJob(queryer.QueryRowContext(ctx, `SELECT `+jobSelectColumns+` FROM jobs WHERE id = ?`, id))
 }
 
 func (r *Repository) SetJobFailureDetails(ctx context.Context, jobID int64, details FailureDetails) error {
@@ -593,8 +609,32 @@ func (r *Repository) FinishProcessJob(ctx context.Context, id int64, file FileFa
 	if jobFileID != persisted.ID {
 		return FileFacts{}, JobRecord{}, fmt.Errorf("process job %d belongs to file %d, not %d", id, jobFileID, persisted.ID)
 	}
-	job, err := finishJob(ctx, tx, id, result, finalError, now)
+	jobUpdate, err := tx.ExecContext(ctx, `
+UPDATE jobs
+SET result = ?, final_error = ?, failure_code = ?,
+	failure_stage = CASE WHEN ? THEN NULL ELSE failure_stage END,
+	failure_category = CASE WHEN ? THEN NULL ELSE failure_category END,
+	failure_summary = CASE WHEN ? THEN NULL ELSE failure_summary END,
+	failure_advice = CASE WHEN ? THEN NULL ELSE failure_advice END,
+	retry_strategy = CASE WHEN ? THEN NULL ELSE retry_strategy END,
+	unlock_condition = CASE WHEN ? THEN NULL ELSE unlock_condition END,
+	finished_at = ?
+WHERE id = ?`,
+		string(result),
+		nullableString(finalError),
+		nullableStringForResult(result, failureCodeFromFinalError(finalError)),
+		result == JobResultSucceeded,
+		result == JobResultSucceeded,
+		result == JobResultSucceeded,
+		result == JobResultSucceeded,
+		result == JobResultSucceeded,
+		result == JobResultSucceeded,
+		formatTime(now),
+		id)
 	if err != nil {
+		return FileFacts{}, JobRecord{}, err
+	}
+	if err := requireAffectedRow(jobUpdate, "finish process job"); err != nil {
 		return FileFacts{}, JobRecord{}, err
 	}
 	journalPhase := ReplacementCommitted
@@ -607,6 +647,13 @@ func (r *Repository) FinishProcessJob(ctx context.Context, id int64, file FileFa
 	}
 	if err := tx.Commit(); err != nil {
 		return FileFacts{}, JobRecord{}, fmt.Errorf("commit finish process job transaction: %w", err)
+	}
+	job, err := r.JobByID(ctx, id)
+	if err != nil {
+		return FileFacts{}, JobRecord{}, fmt.Errorf("load finished process job: %w", err)
+	}
+	if job.Result != result {
+		return FileFacts{}, JobRecord{}, fmt.Errorf("finished process job %d has result %q, want %q", id, job.Result, result)
 	}
 	return persisted, job, nil
 }
@@ -844,6 +891,10 @@ func (r *Repository) ActiveFailureIssues(ctx context.Context) ([]FailureIssue, e
 
 // EvaluateFailureSuppression atomically confirms an unchanged suppressed issue or resolves it after change.
 func (r *Repository) EvaluateFailureSuppression(ctx context.Context, fileID, size, mtimeNS int64, policyVersion int) (bool, error) {
+	return r.EvaluateFailureSuppressionWithPolicy(ctx, fileID, size, mtimeNS, policyVersion, "")
+}
+
+func (r *Repository) EvaluateFailureSuppressionWithPolicy(ctx context.Context, fileID, size, mtimeNS int64, policyVersion int, policyFingerprint string) (bool, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -851,8 +902,9 @@ func (r *Repository) EvaluateFailureSuppression(ctx context.Context, fileID, siz
 	defer tx.Rollback()
 	var issueID, storedSize, storedMTime int64
 	var storedPolicy int
-	var strategy string
-	err = tx.QueryRowContext(ctx, `SELECT id,file_size,file_mtime_ns,policy_version,retry_strategy FROM failure_issues WHERE file_id=? AND resolved_at IS NULL`, fileID).Scan(&issueID, &storedSize, &storedMTime, &storedPolicy, &strategy)
+	var strategy, category string
+	var assessmentJSON sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT failure_issues.id,file_size,file_mtime_ns,policy_version,retry_strategy,category,files.compatibility_assessment FROM failure_issues JOIN files ON files.id=failure_issues.file_id WHERE failure_issues.file_id=? AND resolved_at IS NULL`, fileID).Scan(&issueID, &storedSize, &storedMTime, &storedPolicy, &strategy, &category, &assessmentJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -860,7 +912,16 @@ func (r *Repository) EvaluateFailureSuppression(ctx context.Context, fileID, siz
 		return false, err
 	}
 	now := formatTime(time.Now())
-	unchanged := storedSize == size && storedMTime == mtimeNS && storedPolicy == policyVersion
+	policyUnchanged := storedPolicy == policyVersion
+	if category == string(failure.PermanentMedia) {
+		policyUnchanged = true
+	} else if (category == string(failure.UnsupportedPolicy) || category == string(failure.Verification)) && policyFingerprint != "" && assessmentJSON.Valid {
+		var assessment compatibility.Assessment
+		if json.Unmarshal([]byte(assessmentJSON.String), &assessment) == nil && assessment.SchemaVersion == compatibility.CurrentSchemaVersion {
+			policyUnchanged = compatibility.PolicyFingerprint(assessment.AudioTracks, assessment.PolicyIncompatibleCodecs) == policyFingerprint
+		}
+	}
+	unchanged := storedSize == size && storedMTime == mtimeNS && policyUnchanged
 	if unchanged && strategy == "suppress" {
 		_, err = tx.ExecContext(ctx, `UPDATE failure_issues SET occurrence_count=occurrence_count+1,last_seen_at=? WHERE id=?`, now, issueID)
 		if err != nil {
@@ -999,7 +1060,7 @@ func (r *Repository) init(ctx context.Context) error {
 		if err := r.validateSchema(ctx); err != nil {
 			return err
 		}
-		if _, err := r.db.ExecContext(ctx, `PRAGMA user_version = 10`); err != nil {
+		if _, err := r.db.ExecContext(ctx, `PRAGMA user_version = 11`); err != nil {
 			return fmt.Errorf("set sqlite schema version: %w", err)
 		}
 		return r.normalizeStoredTimes(ctx)
@@ -1008,7 +1069,7 @@ func (r *Repository) init(ctx context.Context) error {
 	versionSchemas := map[int]map[string][]string{
 		1: schemaV1Columns, 2: schemaV2Columns, 3: schemaV3Columns, 4: schemaV4Columns,
 		5: schemaV5Columns, 6: schemaV6Columns, 7: schemaV7Columns, 8: schemaV8Columns,
-		9: schemaV9Columns, 10: schemaV10Columns,
+		9: schemaV9Columns, 10: schemaV10Columns, 11: schemaV11Columns,
 	}
 	expected, supported := versionSchemas[version]
 	if !supported {
@@ -1023,9 +1084,9 @@ func (r *Repository) init(ctx context.Context) error {
 	migrations := map[int]func(context.Context) error{
 		1: r.migrateV1ToV2, 2: r.migrateV2ToV3, 3: r.migrateV3ToV4,
 		4: r.migrateV4ToV5, 5: r.migrateV5ToV6, 6: r.migrateV6ToV7,
-		7: r.migrateV7ToV8, 8: r.migrateV8ToV9, 9: r.migrateV9ToV10,
+		7: r.migrateV7ToV8, 8: r.migrateV8ToV9, 9: r.migrateV9ToV10, 10: r.migrateV10ToV11,
 	}
-	for current := version; current < 10; current++ {
+	for current := version; current < 11; current++ {
 		if err := migrations[current](ctx); err != nil {
 			return err
 		}
@@ -1121,7 +1182,7 @@ func normalizeStoredTimeColumn(ctx context.Context, tx *sql.Tx, target storedTim
 }
 
 func (r *Repository) validateSchema(ctx context.Context) error {
-	return r.validateSchemaColumns(ctx, schemaV10Columns)
+	return r.validateSchemaColumns(ctx, schemaV11Columns)
 }
 
 func (r *Repository) validateSchemaColumns(ctx context.Context, expected map[string][]string) error {
@@ -1432,6 +1493,70 @@ func (r *Repository) migrateV9ToV10(ctx context.Context) error {
 	})
 }
 
+func (r *Repository) migrateV10ToV11(ctx context.Context) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin sqlite v10 to v11 migration: %w", err)
+	}
+	defer tx.Rollback()
+	type historicalFailure struct {
+		id                                                                                 int64
+		finalError, code, stage, category, summary, advice, retryStrategy, unlockCondition string
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id,COALESCE(final_error,''),COALESCE(failure_code,''),COALESCE(failure_stage,''),COALESCE(failure_category,''),COALESCE(failure_summary,''),COALESCE(failure_advice,''),COALESCE(retry_strategy,''),COALESCE(unlock_condition,'') FROM jobs WHERE result='failed'`)
+	if err != nil {
+		return fmt.Errorf("load historical failed jobs: %w", err)
+	}
+	items := make([]historicalFailure, 0)
+	for rows.Next() {
+		var item historicalFailure
+		if err := rows.Scan(&item.id, &item.finalError, &item.code, &item.stage, &item.category, &item.summary, &item.advice, &item.retryStrategy, &item.unlockCondition); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan historical failed job: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate historical failed jobs: %w", err)
+	}
+	rows.Close()
+	for _, item := range items {
+		code := item.code
+		if code == "" {
+			code = failureCodeFromFinalError(item.finalError)
+		}
+		classification := failure.Classify(code, item.finalError)
+		code = firstNonempty(item.code, classification.Code)
+		if _, err := tx.ExecContext(ctx, `UPDATE jobs SET failure_code=?,failure_stage=?,failure_category=?,failure_summary=?,failure_advice=?,retry_strategy=?,unlock_condition=? WHERE id=?`,
+			code,
+			firstNonempty(item.stage, classification.Stage),
+			firstNonempty(item.category, string(classification.Category)),
+			firstNonempty(item.summary, classification.Summary),
+			firstNonempty(item.advice, classification.Advice),
+			firstNonempty(item.retryStrategy, string(classification.Strategy)),
+			firstNonempty(item.unlockCondition, classification.UnlockCondition),
+			item.id,
+		); err != nil {
+			return fmt.Errorf("backfill historical failed job %d: %w", item.id, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `PRAGMA user_version = 11`); err != nil {
+		return fmt.Errorf("set sqlite v11 schema version: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit sqlite v10 to v11 migration: %w", err)
+	}
+	return nil
+}
+
+func firstNonempty(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
 func failureGovernanceSchema(ifNotExists, versionPrefix string) []string {
 	return []string{
 		`CREATE TABLE ` + ifNotExists + `failure_issues (
@@ -1602,6 +1727,8 @@ var schemaV10Columns = map[string][]string{
 	"failure_issues":      append(append([]string{}, schemaV9Columns["failure_issues"]...), "attempt_number", "max_attempts"),
 	"recovery_audit":      append(append([]string{}, schemaV9Columns["recovery_audit"]...), "actor", "original_job_id", "original_failure_code", "original_failure"),
 }
+
+var schemaV11Columns = schemaV10Columns
 
 func ensureParentDir(path string) error {
 	if path == "" {

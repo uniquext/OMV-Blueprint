@@ -20,7 +20,7 @@ const props = defineProps<{
   label: string
   hint: string
   values: string[]
-  testId: string
+  uiId: string
   rule: ArrayRule
   help?: string
   directoryLoader?: (parent: string) => Promise<MediaDirectoryListing>
@@ -94,10 +94,10 @@ function validateValue(index: number): string {
 }
 
 function editorSelector(index: number): string {
-  if (index < 0) return `[data-testid="${props.testId}-add"]`
+  if (index < 0) return `[data-ui="${props.uiId}-add"]`
   return isMediaRoot.value
-    ? `[data-testid="${props.testId}-row-edit-${index}"]`
-    : `[data-testid="${props.testId}-dialog-${index}"]`
+    ? `[data-ui="${props.uiId}-row-edit-${index}"]`
+    : `[data-ui="${props.uiId}-dialog-${index}"]`
 }
 
 function focusEditor(index: number): void {
@@ -147,7 +147,7 @@ async function openPicker(index: number): Promise<void> {
   directoryErrors.value = {}
   pickerOpen.value = true
   await nextTick()
-  document.querySelector<HTMLElement>(`[data-testid="${props.testId}-tree-toggle-/media"]`)?.focus()
+  document.querySelector<HTMLElement>(`[data-ui="${props.uiId}-tree-toggle-/media"]`)?.focus()
 }
 
 function closePicker(): void {
@@ -216,12 +216,12 @@ async function confirmPicker(): Promise<void> {
 </script>
 
 <template>
-  <div class="settings-array-editor" :data-testid="`${testId}-field`">
-    <div class="settings-array-summary" :data-testid="`${testId}-summary-row`">
+  <div class="settings-array-editor" :data-ui="`${uiId}-field`">
+    <div class="settings-array-summary" :data-ui="`${uiId}-summary-row`">
       <span class="settings-array-summary__label">{{ label }}</span>
-      <span class="settings-array-summary__value" :class="{ 'is-empty': !values.length }" :title="summary" :data-testid="`${testId}-summary`">{{ summary }}</span>
-      <span class="settings-array-summary__count" :data-testid="`${testId}-count`">{{ countText }}</span>
-      <button type="button" class="settings-array-summary__edit" :data-testid="`${testId}-edit`" @click="openEditor">
+      <span class="settings-array-summary__value" :class="{ 'is-empty': !values.length }" :title="summary" :data-ui="`${uiId}-summary`">{{ summary }}</span>
+      <span class="settings-array-summary__count" :data-ui="`${uiId}-count`">{{ countText }}</span>
+      <button type="button" class="settings-array-summary__edit" :data-ui="`${uiId}-edit`" @click="openEditor">
         <Pencil aria-hidden="true" />{{ t('settingsArrayEdit') }}
       </button>
     </div>
@@ -231,14 +231,14 @@ async function confirmPicker(): Promise<void> {
         class="settings-array-dialog"
         role="dialog"
         aria-modal="true"
-        :aria-labelledby="`${testId}-dialog-title`"
-        :data-testid="`${testId}-dialog`"
+        :aria-labelledby="`${uiId}-dialog-title`"
+        :data-ui="`${uiId}-dialog`"
         @keydown.esc.stop.prevent="cancel"
       >
         <header class="settings-array-dialog__header">
-          <h3 :id="`${testId}-dialog-title`">{{ t('settingsArrayEditTitle').replace('{label}', label) }}</h3>
+          <h3 :id="`${uiId}-dialog-title`">{{ t('settingsArrayEditTitle').replace('{label}', label) }}</h3>
           <span class="settings-array-dialog__hint">{{ hint }}</span>
-          <button type="button" class="settings-array-dialog__add" :data-testid="`${testId}-add`" @click="add">
+          <button type="button" class="settings-array-dialog__add" :data-ui="`${uiId}-add`" @click="add">
             <Plus aria-hidden="true" />{{ t('settingsArrayAdd') }}
           </button>
         </header>
@@ -251,30 +251,30 @@ async function confirmPicker(): Promise<void> {
             <div v-for="(value, index) in workingValues" :key="index" class="settings-array-dialog__item" :class="{ 'settings-array-dialog__item--media-root': isMediaRoot }">
               <span class="settings-array-dialog__index">{{ index + 1 }}</span>
               <div v-if="isMediaRoot" class="settings-array-dialog__path-wrap">
-                <span class="settings-array-dialog__path" :class="{ 'is-empty': !value }" :title="value" :data-testid="`${testId}-row-value-${index}`">{{ value || t('settingsSelectMediaRoot') }}</span>
-                <span v-if="rowErrors[index]" class="settings-array-dialog__error" :data-testid="`${testId}-error-${index}`">{{ rowErrors[index] }}</span>
+                <span class="settings-array-dialog__path" :class="{ 'is-empty': !value }" :title="value" :data-ui="`${uiId}-row-value-${index}`">{{ value || t('settingsSelectMediaRoot') }}</span>
+                <span v-if="rowErrors[index]" class="settings-array-dialog__error" :data-ui="`${uiId}-error-${index}`">{{ rowErrors[index] }}</span>
               </div>
               <label v-else class="settings-array-dialog__input-wrap">
                 <span class="sr-only">{{ label }} {{ index + 1 }}</span>
-                <input v-model="workingValues[index]" :data-testid="`${testId}-dialog-${index}`" :aria-invalid="Boolean(rowErrors[index])" />
-                <span v-if="rowErrors[index]" class="settings-array-dialog__error" :data-testid="`${testId}-error-${index}`">{{ rowErrors[index] }}</span>
+                <input v-model="workingValues[index]" :data-ui="`${uiId}-dialog-${index}`" :aria-invalid="Boolean(rowErrors[index])" />
+                <span v-if="rowErrors[index]" class="settings-array-dialog__error" :data-ui="`${uiId}-error-${index}`">{{ rowErrors[index] }}</span>
               </label>
               <div v-if="isMediaRoot" class="settings-array-dialog__row-actions">
-                <button type="button" class="settings-array-dialog__row-edit" :data-testid="`${testId}-row-edit-${index}`" :title="t('settingsArrayEditItem').replace('{index}', String(index + 1))" @click="openPicker(index)">
+                <button type="button" class="settings-array-dialog__row-edit" :data-ui="`${uiId}-row-edit-${index}`" :title="t('settingsArrayEditItem').replace('{index}', String(index + 1))" @click="openPicker(index)">
                   <Pencil aria-hidden="true" />
                 </button>
-                <button type="button" class="settings-array-dialog__delete" :data-testid="`${testId}-delete-${index}`" :title="t('settingsArrayDelete').replace('{index}', String(index + 1))" @click="remove(index)">
+                <button type="button" class="settings-array-dialog__delete" :data-ui="`${uiId}-delete-${index}`" :title="t('settingsArrayDelete').replace('{index}', String(index + 1))" @click="remove(index)">
                   <Trash2 aria-hidden="true" />
                 </button>
               </div>
-              <button v-else type="button" class="settings-array-dialog__delete" :data-testid="`${testId}-delete-${index}`" :title="t('settingsArrayDelete').replace('{index}', String(index + 1))" @click="remove(index)">
+              <button v-else type="button" class="settings-array-dialog__delete" :data-ui="`${uiId}-delete-${index}`" :title="t('settingsArrayDelete').replace('{index}', String(index + 1))" @click="remove(index)">
                 <Trash2 aria-hidden="true" />
               </button>
             </div>
             <div v-if="!workingValues.length" class="settings-array-dialog__empty">{{ t('settingsArrayNotConfigured') }}</div>
           </div>
-          <span v-if="listError" class="settings-array-dialog__list-error" :data-testid="`${testId}-list-error`">{{ listError }}</span>
-          <div v-if="help || $slots.help" class="settings-array-dialog__help" :data-testid="`${testId}-help`">
+          <span v-if="listError" class="settings-array-dialog__list-error" :data-ui="`${uiId}-list-error`">{{ listError }}</span>
+          <div v-if="help || $slots.help" class="settings-array-dialog__help" :data-ui="`${uiId}-help`">
             <slot name="help">{{ help }}</slot>
           </div>
         </div>
@@ -282,8 +282,8 @@ async function confirmPicker(): Promise<void> {
         <footer class="settings-array-dialog__footer">
           <span>{{ t('settingsArrayDraftOnly') }}</span>
           <div class="settings-array-dialog__actions">
-            <button type="button" class="button" :data-testid="`${testId}-cancel`" @click="cancel">{{ t('confirmCancel') }}</button>
-            <button type="button" class="button primary" :data-testid="`${testId}-apply`" @click="apply"><Check aria-hidden="true" />{{ t('settingsArrayApplyDraft') }}</button>
+            <button type="button" class="button" :data-ui="`${uiId}-cancel`" @click="cancel">{{ t('confirmCancel') }}</button>
+            <button type="button" class="button primary" :data-ui="`${uiId}-apply`" @click="apply"><Check aria-hidden="true" />{{ t('settingsArrayApplyDraft') }}</button>
           </div>
         </footer>
       </section>
@@ -294,17 +294,17 @@ async function confirmPicker(): Promise<void> {
         class="settings-directory-picker"
         role="dialog"
         aria-modal="true"
-        :aria-labelledby="`${testId}-picker-title`"
-        :data-testid="`${testId}-picker`"
+        :aria-labelledby="`${uiId}-picker-title`"
+        :data-ui="`${uiId}-picker`"
         @keydown.esc.stop.prevent="closePicker"
       >
         <header class="settings-directory-picker__header">
-          <h3 :id="`${testId}-picker-title`">{{ t('settingsDirectoryPickerTitle') }}</h3>
+          <h3 :id="`${uiId}-picker-title`">{{ t('settingsDirectoryPickerTitle') }}</h3>
           <span>{{ t('settingsDirectoryPickerHint') }}</span>
         </header>
         <div class="settings-directory-picker__selection">
           <span>{{ t('settingsDirectorySelected') }}</span>
-          <strong :data-testid="`${testId}-picker-selected`">{{ selectedPath || t('settingsDirectoryNoneSelected') }}</strong>
+          <strong :data-ui="`${uiId}-picker-selected`">{{ selectedPath || t('settingsDirectoryNoneSelected') }}</strong>
         </div>
         <div class="settings-directory-picker__body">
           <div class="settings-directory-picker__instructions">{{ t('settingsDirectoryInstructions') }}</div>
@@ -315,7 +315,7 @@ async function confirmPicker(): Promise<void> {
                   v-if="row.directory.has_children"
                   type="button"
                   class="settings-directory-tree__toggle"
-                  :data-testid="`${testId}-tree-toggle-${row.directory.path}`"
+                  :data-ui="`${uiId}-tree-toggle-${row.directory.path}`"
                   :title="t(expandedPaths.has(row.directory.path) ? 'settingsDirectoryCollapse' : 'settingsDirectoryExpand').replace('{path}', row.directory.path)"
                   @click="toggleDirectory(row.directory)"
                 >
@@ -325,15 +325,15 @@ async function confirmPicker(): Promise<void> {
                 <span v-else class="settings-directory-tree__toggle" aria-hidden="true"></span>
                 <FolderOpen v-if="expandedPaths.has(row.directory.path)" aria-hidden="true" />
                 <Folder v-else aria-hidden="true" />
-                <button type="button" class="settings-directory-tree__name" :data-testid="`${testId}-tree-select-${row.directory.path}`" :disabled="isDuplicatePath(row.directory.path)" @click="selectDirectory(row.directory)">{{ row.directory.name }}</button>
+                <button type="button" class="settings-directory-tree__name" :data-ui="`${uiId}-tree-select-${row.directory.path}`" :disabled="isDuplicatePath(row.directory.path)" @click="selectDirectory(row.directory)">{{ row.directory.name }}</button>
                 <span class="settings-directory-tree__badge">{{ isDuplicatePath(row.directory.path) ? t('settingsDirectoryAlreadyAdded') : selectedPath === row.directory.path ? t('settingsDirectorySelected') : '' }}</span>
               </div>
-              <div v-else class="settings-directory-tree__status" :style="{ '--tree-depth': row.depth }" :data-testid="row.status === 'error' ? `${testId}-tree-error-${row.parent}` : undefined">
+              <div v-else class="settings-directory-tree__status" :style="{ '--tree-depth': row.depth }" :data-ui="row.status === 'error' ? `${uiId}-tree-error-${row.parent}` : undefined">
                 <span v-if="row.status === 'loading'">{{ t('settingsDirectoryLoading') }}</span>
                 <span v-else-if="row.status === 'empty'">{{ t('settingsDirectoryEmpty') }}</span>
                 <template v-else>
                   <span>{{ row.message }}</span>
-                  <button type="button" :data-testid="`${testId}-tree-retry-${row.parent}`" @click="retryDirectory(row.parent!)">{{ t('settingsDirectoryRetry') }}</button>
+                  <button type="button" :data-ui="`${uiId}-tree-retry-${row.parent}`" @click="retryDirectory(row.parent!)">{{ t('settingsDirectoryRetry') }}</button>
                 </template>
               </div>
             </template>
@@ -342,8 +342,8 @@ async function confirmPicker(): Promise<void> {
         <footer class="settings-directory-picker__footer">
           <span :class="{ 'is-error': selectedDuplicate }">{{ selectedDuplicate ? t('settingsDirectoryAlreadyAdded') : '' }}</span>
           <div class="settings-directory-picker__actions">
-            <button type="button" class="button" :data-testid="`${testId}-picker-cancel`" @click="closePicker">{{ t('confirmCancel') }}</button>
-            <button type="button" class="button primary" :data-testid="`${testId}-picker-confirm`" :disabled="pickerConfirmDisabled" @click="confirmPicker">{{ t('confirmConfirm') }}</button>
+            <button type="button" class="button" :data-ui="`${uiId}-picker-cancel`" @click="closePicker">{{ t('confirmCancel') }}</button>
+            <button type="button" class="button primary" :data-ui="`${uiId}-picker-confirm`" :disabled="pickerConfirmDisabled" @click="confirmPicker">{{ t('confirmConfirm') }}</button>
           </div>
         </footer>
       </section>

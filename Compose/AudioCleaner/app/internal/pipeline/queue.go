@@ -30,10 +30,12 @@ const (
 )
 
 type QueueJob struct {
-	Path          string
-	Source        JobSource
-	JobID         int64
-	AttemptNumber int
+	Path             string
+	Source           JobSource
+	DiscoverySources []JobSource
+	DiscoveryCount   int
+	JobID            int64
+	AttemptNumber    int
 }
 
 type RuntimeTask struct {
@@ -52,6 +54,8 @@ type RuntimeTask struct {
 	UnlockCondition      string       `json:"unlock_condition,omitempty"`
 	LastProgressAt       time.Time    `json:"last_progress_at,omitempty"`
 	Stalled              bool         `json:"stalled"`
+	DiscoverySources     []JobSource  `json:"-"`
+	DiscoveryCount       int          `json:"-"`
 }
 
 type RuntimeProgress struct {
@@ -92,22 +96,18 @@ type Queue struct {
 	jobs       []QueueJob
 	tasks      map[string]*runtimeTask
 	nextOrder  uint64
-	now        func() time.Time
 	stallAfter time.Duration
 }
 
 func NewQueue() *Queue {
-	return newQueueWithClock(time.Now, 2*time.Minute)
+	return &Queue{tasks: make(map[string]*runtimeTask), stallAfter: 2 * time.Minute}
 }
 
-func newQueueWithClock(now func() time.Time, stallAfter time.Duration) *Queue {
-	if now == nil {
-		now = time.Now
-	}
+func NewQueueWithStallAfter(stallAfter time.Duration) *Queue {
 	if stallAfter < 0 {
 		stallAfter = 0
 	}
-	return &Queue{tasks: make(map[string]*runtimeTask), now: now, stallAfter: stallAfter}
+	return &Queue{tasks: make(map[string]*runtimeTask), stallAfter: stallAfter}
 }
 
 func (q *Queue) Enqueue(path string) bool {
@@ -130,14 +130,17 @@ func (q *Queue) EnqueueExistingJob(path string, source JobSource, jobID int64) b
 }
 
 func (q *Queue) enqueueLocked(path string, source JobSource, jobID int64) bool {
-	if _, exists := q.tasks[path]; exists {
+	if existing, exists := q.tasks[path]; exists {
+		existing.DiscoveryCount++
+		existing.DiscoverySources = appendUniqueSource(existing.DiscoverySources, source)
 		return false
 	}
-	now := q.now()
+	now := time.Now()
 	task := &runtimeTask{
 		RuntimeTask: RuntimeTask{
 			Path: path, Source: source, Phase: RuntimeQueued, StartedAt: now, PhaseStartedAt: now,
 			WaitReason: "等待可用处理槽位", UnlockCondition: "处理槽位可用",
+			DiscoverySources: []JobSource{source}, DiscoveryCount: 1,
 		},
 		queued:        true,
 		order:         q.nextTaskOrder(),
@@ -145,7 +148,7 @@ func (q *Queue) enqueueLocked(path string, source JobSource, jobID int64) bool {
 		attemptNumber: 1,
 	}
 	q.tasks[path] = task
-	q.jobs = append(q.jobs, QueueJob{Path: path, Source: source, JobID: jobID, AttemptNumber: 1})
+	q.jobs = append(q.jobs, QueueJob{Path: path, Source: source, DiscoverySources: []JobSource{source}, DiscoveryCount: 1, JobID: jobID, AttemptNumber: 1})
 	return true
 }
 
@@ -176,18 +179,29 @@ func (q *Queue) ClaimNext(cancel context.CancelFunc) (QueueJob, bool) {
 		task.active = true
 		task.cancel = cancel
 		task.Phase = RuntimeChecking
-		task.PhaseStartedAt = q.now()
+		task.PhaseStartedAt = time.Now()
 		task.WaitReason = ""
 		task.UnlockCondition = ""
 		task.order = q.nextTaskOrder()
 		return QueueJob{
-			Path:          task.Path,
-			Source:        task.Source,
-			JobID:         task.jobID,
-			AttemptNumber: task.attemptNumber,
+			Path:             task.Path,
+			Source:           task.Source,
+			DiscoverySources: append([]JobSource(nil), task.DiscoverySources...),
+			DiscoveryCount:   task.DiscoveryCount,
+			JobID:            task.jobID,
+			AttemptNumber:    task.attemptNumber,
 		}, true
 	}
 	return QueueJob{}, false
+}
+
+func appendUniqueSource(sources []JobSource, source JobSource) []JobSource {
+	for _, existing := range sources {
+		if existing == source {
+			return sources
+		}
+	}
+	return append(sources, source)
 }
 
 func (q *Queue) BindJob(path string, jobID int64) bool {
@@ -227,7 +241,7 @@ func (q *Queue) ScheduleRetryWithObservation(path string, delay, checkInterval t
 	task.queued = false
 	task.cancel = nil
 	task.Phase = phase
-	task.PhaseStartedAt = q.now()
+	task.PhaseStartedAt = time.Now()
 	task.WaitReason = waitReason
 	task.UnlockCondition = unlockCondition
 	task.retryCount++
@@ -269,7 +283,7 @@ func (q *Queue) activateRetry(path string, generation uint64) {
 	task.retryTimer = nil
 	task.queued = true
 	task.Phase = RuntimeQueued
-	task.PhaseStartedAt = q.now()
+	task.PhaseStartedAt = time.Now()
 	task.WaitReason = "等待可用处理槽位"
 	task.UnlockCondition = "处理槽位可用"
 	task.order = q.nextTaskOrder()
@@ -376,7 +390,7 @@ func (q *Queue) UpdatePhase(path string, phase RuntimePhase) {
 	}
 	if task.Phase != phase {
 		task.Phase = phase
-		task.PhaseStartedAt = q.now()
+		task.PhaseStartedAt = time.Now()
 	}
 	task.WaitReason = ""
 	task.UnlockCondition = ""
@@ -412,7 +426,7 @@ func (q *Queue) Snapshot() RuntimeTaskSnapshot {
 	}
 	waiting := make([]orderedTask, 0)
 	active := make([]orderedTask, 0)
-	now := q.now()
+	now := time.Now()
 	for _, task := range q.tasks {
 		snapshot := task.RuntimeTask
 		snapshot.ElapsedSeconds = elapsedSeconds(snapshot.StartedAt, now)

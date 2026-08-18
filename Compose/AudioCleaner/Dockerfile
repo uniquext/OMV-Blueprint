@@ -20,7 +20,6 @@ FROM golang:1.22-bookworm AS builder
 
 # Go 模块代理：默认使用国内镜像加速，可通过构建参数覆盖
 ARG GOPROXY=https://goproxy.cn,https://proxy.golang.org,direct
-ARG GO_COVERAGE=false
 
 WORKDIR /src
 
@@ -28,11 +27,7 @@ COPY app/go.mod app/go.sum* ./
 RUN go mod download
 
 COPY app/ ./
-RUN if [ "${GO_COVERAGE}" = "true" ]; then \
-		CGO_ENABLED=0 go build -cover -coverpkg=./... -o /out/audiocleaner ./cmd/audiocleaner; \
-	else \
-		CGO_ENABLED=0 go build -o /out/audiocleaner ./cmd/audiocleaner; \
-	fi
+RUN CGO_ENABLED=0 go build -o /out/audiocleaner ./cmd/audiocleaner
 
 FROM ${RUNTIME_IMAGE}
 
@@ -40,7 +35,11 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 # 默认基础镜像需要安装运行依赖；隔离集成可复用已验证且已包含依赖的本地运行镜像。
 ARG RUNTIME_DEPS_PREINSTALLED=false
-RUN if [ "${RUNTIME_DEPS_PREINSTALLED}" != "true" ]; then \
+# bookworm-slim does not carry a trust store. Seed the verified builder trust
+# bundle so the first HTTPS package transaction remains certificate-validated.
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.debian.org|https://security.debian.org|g' /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources 2>/dev/null || true \
+	&& if [ "${RUNTIME_DEPS_PREINSTALLED}" != "true" ]; then \
 		for attempt in 1 2 3; do \
 			apt-get update -o Acquire::Retries=10 -o Acquire::http::Timeout=30 \
 				&& apt-get install -y --no-install-recommends -o Acquire::Retries=10 -o Acquire::http::Timeout=30 --fix-missing ffmpeg ca-certificates curl tzdata \
@@ -49,8 +48,9 @@ RUN if [ "${RUNTIME_DEPS_PREINSTALLED}" != "true" ]; then \
 			rm -rf /var/lib/apt/lists/*; \
 		done; \
 	fi \
-	&& mkdir -p /app/work /app/logs /app/coverage /app/web/dist \
-	&& chmod 1777 /app/work /app/logs /app/coverage \
+	&& mkdir -p /app/work /app/logs /app/web/dist \
+	&& chmod 1777 /app/work /app/logs \
+	&& rm -rf /app/coverage \
 	&& ffmpeg -version >/dev/null \
 	&& ffprobe -version >/dev/null \
 	&& rm -rf /var/lib/apt/lists/*

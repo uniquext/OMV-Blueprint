@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"math"
 	"net"
@@ -55,11 +54,7 @@ var defaultRetentionPolicy = repository.RetentionPolicy{
 	MissingFileMaxAge: 30 * 24 * time.Hour, MissingFileMaxCount: 5_000,
 }
 
-var (
-	restartSleep          = time.Sleep
-	retentionLoopInterval = 24 * time.Hour
-	systemExec            = syscall.Exec
-)
+const retentionLoopInterval = 24 * time.Hour
 
 const (
 	restartRunning int32 = iota
@@ -72,13 +67,6 @@ type RecoveryRepository interface {
 	FailProcessingJob(ctx context.Context, id int64, finalError string) (repository.FileFacts, repository.JobRecord, error)
 }
 
-type statusRepository interface {
-	JobOutcomeCounts(context.Context) (repository.OutcomeCounts, error)
-	FilesWithBackup(context.Context) ([]repository.FileFacts, error)
-	ProcessJobStats(context.Context) (repository.ProcessJobStats, error)
-	ActiveFailureIssues(context.Context) ([]repository.FailureIssue, error)
-}
-
 type Options struct {
 	ConfigPath string
 	DBPath     string
@@ -87,19 +75,6 @@ type Options struct {
 	WorkRoot   string
 	WebDir     string
 	HTTPAddr   string
-	Logger     *log.Logger
-
-	FFmpegName      string
-	FFprobeName     string
-	Prober          pipeline.WorkerProber
-	Restart         func() error
-	Space           observability.SpaceProvider
-	RetentionPolicy *repository.RetentionPolicy
-
-	afterHTTPBind  func()
-	logCloser      func() error
-	cleanupOrphans func(*Service, context.Context) error
-	startupScan    func(*Service) error
 }
 
 type runtimeWatcher interface {
@@ -107,35 +82,21 @@ type runtimeWatcher interface {
 	Errors() <-chan error
 }
 
-type watcherFactory func([]string, func(string)) (runtimeWatcher, error)
-
 type Service struct {
-	cfg                      config.Config
-	cfgMu                    sync.RWMutex
-	configPath               string
-	db                       *repository.Repository
-	statusDB                 statusRepository
-	compatibilityCacheUpsert func(context.Context, repository.FileFacts) (repository.FileFacts, error)
-	fileByID                 func(context.Context, int64) (repository.FileFacts, error)
-	jobByID                  func(context.Context, int64) (repository.JobRecord, error)
-	ignoreJob                func(context.Context, int64) (repository.JobRecord, error)
-	enqueueExistingJobFn     func(string, pipeline.JobSource, int64) bool
-	enqueueScanCandidateFn   func(string) (enqueueDisposition, error)
-	evaluateSuppressionFn    func(context.Context, int64, int64, int64, int) (bool, error)
-	reconcilePresenceFn      func(context.Context, []int64, []int64, time.Time) error
-	events                   *eventbus.Bus
-	queue                    *pipeline.Queue
-	watcher                  runtimeWatcher
-	watcherMu                sync.Mutex
-	newWatcher               watcherFactory
-	server                   *http.Server
-	shutdownServer           func(context.Context) error
-	closeRepository          func() error
-	logger                   *log.Logger
-	logCloser                func() error
-	logPath                  string
-	space                    observability.SpaceProvider
-	retentionPolicy          repository.RetentionPolicy
+	cfg             config.Config
+	cfgMu           sync.RWMutex
+	configPath      string
+	db              *repository.Repository
+	events          *eventbus.Bus
+	queue           *pipeline.Queue
+	watcher         runtimeWatcher
+	watcherMu       sync.Mutex
+	server          *http.Server
+	logger          *log.Logger
+	logSink         io.Closer
+	logPath         string
+	space           observability.SpaceProvider
+	retentionPolicy repository.RetentionPolicy
 
 	backupRoot  string
 	workRoot    string
@@ -144,12 +105,9 @@ type Service struct {
 	ffmpegName  string
 	ffprobeName string
 	prober      pipeline.WorkerProber
-	restart     func() error
 
 	restoreProbeTimeout   time.Duration
 	restorePersistTimeout time.Duration
-	walkMediaRoot         func(string, fs.WalkDirFunc) error
-	removeOrphan          func(string) error
 
 	workerCtx       context.Context
 	cancelWorker    context.CancelFunc
@@ -177,7 +135,6 @@ type Service struct {
 	discoveryNextAt        time.Time
 	discoveryLastResult    *ReconciliationResult
 	discoveryRecovery      *RecoveryResult
-	reconciliationInterval func(config.Config) time.Duration
 }
 
 type workerJob struct {
@@ -223,22 +180,18 @@ func Run(ctx context.Context, opts Options) error {
 
 func Start(ctx context.Context, opts Options) (*Service, error) {
 	opts = withDefaults(opts)
-	if opts.Logger == nil {
-		logger, closeLogger, err := newFileLogger(opts.LogPath, os.Stderr)
-		if err != nil {
-			return nil, fmt.Errorf("open log file: %w", err)
-		}
-		opts.Logger = logger
-		opts.logCloser = closeLogger
+	logger, logSink, err := newFileLogger(opts.LogPath, os.Stderr)
+	if err != nil {
+		return nil, fmt.Errorf("open log file: %w", err)
 	}
 	cfg, err := config.LoadOrCreate(opts.ConfigPath)
 	if err != nil {
-		closeOptionsLog(opts)
+		_ = logSink.Close()
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 	repo, err := repository.Open(ctx, opts.DBPath)
 	if err != nil {
-		closeOptionsLog(opts)
+		_ = logSink.Close()
 		return nil, fmt.Errorf("open repository: %w", err)
 	}
 
@@ -249,28 +202,21 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 		db:                repo,
 		events:            eventbus.New(),
 		queue:             pipeline.NewQueue(),
-		logger:            opts.Logger,
-		logCloser:         opts.logCloser,
+		logger:            logger,
+		logSink:           logSink,
 		logPath:           opts.LogPath,
-		space:             opts.Space,
+		space:             diskSpaceProvider{},
 		retentionPolicy:   defaultRetentionPolicy,
 		backupRoot:        opts.BackupRoot,
 		workRoot:          opts.WorkRoot,
 		webDir:            opts.WebDir,
 		httpAddr:          opts.HTTPAddr,
-		ffmpegName:        opts.FFmpegName,
-		ffprobeName:       opts.FFprobeName,
-		prober:            opts.Prober,
-		restart:           opts.Restart,
+		ffmpegName:        "ffmpeg",
+		ffprobeName:       "ffprobe",
+		prober:            ffprobeProber{name: "ffprobe"},
 		workerCtx:         workerCtx,
 		cancelWorker:      cancelWorker,
 		pathMutationPaths: make(map[string]struct{}),
-	}
-	if service.space == nil {
-		service.space = diskSpaceProvider{}
-	}
-	if opts.RetentionPolicy != nil {
-		service.retentionPolicy = *opts.RetentionPolicy
 	}
 	service.accepting.Store(true)
 	service.restartState.Store(restartRunning)
@@ -279,32 +225,25 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 	listener, err := service.prepareHTTPServer()
 	if err != nil {
 		_ = repo.Close()
-		closeOptionsLog(opts)
+		_ = logSink.Close()
 		cancelWorker()
 		return nil, fmt.Errorf("start http server: %w", err)
-	}
-	if opts.afterHTTPBind != nil {
-		opts.afterHTTPBind()
 	}
 	if err := service.recoverReplacementJournals(ctx); err != nil {
 		_ = listener.Close()
 		_ = repo.Close()
-		closeOptionsLog(opts)
+		_ = logSink.Close()
 		cancelWorker()
 		return nil, fmt.Errorf("recover interrupted replacements: %w", err)
 	}
 	if err := RecoverStartup(ctx, repo); err != nil {
 		_ = listener.Close()
 		_ = repo.Close()
-		closeOptionsLog(opts)
+		_ = logSink.Close()
 		cancelWorker()
 		return nil, fmt.Errorf("recover startup jobs: %w", err)
 	}
-	cleanupOrphans := opts.cleanupOrphans
-	if cleanupOrphans == nil {
-		cleanupOrphans = func(service *Service, ctx context.Context) error { return service.cleanupOrphanTempOutputs(ctx) }
-	}
-	if err := cleanupOrphans(service, ctx); err != nil {
+	if err := service.cleanupOrphanTempOutputs(ctx); err != nil {
 		service.logf("startup temp cleanup failed: %v", err)
 	}
 	service.runRetention(ctx)
@@ -321,14 +260,7 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 	service.startRetentionLoop()
 	service.serveHTTP(listener)
 	if cfg.Scan.StartupScanEnabled {
-		startupScan := opts.startupScan
-		if startupScan == nil {
-			startupScan = func(service *Service) error {
-				_, _, err := service.startManagedScan(ScanSourceStartup, false)
-				return err
-			}
-		}
-		if err := startupScan(service); err != nil {
+		if _, _, err := service.startManagedScan(ScanSourceStartup, false); err != nil {
 			service.logf("startup scan failed: %v", err)
 		}
 	}
@@ -368,6 +300,9 @@ func (s *Service) recoverReplacementJournal(ctx context.Context, journal reposit
 		return err
 	}
 	if journal.Phase == repository.ReplacementManualRecovery {
+		if err := s.setRecoveryFailureDetails(ctx, journal.JobID, "manual_recovery", journal.LastError); err != nil {
+			return err
+		}
 		if file.BackupFile == journal.TemporaryBackupPath {
 			return nil
 		}
@@ -462,6 +397,9 @@ func (s *Service) finishInterruptedReplacement(ctx context.Context, journal repo
 	}
 	file.BackupFile = ""
 	finalError := "interrupted_replacement: " + reason
+	if err := s.setRecoveryFailureDetails(ctx, journal.JobID, "interrupted_replacement", finalError); err != nil {
+		return err
+	}
 	if _, _, err := s.db.FinishProcessJob(ctx, journal.JobID, file, repository.JobResultFailed, finalError); err != nil {
 		return err
 	}
@@ -474,11 +412,23 @@ func (s *Service) preserveManualRecovery(ctx context.Context, journal repository
 	}
 	file.BackupFile = journal.TemporaryBackupPath
 	finalError := "manual_recovery: " + reason
+	if err := s.setRecoveryFailureDetails(ctx, journal.JobID, "manual_recovery", finalError); err != nil {
+		return err
+	}
 	if _, _, err := s.db.FinishProcessJob(ctx, journal.JobID, file, repository.JobResultFailed, finalError); err != nil {
 		return err
 	}
 	s.logf("startup preserved replacement candidates file_id=%d path=%s backup=%s output=%s reason=%s", file.ID, file.Path, journal.TemporaryBackupPath, journal.OutputPath, reason)
 	return nil
+}
+
+func (s *Service) setRecoveryFailureDetails(ctx context.Context, jobID int64, code, detail string) error {
+	classification := failure.Classify(code, detail)
+	return s.db.SetJobFailureDetails(ctx, jobID, repository.FailureDetails{
+		Stage: classification.Stage, Category: string(classification.Category), Code: classification.Code,
+		Summary: classification.Summary, Advice: classification.Advice,
+		RetryStrategy: string(classification.Strategy), UnlockCondition: classification.UnlockCondition,
+	})
 }
 
 func (s *Service) applyRecoveryObservation(file *repository.FileFacts, observed recoveryObservation) {
@@ -540,34 +490,26 @@ func withDefaults(opts Options) Options {
 	if opts.HTTPAddr == "" {
 		opts.HTTPAddr = getenv("HTTP_ADDR", defaultHTTPAddr)
 	}
-	if opts.FFmpegName == "" {
-		opts.FFmpegName = getenv("FFMPEG_BIN", "ffmpeg")
-	}
-	if opts.FFprobeName == "" {
-		opts.FFprobeName = getenv("FFPROBE_BIN", "ffprobe")
-	}
-	if opts.Prober == nil {
-		opts.Prober = ffprobeProber{name: opts.FFprobeName}
-	}
-	if opts.Restart == nil {
-		opts.Restart = execSelf
-	}
 	return opts
 }
 
-func newFileLogger(path string, stderr io.Writer) (*log.Logger, func() error, error) {
+type nopLogSink struct{}
+
+func (nopLogSink) Close() error { return nil }
+
+func newFileLogger(path string, stderr io.Writer) (*log.Logger, io.Closer, error) {
 	if stderr == nil {
 		stderr = io.Discard
 	}
 	if path == "" {
-		return log.New(stderr, "audiocleaner: ", log.LstdFlags), func() error { return nil }, nil
+		return log.New(stderr, "audiocleaner: ", log.LstdFlags), nopLogSink{}, nil
 	}
 	file, err := observability.NewRotatingFileWriterWithAge(path, defaultLogMaxBytes, defaultLogBackups, defaultLogMaxAge)
 	if err != nil {
 		return nil, nil, err
 	}
 	writer := io.MultiWriter(stderr, file)
-	return log.New(writer, "audiocleaner: ", log.LstdFlags), file.Close, nil
+	return log.New(writer, "audiocleaner: ", log.LstdFlags), file, nil
 }
 
 func (s *Service) startRetentionLoop() {
@@ -603,12 +545,6 @@ func (s *Service) runRetention(ctx context.Context) {
 	}
 }
 
-func closeOptionsLog(opts Options) {
-	if opts.logCloser != nil {
-		_ = opts.logCloser()
-	}
-}
-
 func (s *Service) ScanAll(ctx context.Context) error {
 	_, _, err := s.startManagedScan(ScanSourceManual, false)
 	return err
@@ -626,18 +562,12 @@ func (s *Service) reloadWatcher(cfg config.Config) error {
 		return nil
 	}
 	mediaConfig := cfg.Media
-	createWatcher := s.newWatcher
-	if createWatcher == nil {
-		createWatcher = func(roots []string, onPath func(string)) (runtimeWatcher, error) {
-			return pipeline.NewFilteredWatcher(pipeline.ScanConfig{
-				Roots:           roots,
-				Extensions:      mediaConfig.Extensions,
-				ExcludeDirs:     mediaConfig.ExcludeDirs,
-				ExcludePatterns: mediaConfig.ExcludePatterns,
-			}, onPath)
-		}
-	}
-	candidate, err := createWatcher(mediaConfig.Roots, func(path string) {
+	candidate, err := pipeline.NewFilteredWatcher(pipeline.ScanConfig{
+		Roots:           mediaConfig.Roots,
+		Extensions:      mediaConfig.Extensions,
+		ExcludeDirs:     mediaConfig.ExcludeDirs,
+		ExcludePatterns: mediaConfig.ExcludePatterns,
+	}, func(path string) {
 		if isCandidatePathForMedia(path, mediaConfig) {
 			s.enqueueWithSource(path, pipeline.JobSourceWatchdog)
 		}
@@ -731,11 +661,17 @@ func (s *Service) processAttemptResult(task pipeline.QueueJob, result pipeline.A
 	classification := failure.Classify(failureCode(result.FinalError), result.LastError)
 	if processErr != nil && shouldRetryAttempt(classification, result) {
 		pipelineConfig := s.config().Pipeline
+		maxRetries := pipelineConfig.MaxRetries
+		if classification.Category == failure.SourceChanged && maxRetries < task.AttemptNumber {
+			// A source-version conflict is condition-gated reanalysis, not a retry of
+			// the discarded output. Keep waiting for each newly stable version.
+			maxRetries = task.AttemptNumber
+		}
 		retryScheduled = s.scheduleRetryFor(
 			task.Path,
 			failure.RetryDelay(pipelineConfig.RetryDelay(), task.AttemptNumber),
 			result.LastError,
-			pipelineConfig.MaxRetries,
+			maxRetries,
 			classification,
 			result.FinalFile.Size,
 		)
@@ -903,9 +839,9 @@ func (s *Service) RequestRestart(before, after config.Config) error {
 	s.cancelNonCriticalActiveJobs()
 	s.events.Publish("service.restarting", map[string]any{"status": "restarting"})
 	for attempt := 1; attempt <= 3; attempt++ {
-		if err := s.restart(); err != nil {
+		if err := execSelf(); err != nil {
 			s.logf("restart attempt %d failed: %v", attempt, err)
-			restartSleep(time.Duration(attempt) * 200 * time.Millisecond)
+			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
 			continue
 		}
 		return nil
@@ -940,23 +876,19 @@ func (s *Service) Status(ctx context.Context) (any, error) {
 	case restartFailed:
 		processStatus = "restart_failed"
 	}
-	statusDB := s.statusDB
-	if statusDB == nil {
-		statusDB = s.db
-	}
-	outcomeCounts, err := statusDB.JobOutcomeCounts(ctx)
+	outcomeCounts, err := s.db.JobOutcomeCounts(ctx)
 	if err != nil {
 		return nil, err
 	}
-	filesWithBackup, err := statusDB.FilesWithBackup(ctx)
+	filesWithBackup, err := s.db.FilesWithBackup(ctx)
 	if err != nil {
 		return nil, err
 	}
-	transcodeStats, err := statusDB.ProcessJobStats(ctx)
+	transcodeStats, err := s.db.ProcessJobStats(ctx)
 	if err != nil {
 		return nil, err
 	}
-	issues, err := statusDB.ActiveFailureIssues(ctx)
+	issues, err := s.db.ActiveFailureIssues(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1105,9 +1037,6 @@ func (s *Service) RetryHistoryJob(ctx context.Context, id int64) (any, error) {
 }
 
 func (s *Service) enqueueExistingJob(path string, source pipeline.JobSource, jobID int64) bool {
-	if s.enqueueExistingJobFn != nil {
-		return s.enqueueExistingJobFn(path, source, jobID)
-	}
 	return s.queue.EnqueueExistingJob(path, source, jobID)
 }
 
@@ -1119,11 +1048,7 @@ func (s *Service) IgnoreHistoryJob(ctx context.Context, id int64) (any, error) {
 	if job.Ignored || job.Result != repository.JobResultFailed {
 		return nil, api.ErrJobNotActionable
 	}
-	ignoreJob := s.ignoreJob
-	if ignoreJob == nil {
-		ignoreJob = s.db.IgnoreJob
-	}
-	ignored, err := ignoreJob(ctx, id)
+	ignored, err := s.db.IgnoreJob(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, api.ErrJobNotActionable
 	}
@@ -1226,6 +1151,13 @@ func (s *Service) RestoreFileBackup(ctx context.Context, id int64) (any, error) 
 	if journalErr != nil && !errors.Is(journalErr, sql.ErrNoRows) {
 		return nil, journalErr
 	}
+	var originalJob repository.JobRecord
+	if journalErr == nil {
+		originalJob, err = s.db.JobByID(ctx, journal.JobID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	cfg := s.config()
 	result, err := backup.Restore(backup.RestoreRequest{
 		OriginalPath: file.Path,
@@ -1253,7 +1185,18 @@ func (s *Service) RestoreFileBackup(ctx context.Context, id int64) (any, error) 
 		s.events.Publish("file.backup_restored", map[string]any{"file_id": file.ID, "path": file.Path})
 	}
 	_ = s.db.ResolveFailureIssue(ctx, file.ID)
-	_ = s.db.AddRecoveryAudit(ctx, repository.RecoveryAudit{FileID: file.ID, JobID: journal.JobID, Action: "restore", Source: "recovery_center", Result: "restored", Detail: backupPath})
+	audit := repository.RecoveryAudit{
+		FileID: file.ID, JobID: journal.JobID, Actor: "local_operator",
+		Action: "restore", Source: "recovery_center", Result: "succeeded", Detail: backupPath,
+	}
+	if journalErr == nil {
+		audit.OriginalJobID = originalJob.ID
+		audit.OriginalFailureCode = originalJob.FailureCode
+		audit.OriginalFailure = originalJob.FinalError
+	}
+	if err := s.db.AddRecoveryAudit(ctx, audit); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -1308,16 +1251,8 @@ func (s *Service) DeleteFileBackup(ctx context.Context, id int64) (any, error) {
 
 func (s *Service) cleanupOrphanTempOutputs(ctx context.Context) error {
 	cfg := s.config()
-	walkRoot := s.walkMediaRoot
-	if walkRoot == nil {
-		walkRoot = filepath.WalkDir
-	}
-	removeOrphan := s.removeOrphan
-	if removeOrphan == nil {
-		removeOrphan = os.Remove
-	}
 	for _, root := range cfg.Media.Roots {
-		if err := walkRoot(root, func(path string, entry os.DirEntry, err error) error {
+		if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
 					return nil
@@ -1335,7 +1270,7 @@ func (s *Service) cleanupOrphanTempOutputs(ctx context.Context) error {
 				return ctx.Err()
 			default:
 			}
-			if err := removeOrphan(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
 			return nil
@@ -1347,16 +1282,10 @@ func (s *Service) cleanupOrphanTempOutputs(ctx context.Context) error {
 }
 
 func (s *Service) loadFileByID(ctx context.Context, id int64) (repository.FileFacts, error) {
-	if s.fileByID != nil {
-		return s.fileByID(ctx, id)
-	}
 	return s.db.FileByID(ctx, id)
 }
 
 func (s *Service) loadJobByID(ctx context.Context, id int64) (repository.JobRecord, error) {
-	if s.jobByID != nil {
-		return s.jobByID(ctx, id)
-	}
 	return s.db.JobByID(ctx, id)
 }
 
@@ -1479,11 +1408,7 @@ func serviceCapacitySnapshot(space observability.SpaceProvider, backupRoot, work
 	return result
 }
 
-type diskSpaceProvider struct {
-	stat   func(string) (os.FileInfo, error)
-	statfs func(string, *syscall.Statfs_t) error
-	access func(string, uint32) error
-}
+type diskSpaceProvider struct{}
 
 const (
 	accessExecute uint32 = 1
@@ -1492,17 +1417,9 @@ const (
 )
 
 func (provider diskSpaceProvider) AvailableBytes(path string) (int64, error) {
-	stat := provider.stat
-	if stat == nil {
-		stat = os.Stat
-	}
-	statfs := provider.statfs
-	if statfs == nil {
-		statfs = syscall.Statfs
-	}
 	current := filepath.Clean(path)
 	for {
-		if _, err := stat(current); err == nil {
+		if _, err := os.Stat(current); err == nil {
 			break
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return 0, err
@@ -1514,23 +1431,15 @@ func (provider diskSpaceProvider) AvailableBytes(path string) (int64, error) {
 		current = parent
 	}
 	var stats syscall.Statfs_t
-	if err := statfs(current, &stats); err != nil {
+	if err := syscall.Statfs(current, &stats); err != nil {
 		return 0, err
 	}
 	return int64(stats.Bavail) * int64(stats.Bsize), nil
 }
 
 func (provider diskSpaceProvider) CheckCapability(path, capability string) error {
-	stat := provider.stat
-	if stat == nil {
-		stat = os.Stat
-	}
-	access := provider.access
-	if access == nil {
-		access = syscall.Access
-	}
 	current := filepath.Clean(path)
-	info, err := stat(current)
+	info, err := os.Stat(current)
 	if err != nil {
 		if capability == "media" || !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("check %s path %s: %w", capability, path, err)
@@ -1541,7 +1450,7 @@ func (provider diskSpaceProvider) CheckCapability(path, capability string) error
 				return fmt.Errorf("no existing parent for %s", path)
 			}
 			current = parent
-			info, err = stat(current)
+			info, err = os.Stat(current)
 		}
 		if err != nil {
 			return fmt.Errorf("check %s path %s: %w", capability, path, err)
@@ -1553,28 +1462,28 @@ func (provider diskSpaceProvider) CheckCapability(path, capability string) error
 		if !info.IsDir() {
 			return fmt.Errorf("%s path is not a directory: %s", capability, current)
 		}
-		if err := access(current, accessWrite|accessExecute); err != nil {
+		if err := syscall.Access(current, accessWrite|accessExecute); err != nil {
 			return fmt.Errorf("%s path is not writable: %w", capability, err)
 		}
 	case "media":
 		if info.IsDir() {
-			if err := access(current, accessRead|accessWrite|accessExecute); err != nil {
+			if err := syscall.Access(current, accessRead|accessWrite|accessExecute); err != nil {
 				return fmt.Errorf("media directory is not readable and writable: %w", err)
 			}
 			return nil
 		}
-		if err := access(current, accessRead); err != nil {
+		if err := syscall.Access(current, accessRead); err != nil {
 			return fmt.Errorf("media file is not readable: %w", err)
 		}
 		parent := filepath.Dir(current)
-		parentInfo, err := stat(parent)
+		parentInfo, err := os.Stat(parent)
 		if err != nil {
 			return fmt.Errorf("check media parent %s: %w", parent, err)
 		}
 		if !parentInfo.IsDir() {
 			return fmt.Errorf("media parent is not a directory: %s", parent)
 		}
-		if err := access(parent, accessWrite|accessExecute); err != nil {
+		if err := syscall.Access(parent, accessWrite|accessExecute); err != nil {
 			return fmt.Errorf("media directory is not writable: %w", err)
 		}
 	default:
@@ -1627,6 +1536,10 @@ func (s *Service) recordFailureIssue(ctx context.Context, result pipeline.Attemp
 			s.logf("record job failure details job_id=%d: %v", result.JobID, err)
 		}
 	}
+	maxAttempts := s.config().Pipeline.MaxRetries + 1
+	if classification.Category == failure.SourceChanged {
+		maxAttempts = 0
+	}
 	_, err := s.db.RecordFailureIssue(ctx, repository.FailureIssue{
 		FileID: result.FileID, OriginJobID: result.JobID, Stage: classification.Stage,
 		Category: string(classification.Category), Code: classification.Code,
@@ -1634,7 +1547,7 @@ func (s *Service) recordFailureIssue(ctx context.Context, result pipeline.Attemp
 		RetryStrategy: string(classification.Strategy), UnlockCondition: classification.UnlockCondition,
 		NextRetryAt: nextRetryAt, FileSize: result.FinalFile.Size, FileMTimeNS: result.FinalFile.MTimeNS,
 		PolicyVersion: policyVersion, LastAttemptSource: string(task.Source), AttemptNumber: task.AttemptNumber,
-		MaxAttempts: s.config().Pipeline.MaxRetries + 1,
+		MaxAttempts: maxAttempts,
 	})
 	if err != nil {
 		s.logf("record failure governance job_id=%d: %v", result.JobID, err)
@@ -1993,7 +1906,7 @@ func (p ffprobeProber) Probe(ctx context.Context, path string) (media.ProbeData,
 }
 
 func execSelf() error {
-	return systemExec(os.Args[0], os.Args, os.Environ())
+	return syscall.Exec(os.Args[0], os.Args, os.Environ())
 }
 
 func tailLogFile(ctx context.Context, path string, lineLimit int) (string, int, error) {

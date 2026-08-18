@@ -429,30 +429,7 @@ onBeforeUnmount(() => {
       <section class="dashboard-metric dashboard-metric--success panel"><span class="dashboard-metric__label">{{ t('dashboardSuccessRate') }}</span><strong class="dashboard-metric__value">{{ successRate }}</strong></section>
     </div>
 
-    <section v-if="status" class="dashboard-health-panel panel" :data-status="status.status" data-testid="dashboard-business-health">
-      <header class="dashboard-health-header">
-        <div><h2>{{ t('dashboardHealthTitle') }}</h2><strong>{{ serviceStatusLabel(status.status) }}</strong></div>
-        <span>{{ status.intake_accepting ? t('serviceStatusNormal') : serviceStatusLabel(status.status) }}</span>
-      </header>
-      <div v-if="status.health_reasons.length" class="dashboard-health-reasons">
-        <div v-for="reason in status.health_reasons" :key="reason.code" class="dashboard-health-reason">
-          <strong>{{ reason.summary }}</strong>
-          <span>{{ t('dashboardAffectedCapability') }}: {{ reason.affected_capability }}</span>
-          <span>{{ t('dashboardSuggestedAction') }}: {{ reason.advice }}</span>
-        </div>
-      </div>
-      <div v-else class="dashboard-health-normal">{{ t('dashboardHealthNormal') }}</div>
-      <div class="dashboard-capacity-list">
-        <div v-for="(volume, index) in status.capacity.volumes" :key="`${volume.capability}:${volume.path}:${index}`" class="dashboard-capacity-row" :data-ready="volume.ready">
-          <strong>{{ capacityLabel(volume.capability) }}</strong>
-          <span :title="volume.path">{{ volume.path }}</span>
-          <span>{{ t('dashboardCapacityAvailable') }} {{ formatBytes(volume.available_bytes) }}</span>
-          <span>{{ t('dashboardCapacityRequired') }} {{ formatBytes(volume.required_bytes) }}</span>
-        </div>
-      </div>
-    </section>
-
-    <section v-if="scan" class="dashboard-scan-panel panel" data-testid="dashboard-current-scan">
+    <section v-if="scan" class="dashboard-scan-panel panel" data-ui="dashboard-current-scan">
       <header class="dashboard-scan-header">
         <div class="dashboard-scan-title">
           <h2>{{ t('dashboardCurrentScan') }}</h2>
@@ -461,8 +438,8 @@ onBeforeUnmount(() => {
           <span v-if="scan.scan_id" class="dashboard-scan-id">{{ scan.scan_id }}</span>
         </div>
         <div class="dashboard-scan-actions">
-          <button v-if="!scanActive" type="button" class="button primary" data-testid="dashboard-quick-scan" :disabled="scanLoading || loading" @click="quickScan"><ScanSearch aria-hidden="true" />{{ t('dashboardQuickScan') }}</button>
-          <button v-else type="button" class="button danger" data-testid="dashboard-cancel-scan" :disabled="scan.status === 'cancelling' || cancelLoading" @click="cancelDialogOpen = true"><CircleStop aria-hidden="true" />{{ t('dashboardCancelScan') }}</button>
+          <button v-if="!scanActive" type="button" class="button primary" data-ui="dashboard-quick-scan" :disabled="scanLoading || loading" @click="quickScan"><ScanSearch aria-hidden="true" />{{ t('dashboardQuickScan') }}</button>
+          <button v-else type="button" class="button danger" data-ui="dashboard-cancel-scan" :disabled="scan.status === 'cancelling' || cancelLoading" @click="cancelDialogOpen = true"><CircleStop aria-hidden="true" />{{ t('dashboardCancelScan') }}</button>
         </div>
       </header>
 
@@ -498,7 +475,7 @@ onBeforeUnmount(() => {
       <div v-if="scan.last_error" class="dashboard-scan-error"><span>{{ t('dashboardScanRecentError') }}</span><strong>{{ scan.last_error }}</strong></div>
     </section>
 
-    <section v-if="discovery" class="dashboard-discovery-panel panel" data-testid="dashboard-discovery-status">
+    <section v-if="discovery" class="dashboard-discovery-panel panel" data-ui="dashboard-discovery-status">
       <header class="dashboard-discovery-header">
         <div class="dashboard-discovery-title"><Radar aria-hidden="true" /><h2>{{ t('dashboardDiscoveryTitle') }}</h2></div>
         <span class="dashboard-discovery-overall" :data-status="discovery.status">{{ discoveryHealthy ? t('dashboardDiscoveryHealthy') : t('dashboardDiscoveryLimited') }}</span>
@@ -511,7 +488,7 @@ onBeforeUnmount(() => {
       <div v-if="discovery.recovery" class="dashboard-discovery-recovery"><CircleCheck aria-hidden="true" /><span>{{ formatClock(discovery.recovery.detected_at) }} {{ discovery.recovery.status === 'completed' ? t('dashboardDiscoveryRecoveryCompleted') : t('dashboardDiscoveryRecoveryScheduled') }}</span><strong>{{ recoveryStatusLabel() }}</strong></div>
     </section>
 
-    <section v-if="runtimeTasks" class="dashboard-task-panel panel" data-testid="dashboard-task-queue">
+    <section v-if="runtimeTasks" class="dashboard-task-panel panel" data-ui="dashboard-task-queue">
       <div class="dashboard-task-tabbar">
         <div class="dashboard-task-tabs" role="tablist">
           <button type="button" role="tab" class="dashboard-task-tab" :class="{ 'dashboard-task-tab--active': dashboardTaskTab === 'waiting' }" :aria-selected="dashboardTaskTab === 'waiting'" @click="selectDashboardTaskTab('waiting')">{{ t('dashboardTaskWaitingTab') }} {{ waitingTaskCount }}</button>
@@ -540,15 +517,32 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <div v-if="config" class="dashboard-sections">
-      <section class="panel"><div class="panel-body"><h2>{{ t('dashboardMediaRoots') }}</h2><ul class="plain-list"><li v-for="root in mediaRoots" :key="root">{{ root }}</li><li v-if="mediaRoots.length === 0" class="muted">{{ t('dashboardEmptyValue') }}</li></ul></div></section>
-    </div>
+    <section v-if="status" class="dashboard-health-panel panel" :data-status="status.status" data-ui="dashboard-business-health">
+      <header class="dashboard-health-header">
+        <div><h2>{{ t('dashboardHealthTitle') }}</h2><strong>{{ serviceStatusLabel(status.status) }}</strong><span v-if="status.health_reasons.length === 0">{{ t('dashboardHealthNormal') }}</span></div>
+      </header>
+      <div v-if="status.health_reasons.length" class="dashboard-health-reasons">
+        <div v-for="reason in status.health_reasons" :key="reason.code" class="dashboard-health-reason">
+          <strong>{{ reason.summary }}</strong>
+          <span>{{ t('dashboardAffectedCapability') }}: {{ reason.affected_capability }}</span>
+          <span>{{ t('dashboardSuggestedAction') }}: {{ reason.advice }}</span>
+        </div>
+      </div>
+      <div class="dashboard-capacity-list">
+        <div v-for="(volume, index) in status.capacity.volumes" :key="`${volume.capability}:${volume.path}:${index}`" class="dashboard-capacity-row" :data-ready="volume.ready">
+          <strong>{{ capacityLabel(volume.capability) }}</strong>
+          <span :title="volume.path">{{ volume.path }}</span>
+          <span>{{ t('dashboardCapacityAvailable') }} {{ formatBytes(volume.available_bytes) }}</span>
+          <span>{{ t('dashboardCapacityRequired') }} {{ formatBytes(volume.required_bytes) }}</span>
+        </div>
+      </div>
+    </section>
 
     <div v-if="cancelDialogOpen" class="dashboard-dialog-overlay" role="presentation" @click.self="cancelDialogOpen = false">
       <section class="dashboard-scan-dialog" role="dialog" aria-modal="true" :aria-label="t('dashboardCancelDialogTitle')">
         <header><CircleStop aria-hidden="true" /><h2>{{ t('dashboardCancelDialogTitle') }}</h2></header>
         <div class="dashboard-scan-dialog__body"><p>{{ t('dashboardCancelDialogMessage') }}</p><div class="dashboard-scan-dialog__impact"><div><span>{{ t('dashboardCancelStops') }}</span><strong>{{ t('dashboardCancelStopsValue') }}</strong></div><div><span>{{ t('dashboardCancelContinues') }}</span><strong>{{ t('dashboardCancelContinuesValue') }}</strong></div></div></div>
-        <footer><button type="button" class="button" @click="cancelDialogOpen = false">{{ t('dashboardKeepScanning') }}</button><button type="button" class="button danger" :disabled="cancelLoading" data-testid="dashboard-confirm-cancel-scan" @click="confirmCancelScan">{{ t('dashboardStopDiscovery') }}</button></footer>
+        <footer><button type="button" class="button" @click="cancelDialogOpen = false">{{ t('dashboardKeepScanning') }}</button><button type="button" class="button danger" :disabled="cancelLoading" data-ui="dashboard-confirm-cancel-scan" @click="confirmCancelScan">{{ t('dashboardStopDiscovery') }}</button></footer>
       </section>
     </div>
 
