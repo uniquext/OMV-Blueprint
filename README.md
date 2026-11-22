@@ -83,6 +83,8 @@ OMV/
 | 05-7 | [iperf3 网络带宽测试工具](docs/05-容器与应用服务/Iperf3/说明.md) | ✅ |
 | 05-8 | [AdGuardHome 私有局域网 DNS 服务](docs/05-容器与应用服务/AdGuardHome/说明.md) | ✅ |
 | 05-9 | [Tailscale 极速安全的虚拟内网](docs/05-容器与应用服务/Tailscale/说明.md) | ✅ |
+| 05-10 | [MediaTools 媒体后处理自动化套件](docs/05-容器与应用服务/MediaTools/说明.md) | ✅ |
+| 05-11 | [OctoPrint 3D 打印机控制与切片管理](docs/05-容器与应用服务/OctoPrint/说明.md) | ✅ |
 
 ---
 

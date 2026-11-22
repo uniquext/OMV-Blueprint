@@ -9,8 +9,19 @@ Host = "${QBITTORRENT_HOSTNAME}"
 Port = ${QBITTORRENT_PORT}
 UserName = "${TARGET_USER}"
 Password = "${TARGET_PASS}"
-# 仅管理这些分类的任务，保护手动添加的种子
-ManagedCategories = []
+# 管理这些分类下的种子（非 Arr 实例管理的分类）
+# 注意：此处列出的分类走 [qBit.CategorySeeding] 策略，不具备 MaximumDeletablePercentage 保护
+ManagedCategories = ["prowlarr", "whisparr"]
+
+# 分类托管模式的做种与失速策略
+# 仅对 ManagedCategories 中列出的分类生效，不影响 Sonarr/Radarr 等 Arr 实例
+[qBit.CategorySeeding]
+# 【禁用失速删除】分类托管模式不支持 MaximumDeletablePercentage（进度保护），
+# 如果启用 StalledDelay，失速种子会被无条件删除，无论下载进度多少。
+# 设为 -1 彻底禁用，由用户手动管理这些分类下的死种。
+StalledDelay = -1
+# 种子添加后的免疫期（秒），在此期间不会被判定为失速
+IgnoreTorrentsYoungerThan = 600
 
 [Settings]
 # 全局扫描间隔（秒）

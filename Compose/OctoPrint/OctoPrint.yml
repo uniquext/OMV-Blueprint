@@ -1,0 +1,29 @@
+# OctoPrint - 3D 打印机 Web 远程控制与切片管理服务
+# 端口: 8085 -> 80 (Bridge 模式映射)
+
+services:
+  octoprint:
+    image: octoprint/octoprint:latest
+    container_name: octoprint
+    hostname: octoprint
+    restart: unless-stopped
+    ports:
+      - "8085:80"
+    devices:
+      # 3D 打印机物理串口映射 (请根据宿主机 ls /dev/serial/by-id/ 实际输出替换，避免重启后设备号漂移)
+      - /dev/serial/by-id/<your-printer-serial-id>:/dev/ttyUSB0
+    environment:
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+      # 外部代理配置 (用于 GitHub 插件商店与元数据拉取)
+      HTTP_PROXY: ${PROXY_HTTP}
+      HTTPS_PROXY: ${PROXY_HTTPS}
+      NO_PROXY: ${NO_PROXY}
+      # 无摄像头时关闭内置推流服务以节省资源
+      ENABLE_MJPG_STREAMER: "false"
+    volumes:
+      # 本地时间同步
+      - ${LOCALTIME_PATH}:/etc/localtime:ro
+      # 数据存储与配置目录 (Service Local)
+      - ./octoprint:/octoprint
